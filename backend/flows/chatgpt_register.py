@@ -91,13 +91,20 @@ def run(ctx: JobContext) -> None:
         "fixed_email": requested_email or None,
         "fixed_password": requested_password or None,
     })
+    register_max_retries = _read_int_config(
+        merged_extra,
+        "register_max_retries",
+        default=3,
+        minimum=1,
+        maximum=10,
+    )
 
     engine_obj = AccessTokenOnlyRegistrationEngine(
         email_service=email_service,
         proxy_url=proxy_url or None,
         browser_mode=str(merged_extra.get("chatgpt_browser_mode") or "protocol"),
         callback_logger=_emit_log,
-        max_retries=1,
+        max_retries=register_max_retries,
         extra_config=merged_extra,
     )
     if requested_email:
@@ -125,7 +132,10 @@ def run(ctx: JobContext) -> None:
         })
 
     if not result.success:
-        _release_email_back_to_pool(email_service, ctx, reason=result.error_message or "register failed")
+        if _result_consumed_email(result):
+            _consume_email(email_service, ctx, note="registered_before_failure")
+        else:
+            _release_email_back_to_pool(email_service, ctx, reason=result.error_message or "register failed")
         ctx.log(f"register failed: {result.error_message}", level="error")
         raise RuntimeError(result.error_message or "register failed")
 
@@ -145,6 +155,26 @@ def run(ctx: JobContext) -> None:
             ctx.log(f"access_token_accounts row created id={at_id}")
 
     ctx.log("register succeeded", payload={"account_id": account_id})
+
+
+def _read_int_config(
+    values: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        parsed = int(values.get(key))
+    except Exception:
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _result_consumed_email(result) -> bool:
+    metadata = dict(getattr(result, "metadata", None) or {})
+    return bool(metadata.get("mailbox_account_consumed"))
 
 
 def _release_email_back_to_pool(email_service, ctx, *, reason: str) -> None:

@@ -72,6 +72,31 @@ class AccessTokenOnlyRegistrationEngine:
         else:
             logger.info(log_message)
 
+    def _read_int_config(
+        self,
+        primary_key: str,
+        *,
+        fallback_keys: tuple[str, ...] = (),
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        keys = (primary_key, *tuple(fallback_keys or ()))
+        for key in keys:
+            if key not in self.extra_config:
+                continue
+            try:
+                parsed = int(self.extra_config.get(key))
+            except Exception:
+                continue
+            return max(minimum, min(parsed, maximum))
+        return max(minimum, min(int(default), maximum))
+
+    def _mark_email_consumed_after_signup(self, result: RegistrationResult) -> None:
+        metadata = dict(result.metadata or {})
+        metadata["mailbox_account_consumed"] = True
+        result.metadata = metadata
+
     def _should_retry(self, message: str) -> bool:
         text = str(message or "").lower()
         retriable_markers = [
@@ -79,6 +104,8 @@ class AccessTokenOnlyRegistrationEngine:
             "ssl",
             "curl: (35)",
             "预授权被拦截",
+            "chatgpt 入口预热失败",
+            "入口预热失败",
             "authorize",
             "registration_disallowed",
             "http 400",
@@ -99,12 +126,31 @@ class AccessTokenOnlyRegistrationEngine:
         result = RegistrationResult(success=False, logs=self.logs)
         try:
             last_error = ""
+            register_otp_wait_seconds = self._read_int_config(
+                "chatgpt_register_otp_wait_seconds",
+                fallback_keys=("chatgpt_otp_wait_seconds",),
+                default=600,
+                minimum=30,
+                maximum=3600,
+            )
+            register_otp_resend_wait_seconds = self._read_int_config(
+                "chatgpt_register_otp_resend_wait_seconds",
+                fallback_keys=("chatgpt_register_otp_wait_seconds", "chatgpt_otp_wait_seconds"),
+                default=300,
+                minimum=30,
+                maximum=3600,
+            )
             for attempt in range(self.max_retries):
                 try:
                     if attempt == 0:
                         self._log("=" * 60)
                         self._log("开始注册流程 V2 (Session 复用直取 AccessToken)")
                         self._log(f"请求模式: {self.browser_mode}")
+                        self._log(
+                            "验证码等待策略: "
+                            f"register_wait={register_otp_wait_seconds}s, "
+                            f"register_resend_wait={register_otp_resend_wait_seconds}s"
+                        )
                         self._log("=" * 60)
                     else:
                         self._log(f"整流程重试 {attempt + 1}/{self.max_retries} ...")
@@ -143,7 +189,14 @@ class AccessTokenOnlyRegistrationEngine:
                     self._log("步骤 1/2: 执行注册状态机...")
 
                     success, msg = chatgpt_client.register_complete_flow(
-                        email_addr, pwd, first_name, last_name, birthdate, skymail_adapter
+                        email_addr,
+                        pwd,
+                        first_name,
+                        last_name,
+                        birthdate,
+                        skymail_adapter,
+                        otp_wait_timeout=register_otp_wait_seconds,
+                        otp_resend_wait_timeout=register_otp_resend_wait_seconds,
                     )
 
                     if not success:
@@ -154,6 +207,7 @@ class AccessTokenOnlyRegistrationEngine:
                         result.error_message = last_error
                         return result
 
+                    self._mark_email_consumed_after_signup(result)
                     self._log("步骤 2/2: 复用注册会话，直接获取 ChatGPT Session / AccessToken...")
                     session_ok, session_result = chatgpt_client.reuse_session_and_get_tokens()
 
@@ -169,6 +223,7 @@ class AccessTokenOnlyRegistrationEngine:
                         )
                         result.workspace_id = session_result.get("workspace_id", "")
                         result.metadata = {
+                            **(result.metadata or {}),
                             "auth_provider": session_result.get("auth_provider", ""),
                             "expires": session_result.get("expires", ""),
                             "user_id": session_result.get("user_id", ""),
