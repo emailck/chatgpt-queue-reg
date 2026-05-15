@@ -24,11 +24,8 @@ import tempfile
 import shutil
 import json
 import re
-import hashlib
-import base64
-import secrets
 from typing import Optional
-from urllib.parse import urlparse, urlencode, parse_qs
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -47,16 +44,6 @@ def _gen_birthday() -> tuple[str, str, str]:
     month = random.randint(1, 12)
     day = random.randint(1, 28)
     return str(month).zfill(2), str(day).zfill(2), str(year)
-
-
-def _b64url_no_pad(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-
-def _build_pkce_pair(raw_bytes: int = 64) -> tuple[str, str]:
-    verifier = _b64url_no_pad(secrets.token_bytes(raw_bytes))
-    challenge = _b64url_no_pad(hashlib.sha256(verifier.encode()).digest())
-    return verifier, challenge
 
 
 def _parse_proxy(proxy_url: str):
@@ -564,127 +551,6 @@ def browser_register(cfg, mail_provider) -> dict:
                 f"[browser-reg] session_token={'yes' if result['session_token'] else 'no'} "
                 f"device_id={result['device_id'][:16]}..."
             )
-
-            # [10] Codex OAuth 获取 refresh_token
-            # 已知限制: signup 完成后 auth.openai.com 的 hydra session 无法给 Codex 换 token
-            # (login_session 只是 signup 挑战态，不是完整用户会话)
-            # 当前 refresh_token 会为空；如需 refresh_token，需要登录账号重走 Codex OAuth
-            #
-            # 经实证（2026-04 近期 daemon + self-dealer 全量日志），signup-state Codex OAuth
-            # 100% 返回 token_exchange_user_error，每次浪费 ~30s。默认跳过；如需保留旧路径
-            # 作为逆向参考，设 SKIP_SIGNUP_CODEX_RT=0。后续 _exchange_refresh_token_with_session
-            # (card.py) 或 self-dealer 的 member 重登会正常拿 RT。
-            if str(os.environ.get("SKIP_SIGNUP_CODEX_RT", "1")).lower() in ("1", "true", "yes", "on"):
-                logger.info("[browser-reg] 跳过 signup 态 Codex OAuth（SKIP_SIGNUP_CODEX_RT=1，已知 100% 失败）")
-                result["refresh_token"] = result.get("refresh_token", "") or ""
-            else:
-                try:
-                    codex_client_id = (os.getenv("OAUTH_CODEX_CLIENT_ID", "") or "").strip() or "app_EMoamEEZ73f0CkXaXp7hrann"
-                    codex_redirect = "http://localhost:1455/auth/callback"
-                    codex_scope = "openid email profile offline_access"
-                    codex_state = _b64url_no_pad(secrets.token_bytes(24))
-                    verifier, challenge = _build_pkce_pair()
-                    auth_params = {
-                        "client_id": codex_client_id,
-                        "response_type": "code",
-                        "redirect_uri": codex_redirect,
-                        "scope": codex_scope,
-                        "state": codex_state,
-                        "code_challenge": challenge,
-                        "code_challenge_method": "S256",
-                        "id_token_add_organizations": "true",
-                        "codex_cli_simplified_flow": "true",
-                        # 不加 prompt=none: session 已经通过浏览器注册建立，
-                        # 让服务器自动识别 session，有 consent 页面时自动 auto-approve
-                    }
-                    auth_url = f"https://auth.openai.com/oauth/authorize?{urlencode(auth_params)}"
-                    logger.info("[browser-reg] Codex OAuth 获取 refresh_token ...")
-                    # 真浏览器 goto + route 拦截 localhost
-                    cb_url = ""
-                    callback_holder = {"url": ""}
-
-                    def _codex_intercept(route):
-                        url = route.request.url
-                        if "localhost:1455" in url and "code=" in url:
-                            callback_holder["url"] = url
-                            logger.info(f"[browser-reg] 拦截到 Codex callback: {url[:150]}")
-                        try:
-                            route.fulfill(status=200, content_type="text/html", body="<html>OK</html>")
-                        except Exception:
-                            try: route.abort()
-                            except: pass
-
-                    page.route("**/localhost:1455/**", _codex_intercept)
-                    page.route("http://localhost:1455/**", _codex_intercept)
-                    page.route("**localhost:1455**", _codex_intercept)
-
-                    try:
-                        page.goto(auth_url, wait_until="commit", timeout=30000)
-                    except Exception as e_nav:
-                        logger.info(f"[browser-reg] Codex goto: {str(e_nav)[:120]}")
-
-                    for _ in range(30):
-                        if callback_holder["url"]:
-                            break
-                        if "localhost:1455" in page.url and "code=" in page.url:
-                            callback_holder["url"] = page.url
-                            break
-                        time.sleep(0.5)
-
-                    try:
-                        page.unroute("**/localhost:1455/**")
-                        page.unroute("http://localhost:1455/**")
-                        page.unroute("**localhost:1455**")
-                    except Exception:
-                        pass
-
-                    cb_url = callback_holder["url"]
-                    logger.info(f"[browser-reg] Codex callback URL: {cb_url[:150] if cb_url else '<空>'}")
-                    if not cb_url:
-                        logger.info(f"[browser-reg] 当前 page.url: {page.url[:200]}")
-                    if cb_url:
-                        qs = parse_qs(urlparse(cb_url).query)
-                        code = (qs.get("code") or [""])[0]
-                        if code:
-                            logger.info(f"[browser-reg] 获得 auth code, 换 refresh_token ...")
-                            import curl_cffi.requests as cr
-                            http_token = cr.Session(impersonate="chrome136")
-                            if cf_proxy and cf_proxy.get("server"):
-                                pu = cf_proxy["server"]
-                                http_token.proxies = {"http": pu, "https": pu}
-                            resp_token = http_token.post(
-                                "https://auth.openai.com/oauth/token",
-                                data={
-                                    "grant_type": "authorization_code",
-                                    "client_id": codex_client_id,
-                                    "code": code,
-                                    "redirect_uri": codex_redirect,
-                                    "code_verifier": verifier,
-                                },
-                                headers={
-                                    "Content-Type": "application/x-www-form-urlencoded",
-                                    "Accept": "application/json",
-                                },
-                                timeout=30,
-                            )
-                            logger.info(f"[browser-reg] /oauth/token: {resp_token.status_code}")
-                            if resp_token.status_code == 200:
-                                try:
-                                    tj = resp_token.json()
-                                    result["refresh_token"] = tj.get("refresh_token", "") or ""
-                                    if tj.get("access_token"):
-                                        result["codex_access_token"] = tj["access_token"]
-                                    logger.info(f"[browser-reg] refresh_token 长度: {len(result['refresh_token'])}")
-                                except Exception as e_tok:
-                                    logger.warning(f"[browser-reg] 解析 token 响应失败: {e_tok}")
-                            else:
-                                logger.warning(f"[browser-reg] token 交换失败: {resp_token.status_code} {resp_token.text[:200]}")
-                        else:
-                            logger.warning(f"[browser-reg] callback 无 code: {cb_url[:120]}")
-                    else:
-                        logger.warning("[browser-reg] 未捕获到 callback URL")
-                except Exception as e_codex:
-                    logger.warning(f"[browser-reg] Codex OAuth 异常: {e_codex}")
 
             if not result["access_token"] or not result["session_token"]:
                 page.screenshot(path="/tmp/browser_reg_missing_token.png")

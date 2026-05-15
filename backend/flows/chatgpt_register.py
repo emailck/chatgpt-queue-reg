@@ -1,7 +1,7 @@
 """ChatGPT registration flow.
 
-Wraps the legacy `RefreshTokenRegistrationEngine` and writes the resulting
-account/cookies/fingerprint into the new `chatgpt_accounts` table.
+Runs the access-token-only ChatGPT registration engine and writes the resulting
+account/session metadata into the new `chatgpt_accounts` table.
 
 Email module integration for now is the only-microsoft variant: when the
 caller wants the registrar to source a fresh email, we expect the Microsoft
@@ -60,13 +60,10 @@ def run(ctx: JobContext) -> None:
     )
 
     # Lazy import: the engine pulls in heavy modules (curl_cffi, playwright).
-    from backend.integrations.chatgpt.chatgpt_registration_mode_adapter import (
-        CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
-        CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
-        ChatGPTRegistrationContext,
-        build_chatgpt_registration_mode_adapter,
+    from backend.integrations.chatgpt.access_token_only_registration_engine import (
+        AccessTokenOnlyRegistrationEngine,
     )
-    from backend.integrations.chatgpt.refresh_token_registration_engine import RegistrationResult
+    from backend.integrations.chatgpt.registration_result import RegistrationResult
 
     cancel_event = threading.Event()
 
@@ -85,11 +82,6 @@ def run(ctx: JobContext) -> None:
 
     merged_extra = {**settings.get_all(), **extra_config}
     register_only = _is_register_only_pipeline(ctx.pipeline_id)
-    if register_only:
-        merged_extra["chatgpt_registration_mode"] = CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY
-        merged_extra["chatgpt_has_refresh_token_solution"] = False
-    else:
-        merged_extra.setdefault("chatgpt_registration_mode", CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN)
     if requested_email:
         merged_extra["chatgpt_register_fixed_email"] = requested_email
     if requested_password:
@@ -100,20 +92,22 @@ def run(ctx: JobContext) -> None:
         "fixed_password": requested_password or None,
     })
 
-    adapter = build_chatgpt_registration_mode_adapter(merged_extra)
-    ctx.log(f"ChatGPT registration mode: {adapter.mode}")
+    engine_obj = AccessTokenOnlyRegistrationEngine(
+        email_service=email_service,
+        proxy_url=proxy_url or None,
+        browser_mode=str(merged_extra.get("chatgpt_browser_mode") or "protocol"),
+        callback_logger=_emit_log,
+        max_retries=1,
+        extra_config=merged_extra,
+    )
+    if requested_email:
+        engine_obj.email = requested_email
+    if requested_password:
+        engine_obj.password = requested_password
+    ctx.log("ChatGPT registration mode: access_token_only")
 
     try:
-        result: RegistrationResult = adapter.run(ChatGPTRegistrationContext(
-            email_service=email_service,
-            proxy_url=proxy_url or None,
-            callback_logger=_emit_log,
-            email=requested_email or None,
-            password=requested_password or None,
-            browser_mode=str(merged_extra.get("chatgpt_browser_mode") or "protocol"),
-            max_retries=1,
-            extra_config=merged_extra,
-        ))
+        result: RegistrationResult = engine_obj.run()
     except Exception:
         _release_email_back_to_pool(email_service, ctx, reason="register exception")
         raise
@@ -219,7 +213,7 @@ def _persist_account(result, *, proxy_url: str) -> int | None:
             account_id=result.account_id or "",
             workspace_id=result.workspace_id or "",
             access_token=result.access_token or "",
-            refresh_token=result.refresh_token or "",
+            refresh_token="",
             id_token=result.id_token or "",
             session_token=result.session_token or "",
             cookies_json=json_dumps(cookies or []),
@@ -282,7 +276,7 @@ def _persist_access_token_account(
             account_id=result.account_id or "",
             workspace_id=result.workspace_id or "",
             access_token=result.access_token or "",
-            refresh_token=result.refresh_token or "",
+            refresh_token="",
             id_token=result.id_token or "",
             session_token=result.session_token or "",
             cookies_json=json_dumps(cookies or []),

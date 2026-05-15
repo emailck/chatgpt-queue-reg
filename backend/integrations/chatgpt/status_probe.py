@@ -211,7 +211,6 @@ def probe_local_chatgpt_status(account: Any, proxy: Optional[str] = None) -> dic
         or getattr(account, "token", "")
         or ""
     ).strip()
-    refresh_token = str(extra.get("refresh_token") or getattr(account, "refresh_token", "") or "").strip()
     session_token = str(extra.get("session_token") or getattr(account, "session_token", "") or "").strip()
     account_id = extract_chatgpt_account_id(account)
 
@@ -225,7 +224,7 @@ def probe_local_chatgpt_status(account: Any, proxy: Optional[str] = None) -> dic
             "http_status": 0,
             "error_code": "",
             "message": "",
-            "refresh_available": bool(refresh_token or session_token),
+            "refresh_available": bool(session_token),
         },
         "subscription": {
             "plan": "unknown",

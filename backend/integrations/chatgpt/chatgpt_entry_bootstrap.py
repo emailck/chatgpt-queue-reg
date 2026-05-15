@@ -1,9 +1,9 @@
 """Shared ChatGPT entry bootstrap flow.
 
 This module keeps the HAR-aligned ChatGPT entry prewarm separate from the
-registration/OAuth state machines.  It intentionally operates through the
-client object so both ChatGPTClient and OAuthClient can reuse their existing
-session, fingerprint, retry, and logging behavior.
+registration state machine. It intentionally operates through the client object
+so ChatGPTClient can reuse its existing session, fingerprint, retry, and logging
+behavior.
 """
 
 from __future__ import annotations

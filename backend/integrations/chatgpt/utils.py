@@ -5,8 +5,6 @@
 from dataclasses import dataclass, field
 import random
 import string
-import secrets
-import hashlib
 import base64
 import uuid
 import re
@@ -91,15 +89,6 @@ def generate_datadog_trace():
         "x-datadog-trace-id": trace_id,
     }
 
-
-def generate_pkce():
-    """生成 PKCE code_verifier 和 code_challenge"""
-    code_verifier = (
-        base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b"=").decode("ascii")
-    )
-    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return code_verifier, code_challenge
 
 
 def decode_jwt_payload(token):

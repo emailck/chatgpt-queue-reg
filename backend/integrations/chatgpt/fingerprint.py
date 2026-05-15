@@ -66,7 +66,7 @@ class BrowserFingerprint:
             })
         return headers
 
-    # 保留旧接口的属性别名，兼容 ChatGPTClient / OAuthClient
+    # 保留旧接口的属性别名，兼容 ChatGPTClient
     @property
     def chrome_major(self) -> int:
         if self.is_firefox:

@@ -9,9 +9,9 @@ from datetime import datetime
 from typing import Optional, Callable
 
 from backend.core.legacy_shim import TaskInterruption
-from backend.integrations.chatgpt.refresh_token_registration_engine import RegistrationResult
 
 from .chatgpt_client import ChatGPTClient
+from .registration_result import RegistrationResult
 from .utils import generate_random_name, generate_random_birthday
 
 logger = logging.getLogger(__name__)

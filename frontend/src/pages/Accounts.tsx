@@ -22,7 +22,6 @@ interface Account {
   last_payment_link_url: string
   user_agent: string
   has_access_token: boolean
-  has_refresh_token: boolean
   has_session_token: boolean
   created_at: string | null
   registered_at: string | null

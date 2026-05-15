@@ -46,15 +46,10 @@ APP_VERSION = "2.0.0"
 APP_DESCRIPTION = "自动注册 OpenAI/Codex CLI 账号的系统"
 
 # ============================================================================
-# OpenAI OAuth 相关常量
+# OpenAI Auth 相关常量
 # ============================================================================
 
-# OAuth 参数
-OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 OAUTH_AUTH_URL = "https://auth.openai.com/oauth/authorize"
-OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
-OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
-OAUTH_SCOPE = "openid email profile offline_access"
 
 # OpenAI API 端点
 OPENAI_API_ENDPOINTS = {
@@ -242,11 +237,7 @@ DEFAULT_SETTINGS = [
     ("system.name", APP_NAME, "系统名称", "general"),
     ("system.version", APP_VERSION, "系统版本", "general"),
     ("logs.retention_days", "30", "日志保留天数", "general"),
-    ("openai.client_id", OAUTH_CLIENT_ID, "OpenAI OAuth Client ID", "openai"),
     ("openai.auth_url", OAUTH_AUTH_URL, "OpenAI 认证地址", "openai"),
-    ("openai.token_url", OAUTH_TOKEN_URL, "OpenAI Token 地址", "openai"),
-    ("openai.redirect_uri", OAUTH_REDIRECT_URI, "OpenAI 回调地址", "openai"),
-    ("openai.scope", OAUTH_SCOPE, "OpenAI 权限范围", "openai"),
     ("proxy.enabled", "false", "是否启用代理", "proxy"),
     ("proxy.type", "http", "代理类型 (http/socks5)", "proxy"),
     ("proxy.host", "127.0.0.1", "代理主机", "proxy"),

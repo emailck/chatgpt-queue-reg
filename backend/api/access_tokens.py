@@ -3,8 +3,7 @@
 Export modes:
   - JSON  (full record incl. cookies, fp, localStorage)
   - CSV   (flat record + base64-encoded cookies / metadata)
-  - TXT   (one line per row, configurable separator like the legacy
-           `email----password----client_id----refresh_token` style)
+  - TXT   (one line per row, configurable separator)
 """
 from __future__ import annotations
 
@@ -55,7 +54,7 @@ def export_access_tokens(
     fmt: str = Query("json", pattern="^(json|csv|txt)$"),
     ids: Optional[str] = None,
     separator: str = "----",
-    fields: str = "email,password,access_token,refresh_token",
+    fields: str = "email,password,access_token,session_token",
 ):
     """Export rows in JSON/CSV/TXT.
 
@@ -63,7 +62,7 @@ def export_access_tokens(
     - `separator`: TXT field separator, defaults to legacy `----`.
     - `fields`: TXT field order, comma-separated. Allowed:
         email, password, account_id, workspace_id,
-        access_token, refresh_token, id_token, session_token,
+        access_token, id_token, session_token,
         proxy_url, user_agent.
     """
     id_filter = _parse_id_filter(ids)
@@ -182,7 +181,6 @@ CSV_FIELDS = (
     "account_id",
     "workspace_id",
     "access_token",
-    "refresh_token",
     "id_token",
     "session_token",
     "proxy_url",
@@ -207,7 +205,6 @@ def _render_csv(rows: list[AccessTokenAccount]) -> str:
             row.account_id,
             row.workspace_id,
             row.access_token,
-            row.refresh_token,
             row.id_token,
             row.session_token,
             row.proxy_url,
@@ -225,7 +222,6 @@ ALLOWED_TXT_FIELDS = {
     "account_id": lambda r: r.account_id,
     "workspace_id": lambda r: r.workspace_id,
     "access_token": lambda r: r.access_token,
-    "refresh_token": lambda r: r.refresh_token,
     "id_token": lambda r: r.id_token,
     "session_token": lambda r: r.session_token,
     "proxy_url": lambda r: r.proxy_url,
@@ -236,7 +232,7 @@ ALLOWED_TXT_FIELDS = {
 def _render_txt(rows: list[AccessTokenAccount], *, separator: str, fields: str) -> str:
     keys = [f.strip() for f in str(fields or "").split(",") if f.strip()]
     if not keys:
-        keys = ["email", "password", "access_token", "refresh_token"]
+        keys = ["email", "password", "access_token", "session_token"]
     invalid = [k for k in keys if k not in ALLOWED_TXT_FIELDS]
     if invalid:
         raise HTTPException(status_code=400, detail=f"不支持的字段: {','.join(invalid)}")

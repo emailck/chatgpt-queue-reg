@@ -1,6 +1,6 @@
 """
 Token 刷新模块
-支持 Session Token 和 OAuth Refresh Token 两种刷新方式
+仅支持通过 ChatGPT session_token 刷新 access_token。
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import json
 import time
 from typing import Optional, Dict, Any, Tuple
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from curl_cffi import requests as cffi_requests
 
@@ -33,16 +33,9 @@ class TokenRefreshResult:
 
 
 class TokenRefreshManager:
-    """
-    Token 刷新管理器
-    支持两种刷新方式：
-    1. Session Token 刷新（优先）
-    2. OAuth Refresh Token 刷新
-    """
+    """Token 刷新管理器。"""
 
-    # OpenAI OAuth 端点
     SESSION_URL = "https://chatgpt.com/api/auth/session"
-    TOKEN_URL = "https://auth.openai.com/oauth/token"
 
     def __init__(self, proxy_url: Optional[str] = None):
         """
@@ -52,9 +45,6 @@ class TokenRefreshManager:
             proxy_url: 代理 URL
         """
         self.proxy_url = proxy_url
-        from .constants import OAUTH_CLIENT_ID, OAUTH_REDIRECT_URI
-        self._oauth_client_id = OAUTH_CLIENT_ID
-        self._oauth_redirect_uri = OAUTH_REDIRECT_URI
 
     def _create_session(self) -> cffi_requests.Session:
         """创建 HTTP 会话"""
@@ -129,87 +119,9 @@ class TokenRefreshManager:
             logger.error(result.error_message)
             return result
 
-    def refresh_by_oauth_token(
-        self,
-        refresh_token: str,
-        client_id: Optional[str] = None
-    ) -> TokenRefreshResult:
-        """
-        使用 OAuth Refresh Token 刷新
-
-        Args:
-            refresh_token: OAuth 刷新令牌
-            client_id: OAuth Client ID
-
-        Returns:
-            TokenRefreshResult: 刷新结果
-        """
-        result = TokenRefreshResult(success=False)
-
-        try:
-            session = self._create_session()
-
-            # 使用配置的 client_id 或默认值
-            client_id = client_id or self._oauth_client_id
-
-            # 构建请求体
-            token_data = {
-                "client_id": client_id,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "redirect_uri": self._oauth_redirect_uri
-            }
-
-            response = session.post(
-                self.TOKEN_URL,
-                headers={
-                    "content-type": "application/x-www-form-urlencoded",
-                    "accept": "application/json"
-                },
-                data=token_data,
-                timeout=30
-            )
-
-            if response.status_code != 200:
-                result.error_message = f"OAuth token 刷新失败: HTTP {response.status_code}"
-                logger.warning(f"{result.error_message}, 响应: {response.text[:200]}")
-                return result
-
-            data = response.json()
-
-            # 提取令牌
-            access_token = data.get("access_token")
-            new_refresh_token = data.get("refresh_token", refresh_token)
-            expires_in = data.get("expires_in", 3600)
-
-            if not access_token:
-                result.error_message = "OAuth token 刷新失败: 未找到 access_token"
-                logger.warning(result.error_message)
-                return result
-
-            # 计算过期时间
-            expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-
-            result.success = True
-            result.access_token = access_token
-            result.refresh_token = new_refresh_token
-            result.expires_at = expires_at
-
-            logger.info(f"OAuth token 刷新成功，过期时间: {expires_at}")
-            return result
-
-        except Exception as e:
-            result.error_message = f"OAuth token 刷新异常: {str(e)}"
-            logger.error(result.error_message)
-            return result
-
     def refresh_account(self, account: Account) -> TokenRefreshResult:
         """
         刷新账号的 Token
-
-        优先级：
-        1. Session Token 刷新
-        2. OAuth Refresh Token 刷新
 
         Args:
             account: 账号对象
@@ -223,21 +135,11 @@ class TokenRefreshManager:
             result = self.refresh_by_session_token(account.session_token)
             if result.success:
                 return result
-            logger.warning(f"Session Token 刷新失败，尝试 OAuth 刷新")
+            logger.warning("Session Token 刷新失败")
 
-        # 尝试 OAuth Refresh Token
-        if account.refresh_token:
-            logger.info(f"尝试使用 OAuth Refresh Token 刷新账号 {account.email}")
-            result = self.refresh_by_oauth_token(
-                refresh_token=account.refresh_token,
-                client_id=account.client_id
-            )
-            return result
-
-        # 无可用刷新方式
         return TokenRefreshResult(
             success=False,
-            error_message="账号没有可用的刷新方式（缺少 session_token 和 refresh_token）"
+            error_message="账号没有可用的刷新方式（缺少 session_token）"
         )
 
     def validate_token(self, access_token: str) -> Tuple[bool, Optional[str]]:
@@ -302,8 +204,6 @@ def refresh_account_token(account_id: int, proxy_url: Optional[str] = None) -> T
                 "last_refresh": datetime.utcnow()
             }
 
-            if result.refresh_token:
-                update_data["refresh_token"] = result.refresh_token
 
             if result.expires_at:
                 update_data["expires_at"] = result.expires_at

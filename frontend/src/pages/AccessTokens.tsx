@@ -35,11 +35,9 @@ interface AccessTokenAccount {
   account_id: string
   workspace_id: string
   access_token: string
-  refresh_token: string
   id_token: string
   session_token: string
   has_access_token: boolean
-  has_refresh_token: boolean
   has_session_token: boolean
   user_agent: string
   proxy_url: string
@@ -55,7 +53,6 @@ const TXT_FIELD_OPTIONS = [
   'account_id',
   'workspace_id',
   'access_token',
-  'refresh_token',
   'id_token',
   'session_token',
   'proxy_url',
@@ -130,7 +127,7 @@ export default function AccessTokens() {
     if (values.fmt === 'txt') {
       params.set('separator', values.separator || '----')
       const f = (values.fields || []) as string[]
-      params.set('fields', f.length ? f.join(',') : 'email,password,access_token,refresh_token')
+      params.set('fields', f.length ? f.join(',') : 'email,password,access_token,session_token')
     }
     const url = `${API_BASE}/access-tokens/export?${params.toString()}`
     window.open(url, '_blank')
@@ -152,16 +149,6 @@ export default function AccessTokens() {
     {
       title: 'access_token',
       dataIndex: 'access_token',
-      render: (value: string) => (
-        <Space size={2}>
-          <Text code style={{ fontSize: 11 }}>{value || '-'}</Text>
-          {value && <CopyButton value={value} />}
-        </Space>
-      ),
-    },
-    {
-      title: 'refresh_token',
-      dataIndex: 'refresh_token',
       render: (value: string) => (
         <Space size={2}>
           <Text code style={{ fontSize: 11 }}>{value || '-'}</Text>
@@ -241,7 +228,7 @@ export default function AccessTokens() {
           initialValues={{
             fmt: 'txt',
             separator: '----',
-            fields: ['email', 'password', 'access_token', 'refresh_token'],
+            fields: ['email', 'password', 'access_token', 'session_token'],
           }}
         >
           <Form.Item label="格式" name="fmt">
@@ -289,7 +276,6 @@ export default function AccessTokens() {
               ['account_id', detail.account_id],
               ['workspace_id', detail.workspace_id],
               ['access_token', detail.access_token],
-              ['refresh_token', detail.refresh_token],
               ['id_token', detail.id_token],
               ['session_token', detail.session_token],
               ['user_agent', detail.user_agent],
