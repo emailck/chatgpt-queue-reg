@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Button, Card, Drawer, Dropdown, Input, Modal, Popconfirm, Space, Table, Tooltip, Typography, message } from 'antd'
+import { Button, Card, Drawer, Dropdown, Input, Modal, Popconfirm, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { BugOutlined, DeleteOutlined, MailOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import { CopyButton } from '@/components/CopyButton'
@@ -8,6 +8,20 @@ import { StatusTag } from '@/components/StatusTag'
 import { apiFetch } from '@/lib/api'
 
 const { Text } = Typography
+
+const SUB2API_STATUS_COLORS: Record<string, string> = {
+  uploaded: 'blue',
+  active: 'green',
+  alive: 'green',
+  ok: 'green',
+  pending_upload: 'orange',
+  upload_failed: 'red',
+  sync_failed: 'red',
+  dead: 'red',
+  disabled: 'default',
+  invalid: 'red',
+  expired: 'red',
+}
 
 interface Account {
   id: number
@@ -22,7 +36,16 @@ interface Account {
   last_payment_link_url: string
   user_agent: string
   has_access_token: boolean
+  has_refresh_token: boolean
   has_session_token: boolean
+  codex_token_id: number | null
+  codex_token_alive: boolean
+  codex_token_has_refresh_token: boolean
+  codex_token_last_error: string
+  sub2api_external_id: string
+  sub2api_status: string
+  sub2api_uploaded_at: string | null
+  sub2api_status_checked_at: string | null
   created_at: string | null
   registered_at: string | null
   updated_at: string | null
@@ -49,9 +72,12 @@ export default function Accounts() {
   }, [])
 
   useEffect(() => {
-    reload()
+    const initial = setTimeout(reload, 0)
     const t = setInterval(reload, 5000)
-    return () => clearInterval(t)
+    return () => {
+      clearTimeout(initial)
+      clearInterval(t)
+    }
   }, [reload])
 
   const triggerReadEmail = async (account: Account, keyword: string) => {
@@ -150,6 +176,19 @@ export default function Accounts() {
     },
     { title: '代理', dataIndex: 'proxy_url', ellipsis: true },
     { title: 'Account ID', dataIndex: 'account_id', ellipsis: true },
+    {
+      title: 'Token',
+      width: 170,
+      render: (_v: unknown, row: Account) => (
+        <Space size={4} wrap>
+          {row.has_access_token && <Tag color="green">AT</Tag>}
+          {row.codex_token_has_refresh_token && <Tag color="blue">Codex RT</Tag>}
+          {row.codex_token_id && <Tag color={SUB2API_STATUS_COLORS[row.sub2api_status] || 'default'}>{row.sub2api_status || 'unknown'}</Tag>}
+          {row.codex_token_id && !row.codex_token_alive && <Tag color="red">失效</Tag>}
+          {!row.has_access_token && !row.codex_token_has_refresh_token && <Text type="secondary">-</Text>}
+        </Space>
+      ),
+    },
     {
       title: '最近长链',
       dataIndex: 'last_payment_link_url',
@@ -252,7 +291,7 @@ export default function Accounts() {
         open={logJobId !== null}
         onClose={() => setLogJobId(null)}
         width={720}
-        title={logJobId ? `Job #${logJobId}` : ''}
+        title={logJobId ? `Job #${logJobId} 原始日志` : ''}
       >
         {logJobId !== null && <JobLogPanel jobId={logJobId} />}
       </Drawer>

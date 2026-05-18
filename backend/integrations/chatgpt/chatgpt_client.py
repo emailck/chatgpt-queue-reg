@@ -5,6 +5,7 @@ ChatGPT 注册客户端模块
 
 import uuid
 import time
+from dataclasses import asdict
 from urllib.parse import urlparse
 from backend.core.proxy import build_requests_proxy_config
 
@@ -423,6 +424,10 @@ class ChatGPTClient:
         target = f"{state.continue_url} {state.current_url}".lower()
         return state.page_type == "about_you" or "about-you" in target
 
+    def _state_is_add_phone(self, state: FlowState):
+        target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
+        return "add_phone" in target or "add-phone" in target or "phone-verification" in target
+
     def _state_requires_navigation(self, state: FlowState):
         if (state.method or "GET").upper() != "GET":
             return False
@@ -470,6 +475,30 @@ class ChatGPTClient:
         except Exception as e:
             self._log(f"跟随 continue_url 失败: {e}")
             return False, str(e)
+
+    def export_identity_state(self) -> dict:
+        cookies = []
+        for cookie in self.session.cookies.jar:
+            cookies.append({
+                "name": getattr(cookie, "name", ""),
+                "value": getattr(cookie, "value", ""),
+                "domain": getattr(cookie, "domain", "") or ".chatgpt.com",
+                "path": getattr(cookie, "path", "") or "/",
+                "expires": getattr(cookie, "expires", None),
+                "secure": bool(getattr(cookie, "secure", False)),
+                "httpOnly": bool(getattr(cookie, "has_nonstandard_attr", lambda _name: False)("HttpOnly")),
+            })
+        return {
+            "user_agent": self.ua,
+            "browser_fingerprint": asdict(self._fingerprint),
+            "cookies": cookies,
+            "local_storage": {},
+            "device_id": self.device_id,
+            "oai_session_id": self.oai_session_id,
+            "impersonate": self.impersonate,
+            "oai_client_version": self.oai_client_version,
+            "oai_client_build_number": self.oai_client_build_number,
+        }
 
     def _get_cookie_value(self, name, domain_hint=None):
         """读取当前会话中的 Cookie。"""
@@ -1105,6 +1134,105 @@ class ChatGPTClient:
             self._log(f"session dump 异常（继续流程）: {e}")
             return False
 
+    def verify_phone(self, phone_provider, return_state=False):
+        self._enter_stage("add_phone", "verify phone")
+        last_error = ""
+        max_attempts = max(1, int(getattr(phone_provider, "max_attempts", 1) or 1))
+        for attempt in range(1, max_attempts + 1):
+            lease = None
+            try:
+                self._log(f"手机验证尝试 {attempt}/{max_attempts}: 获取号码")
+                lease = phone_provider.acquire_phone()
+                phone_provider.prepare_for_sms(lease)
+                ok, msg = self.send_phone_otp(lease.phone_number)
+                if not ok:
+                    last_error = msg
+                    phone_provider.mark_failure(lease, msg)
+                    continue
+                code = phone_provider.wait_for_code(lease)
+                if not code:
+                    last_error = "接码超时"
+                    phone_provider.mark_failure(lease, last_error)
+                    continue
+                ok, next_state = self.verify_phone_otp(code, return_state=True)
+                if ok:
+                    phone_provider.mark_success(lease)
+                    return (True, next_state) if return_state else (True, "手机验证成功")
+                last_error = str(next_state)
+                phone_provider.mark_failure(lease, last_error)
+            except Exception as exc:
+                last_error = str(exc)
+                if lease is not None:
+                    try:
+                        phone_provider.mark_failure(lease, last_error)
+                    except Exception:
+                        pass
+                self._log(f"手机验证异常: {last_error}")
+        return False, last_error or "手机验证失败"
+
+    def send_phone_otp(self, phone_number):
+        self._enter_stage("add_phone", f"send phone otp {phone_number}")
+        url = f"{self.AUTH}/api/accounts/add-phone/send"
+        sentinel_token, _sentinel_so_token = self._get_sentinel_token(
+            "authorize_continue",
+            page_url=f"{self.AUTH}/add-phone",
+        )
+        headers = self._headers(
+            url,
+            accept="application/json",
+            referer=f"{self.AUTH}/add-phone",
+            origin=self.AUTH,
+            content_type="application/json",
+            fetch_site="same-origin",
+        )
+        if sentinel_token:
+            headers["openai-sentinel-token"] = sentinel_token
+        headers.update(generate_datadog_trace())
+        try:
+            self._browser_pause()
+            r = self._session_post(url, json={"phone_number": phone_number}, headers=headers, timeout=30)
+            if r.status_code == 200:
+                self._log(f"手机验证码发送成功: {phone_number}")
+                return True, "sent"
+            self._log_response_debug("手机验证码发送失败响应", r)
+            return False, f"HTTP {r.status_code}: {r.text[:240]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def verify_phone_otp(self, code, return_state=False):
+        self._enter_stage("add_phone", "verify phone otp")
+        url = f"{self.AUTH}/api/accounts/phone-otp/validate"
+        sentinel_token, _sentinel_so_token = self._get_sentinel_token(
+            "authorize_continue",
+            page_url=f"{self.AUTH}/phone-verification",
+        )
+        headers = self._headers(
+            url,
+            accept="application/json",
+            referer=f"{self.AUTH}/phone-verification",
+            origin=self.AUTH,
+            content_type="application/json",
+            fetch_site="same-origin",
+        )
+        if sentinel_token:
+            headers["openai-sentinel-token"] = sentinel_token
+        headers.update(generate_datadog_trace())
+        try:
+            self._browser_pause()
+            r = self._session_post(url, json={"code": str(code or "").strip()}, headers=headers, timeout=30)
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except Exception:
+                    data = {}
+                next_state = self._state_from_payload(data, current_url=str(r.url) or self.BASE)
+                self._log(f"手机验证码验证成功 {describe_flow_state(next_state)}")
+                return (True, next_state) if return_state else (True, "手机验证成功")
+            self._log_response_debug("手机验证码验证失败响应", r)
+            return False, f"HTTP {r.status_code}: {r.text[:240]}"
+        except Exception as exc:
+            return False, str(exc)
+
     def create_account(self, first_name, last_name, birthdate, return_state=False):
         """
         完成账号创建（提交姓名和生日）
@@ -1208,6 +1336,7 @@ class ChatGPTClient:
         stop_before_about_you_submission=False,
         otp_wait_timeout=600,
         otp_resend_wait_timeout=300,
+        phone_provider=None,
     ):
         """
         完整的注册流程（基于原版 run_register 方法）
@@ -1372,6 +1501,17 @@ class ChatGPTClient:
                 if not success:
                     return False, f"创建账号失败: {next_state}"
                 account_created = True
+                state = next_state
+                self.last_registration_state = state
+                continue
+
+            if self._state_is_add_phone(state):
+                self._enter_stage("add_phone", describe_flow_state(state))
+                if phone_provider is None:
+                    return False, "需要手机验证，但 phone_verification_enabled 未开启"
+                success, next_state = self.verify_phone(phone_provider, return_state=True)
+                if not success:
+                    return False, f"手机验证失败: {next_state}"
                 state = next_state
                 self.last_registration_state = state
                 continue

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Button, Card, Drawer, Popconfirm, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Button, Card, Drawer, Input, Modal, Popconfirm, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { BugOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import { CopyButton } from '@/components/CopyButton'
@@ -29,6 +29,8 @@ export default function PaymentLinks() {
   const [loading, setLoading] = useState(false)
   const [logJobId, setLogJobId] = useState<number | null>(null)
   const [selected, setSelected] = useState<React.Key[]>([])
+  const [paymentTarget, setPaymentTarget] = useState<PaymentLink | null>(null)
+  const [paymentProxyRegion, setPaymentProxyRegion] = useState('US')
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -43,9 +45,12 @@ export default function PaymentLinks() {
   }, [])
 
   useEffect(() => {
-    reload()
+    const initial = setTimeout(reload, 0)
     const t = setInterval(reload, 6000)
-    return () => clearInterval(t)
+    return () => {
+      clearTimeout(initial)
+      clearInterval(t)
+    }
   }, [reload])
 
   const debugBrowser = async (row: PaymentLink) => {
@@ -61,13 +66,21 @@ export default function PaymentLinks() {
     }
   }
 
-  const triggerEmpty = async (row: PaymentLink) => {
+  const triggerPayment = async () => {
+    if (!paymentTarget) return
+    const region = paymentProxyRegion.trim()
+    if (!region) {
+      message.error('请输入支付代理 region')
+      return
+    }
     try {
-      const resp = await apiFetch<{ job_id: number }>(`/payment-links/${row.id}/payment`, {
+      const resp = await apiFetch<{ job_id: number }>(`/payment-links/${paymentTarget.id}/payment`, {
         method: 'POST',
+        body: JSON.stringify({ payment_proxy_region: region }),
       })
-      message.success(`已派发占位支付 job #${resp.job_id}`)
+      message.success(`已派发支付 job #${resp.job_id}`)
       setLogJobId(resp.job_id)
+      setPaymentTarget(null)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '请求失败')
     }
@@ -146,8 +159,8 @@ export default function PaymentLinks() {
           <Button size="small" icon={<BugOutlined />} onClick={() => debugBrowser(row)}>
             抓 HAR
           </Button>
-          <Button size="small" type="dashed" onClick={() => triggerEmpty(row)}>
-            占位支付
+          <Button size="small" type="dashed" onClick={() => setPaymentTarget(row)}>
+            支付
           </Button>
           <Popconfirm title="删除该长链记录?" onConfirm={() => deleteOne(row)}>
             <Button size="small" danger>删除</Button>
@@ -185,11 +198,28 @@ export default function PaymentLinks() {
         />
       </Card>
 
+      <Modal
+        open={!!paymentTarget}
+        title={paymentTarget ? `派发支付 job #${paymentTarget.id}` : '派发支付 job'}
+        okText="派发"
+        onOk={triggerPayment}
+        onCancel={() => setPaymentTarget(null)}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Text type="secondary">payment stage 会按 region 从 proxy_pool 选择不同于账号注册代理的 proxy。</Text>
+          <Input
+            value={paymentProxyRegion}
+            onChange={(event) => setPaymentProxyRegion(event.target.value)}
+            placeholder="支付代理 region，例如 US / ID"
+          />
+        </Space>
+      </Modal>
+
       <Drawer
         open={logJobId !== null}
         onClose={() => setLogJobId(null)}
         width={720}
-        title={logJobId ? `Job #${logJobId}` : ''}
+        title={logJobId ? `Job #${logJobId} 原始日志` : ''}
       >
         {logJobId !== null && <JobLogPanel jobId={logJobId} />}
       </Drawer>

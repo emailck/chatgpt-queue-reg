@@ -77,13 +77,12 @@ class MicrosoftEmailService:
         keyword: str = "",
         timeout: int = 300,
         code_pattern: str | None = None,
+        otp_sent_at: float | datetime | None = None,
+        exclude_codes: set[str] | list[str] | tuple[str, ...] | None = None,
         **_kwargs: Any,
     ) -> str | None:
-        # The caller invokes this method right after triggering the OTP send,
-        # so "now" is the request timestamp.  Drop a grace window for clock
-        # drift and use it as the server-side $filter cutoff.
-        request_dt = datetime.now(timezone.utc) - timedelta(seconds=OTP_REQUEST_GRACE_SECONDS)
-        since_iso = request_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        request_dt = _otp_request_datetime(otp_sent_at)
+        since_iso = (request_dt - timedelta(seconds=OTP_REQUEST_GRACE_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         with Session(engine) as s:
             account = s.exec(
@@ -112,6 +111,7 @@ class MicrosoftEmailService:
                 poll_interval=float(settings.get_int("email_poll_interval_seconds", 5)),
                 log=lambda msg: logger.info("[email %s] %s", email, msg),
                 since_iso=since_iso,
+                exclude_codes=exclude_codes,
             )
         except TimeoutError:
             return None
@@ -123,6 +123,21 @@ class MicrosoftEmailService:
         return str(data.get("code") or "") or None
 
     # -- helpers -----------------------------------------------------------
+
+
+def _otp_request_datetime(value: float | datetime | None) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    elif value is not None:
+        try:
+            dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            dt = datetime.now(timezone.utc)
+    else:
+        dt = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _persist_message(account: EmailAccount, data: dict[str, Any]) -> None:

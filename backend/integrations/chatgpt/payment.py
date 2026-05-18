@@ -19,7 +19,7 @@ from .backend_headers import (
     extract_account_id_from_jwt,
     update_x_oai_is_from_response,
 )
-from .fingerprint import random_fingerprint
+from .fingerprint import impersonate_from_user_agent, random_fingerprint
 
 # from ..database.models import Account  # removed: external dep
 
@@ -117,7 +117,20 @@ def _payment_backend_request_context(
     oai_client_build_number: str = "",
 ) -> tuple[dict[str, str], str]:
     """为支付请求构造 headers 和一致的 impersonate，返回 (headers, impersonate)。"""
-    fp = random_fingerprint()
+    bound_fingerprint = getattr(account, "browser_fingerprint", None)
+    if not isinstance(bound_fingerprint, dict):
+        bound_fingerprint = {}
+    fp = random_fingerprint() if not bound_fingerprint.get("user_agent") else None
+    user_agent = str(
+        getattr(account, "user_agent", "")
+        or bound_fingerprint.get("user_agent")
+        or (fp.user_agent if fp is not None else "")
+    ).strip()
+    sec_ch_ua = str(bound_fingerprint.get("sec_ch_ua") or (fp.sec_ch_ua if fp is not None else ""))
+    chrome_full = str(bound_fingerprint.get("chrome_full") or (fp.chrome_full if fp is not None else ""))
+    platform_version = str(bound_fingerprint.get("platform_version") or (fp.platform_version if fp is not None else ""))
+    platform = str(bound_fingerprint.get("platform") or (fp.platform if fp is not None else "Windows"))
+    impersonate = str(bound_fingerprint.get("impersonate") or impersonate_from_user_agent(user_agent))
     access_token = str(getattr(account, "access_token", "") or "").strip()
     if not access_token:
         raise ValueError("账号缺少 access_token")
@@ -131,10 +144,11 @@ def _payment_backend_request_context(
 
     headers = build_backend_headers(
         url=url,
-        user_agent=fp.user_agent,
-        sec_ch_ua=fp.sec_ch_ua,
-        chrome_full_version=fp.chrome_full,
-        sec_ch_ua_platform_version=fp.platform_version,
+        user_agent=user_agent,
+        sec_ch_ua=sec_ch_ua,
+        chrome_full_version=chrome_full,
+        sec_ch_ua_platform_version=platform_version,
+        platform=platform,
         accept="application/json",
         accept_language=accept_language,
         content_type=content_type,
@@ -157,7 +171,7 @@ def _payment_backend_request_context(
     if cookies_str:
         headers["Cookie"] = cookies_str
 
-    return headers, fp.impersonate
+    return headers, impersonate
 
 
 def _parse_cookie_str(cookies_str: str, domain: str) -> list:

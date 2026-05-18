@@ -1,25 +1,32 @@
-"""Multi-threaded queue worker pool + helper to enqueue jobs.
+"""Per-stage worker pools + helper to enqueue jobs.
 
 Design notes
 ------------
 
-* Active workers run in a `ThreadPoolExecutor`. The pool size is read from
-  settings (`worker_concurrency`, default 3).
+* One `ThreadPoolExecutor` per stage. Each pool has its own concurrency,
+  configured via `settings["worker_concurrency.<stage>"]` (falls back to the
+  stage's `default_concurrency`, then to `DEFAULT_WORKER_CONCURRENCY`).
 * The dispatcher loop polls `jobs` for `queued` rows in priority + FIFO order
-  and atomically claims one via `mark_job_running`.
-* Cancellation is cooperative: API writes `cancel_requested=True`, flows call
+  and routes each to its stage's pool. A queued job whose stage has no
+  registered handler is rejected (`failed`) immediately to avoid stuck rows.
+* Cancellation is cooperative: API writes `cancel_requested=True`, stages call
   `ctx.check_cancelled()`, the worker also pre-checks before starting.
 * On boot, `recover_orphan_jobs()` flips lingering `running` rows to
-  `interrupted` and updates their pipelines.  No work is auto-resumed; users
-  decide whether to retry.
-* Flows run synchronously from the worker thread — playwright/curl_cffi are
-  blocking-IO so threading is enough.
+  `interrupted` and updates their pipelines.
+* Stages run synchronously from the worker thread (playwright/curl_cffi are
+  blocking IO so threading is enough).
+
+API summary
+-----------
+
+  - `enqueue_job(type=..., input=..., ...)` — `type` MUST be a registered stage
+  - `get_pool().set_concurrency(stage_name, n)` — resize a single stage pool
+  - `get_pool().concurrency_map()` — current per-stage concurrency
 """
 from __future__ import annotations
 
 import logging
 import threading
-import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
@@ -38,10 +45,10 @@ from backend.core.constants import (
 )
 from backend.core.db import engine, session_scope
 from backend.core.errors import JobCancelled
-from backend.core.flow_registry import get_flow
 from backend.core.job_context import JobContext, _publish, mark_job_running
-from backend.core.json_utils import json_dumps
+from backend.core.json_utils import json_dumps, json_loads
 from backend.core.settings import settings
+from backend.core.stages import STAGE_REGISTRY, get_stage
 from backend.core.time_utils import utcnow
 from backend.models.job import Job, JobEvent
 from backend.models.pipeline import Pipeline
@@ -64,9 +71,16 @@ def enqueue_job(
     priority: int = 0,
     max_attempts: int = 1,
 ) -> int:
+    """Enqueue a job. `type` must be a registered stage name."""
+    stage_name = str(type or "").strip()
+    if not stage_name:
+        raise ValueError("enqueue_job requires a stage `type`")
+    if stage_name not in STAGE_REGISTRY:
+        raise ValueError(f"unknown stage {stage_name!r}")
+
     with session_scope() as s:
         job = Job(
-            type=type,
+            type=stage_name,
             status=JOB_STATUS_QUEUED,
             priority=priority,
             max_attempts=max_attempts,
@@ -90,7 +104,7 @@ def enqueue_job(
 # ---- recovery ----------------------------------------------------------------
 
 def recover_orphan_jobs() -> int:
-    """Flip lingering 'running' jobs to 'interrupted' on boot."""
+    """Flip lingering 'running' jobs/pipelines to 'interrupted' on boot."""
     fixed = 0
     with session_scope() as s:
         stale_jobs = list(s.exec(sa_select(Job).where(Job.status == JOB_STATUS_RUNNING)).scalars())
@@ -122,34 +136,39 @@ def recover_orphan_jobs() -> int:
 
 # ---- worker pool -------------------------------------------------------------
 
-class QueueWorkerPool:
+
+def _stage_concurrency(stage_name: str) -> int:
+    """Resolve effective concurrency for a stage."""
+    meta = get_stage(stage_name)
+    fallback = meta.default_concurrency if meta else DEFAULT_WORKER_CONCURRENCY
+    return max(1, settings.get_int(f"worker_concurrency.{stage_name}", fallback))
+
+
+class StagePoolManager:
+    """Owns one `ThreadPoolExecutor` per stage."""
+
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._wakeup = threading.Event()
         self._dispatcher: threading.Thread | None = None
-        self._executor: ThreadPoolExecutor | None = None
-        self._inflight: dict[int, Future] = {}
-        self._inflight_lock = threading.Lock()
-        self._concurrency = max(1, settings.get_int("worker_concurrency", DEFAULT_WORKER_CONCURRENCY))
+        self._lock = threading.Lock()
+        self._executors: dict[str, ThreadPoolExecutor] = {}
+        self._concurrency: dict[str, int] = {}
+        self._inflight: dict[str, dict[int, Future]] = {}
 
-    @property
-    def concurrency(self) -> int:
-        return self._concurrency
+    # -- lifecycle --
 
     def start(self) -> None:
         if self._dispatcher is not None:
             return
-        self._concurrency = max(
-            1, settings.get_int("worker_concurrency", DEFAULT_WORKER_CONCURRENCY)
-        )
-        self._executor = ThreadPoolExecutor(
-            max_workers=self._concurrency, thread_name_prefix="cqr-worker"
-        )
+        with self._lock:
+            for name in STAGE_REGISTRY.keys():
+                self._ensure_executor(name)
         self._dispatcher = threading.Thread(
             target=self._dispatch_loop, name="cqr-dispatcher", daemon=True
         )
         self._dispatcher.start()
-        logger.info("queue worker pool started (concurrency=%s)", self._concurrency)
+        logger.info("stage pool manager started: %s", self.concurrency_map())
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
@@ -157,73 +176,108 @@ class QueueWorkerPool:
         if self._dispatcher is not None:
             self._dispatcher.join(timeout=timeout)
             self._dispatcher = None
-        if self._executor is not None:
-            self._executor.shutdown(wait=True, cancel_futures=False)
-            self._executor = None
+        with self._lock:
+            for ex in list(self._executors.values()):
+                ex.shutdown(wait=True, cancel_futures=False)
+            self._executors.clear()
 
     def wake(self) -> None:
         self._wakeup.set()
 
-    def set_concurrency(self, value: int) -> int:
-        """Resize the pool at runtime. Returns the effective concurrency.
+    # -- public introspection --
 
-        We swap the executor under the inflight lock so existing futures keep
-        their original executor until they finish; new tasks land on the new
-        one immediately.
-        """
+    def concurrency_map(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._concurrency)
+
+    def inflight_map(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                name: sum(1 for f in inflight.values() if not f.done())
+                for name, inflight in self._inflight.items()
+            }
+
+    def set_concurrency(self, stage: str, value: int) -> int:
+        """Resize a single stage's pool. Returns effective concurrency."""
+        if stage not in STAGE_REGISTRY:
+            raise ValueError(f"unknown stage {stage!r}")
         new_value = max(1, int(value or 0))
-        if new_value == self._concurrency and self._executor is not None:
-            return self._concurrency
-        old_executor = self._executor
-        new_executor = ThreadPoolExecutor(
-            max_workers=new_value, thread_name_prefix="cqr-worker"
-        )
-        self._executor = new_executor
-        self._concurrency = new_value
-        # Persist so it survives restarts.
+        with self._lock:
+            current = self._concurrency.get(stage)
+            if current == new_value and stage in self._executors:
+                return current
+            old_executor = self._executors.get(stage)
+            new_executor = ThreadPoolExecutor(
+                max_workers=new_value, thread_name_prefix=f"cqr-{stage}"
+            )
+            self._executors[stage] = new_executor
+            self._concurrency[stage] = new_value
+            self._inflight.setdefault(stage, {})
         try:
-            settings.set("worker_concurrency", str(new_value))
+            settings.set(f"worker_concurrency.{stage}", str(new_value))
         except Exception:
             pass
-        # Drain old executor in the background; do NOT block API.
         if old_executor is not None:
             threading.Thread(
                 target=lambda: old_executor.shutdown(wait=True, cancel_futures=False),
-                name="cqr-pool-resize",
+                name=f"cqr-{stage}-resize",
                 daemon=True,
             ).start()
-        logger.info("queue worker pool resized to concurrency=%s", new_value)
+        logger.info("stage %s pool resized to concurrency=%s", stage, new_value)
         self._wakeup.set()
         return new_value
 
     # -- internals --
 
+    def _ensure_executor(self, stage: str) -> ThreadPoolExecutor:
+        if stage in self._executors:
+            return self._executors[stage]
+        n = _stage_concurrency(stage)
+        ex = ThreadPoolExecutor(max_workers=n, thread_name_prefix=f"cqr-{stage}")
+        self._executors[stage] = ex
+        self._concurrency[stage] = n
+        self._inflight.setdefault(stage, {})
+        return ex
+
+    def _has_capacity(self, stage: str) -> bool:
+        with self._lock:
+            cap = self._concurrency.get(stage, 0)
+            inflight = self._inflight.get(stage, {})
+            active = sum(1 for f in inflight.values() if not f.done())
+        return active < cap
+
     def _dispatch_loop(self) -> None:
         while not self._stop.is_set():
             ran_any = False
             while not self._stop.is_set():
-                if not self._has_capacity():
+                claimed = self._claim_one_for_any_capacity()
+                if claimed is None:
                     break
-                claimed_id = self._claim_one()
-                if claimed_id is None:
-                    break
-                self._submit(claimed_id)
                 ran_any = True
-            # poll roughly every second; flows wake us via _wake_dispatcher.
             if not ran_any:
                 self._wakeup.wait(timeout=1.0)
                 self._wakeup.clear()
 
-    def _has_capacity(self) -> bool:
-        with self._inflight_lock:
-            active = sum(1 for f in self._inflight.values() if not f.done())
-        return active < self._concurrency
+    def _claim_one_for_any_capacity(self) -> int | None:
+        """Find a queued job whose stage still has capacity, claim & submit it."""
+        # Snapshot stages with free slots.
+        free_stages: list[str] = []
+        with self._lock:
+            for name in self._concurrency.keys():
+                cap = self._concurrency.get(name, 0)
+                inflight = self._inflight.get(name, {})
+                active = sum(1 for f in inflight.values() if not f.done())
+                if active < cap:
+                    free_stages.append(name)
+        if not free_stages:
+            return None
 
-    def _claim_one(self) -> int | None:
+        # Find earliest queued job among those stages.
         with Session(engine) as s:
             stmt = (
                 sa_select(Job)
                 .where(Job.status == JOB_STATUS_QUEUED)
+                .where(Job.type.in_(free_stages))
                 .order_by(Job.priority.desc(), Job.id.asc())
                 .limit(1)
             )
@@ -231,31 +285,49 @@ class QueueWorkerPool:
             if row is None:
                 return None
             candidate_id = int(row.id or 0)
+            stage_name = str(row.type or "")
+
+        meta = get_stage(stage_name)
+        if meta is None or not meta.is_implemented():
+            # Defensive: a queued job whose stage has no handler. Fail it.
+            _finish_job(candidate_id, JOB_STATUS_FAILED,
+                        error=f"no handler registered for stage {stage_name!r}")
+            try:
+                from backend.core.pipeline import on_job_finished
+                on_job_finished(candidate_id)
+            except Exception:
+                logger.exception("pipeline orchestration failed for job %s", candidate_id)
+            return candidate_id
+
         ctx = mark_job_running(candidate_id)
         if ctx is None:
             return None
+        self._submit(stage_name, candidate_id)
         return candidate_id
 
-    def _submit(self, job_id: int) -> None:
-        executor = self._executor
-        if executor is None:
-            return
+    def _submit(self, stage: str, job_id: int) -> None:
+        with self._lock:
+            executor = self._executors.get(stage)
+            if executor is None:
+                executor = self._ensure_executor(stage)
+            inflight = self._inflight.setdefault(stage, {})
         future = executor.submit(_run_job_safely, job_id)
-        with self._inflight_lock:
-            self._inflight[job_id] = future
-        future.add_done_callback(lambda _f, jid=job_id: self._cleanup_inflight(jid))
+        with self._lock:
+            inflight[job_id] = future
+        future.add_done_callback(lambda _f, jid=job_id, st=stage: self._cleanup_inflight(st, jid))
 
-    def _cleanup_inflight(self, job_id: int) -> None:
-        with self._inflight_lock:
-            self._inflight.pop(job_id, None)
-        # New capacity may unlock another job.
+    def _cleanup_inflight(self, stage: str, job_id: int) -> None:
+        with self._lock:
+            inflight = self._inflight.get(stage)
+            if inflight is not None:
+                inflight.pop(job_id, None)
         self._wakeup.set()
 
 
-_pool = QueueWorkerPool()
+_pool = StagePoolManager()
 
 
-def get_pool() -> QueueWorkerPool:
+def get_pool() -> StagePoolManager:
     return _pool
 
 
@@ -268,28 +340,37 @@ def _wake_dispatcher() -> None:
 def _run_job_safely(job_id: int) -> None:
     """Execute a single job; never raise into the executor."""
     ctx: JobContext | None = None
+    success = False
     try:
         ctx = _load_running_context(job_id)
         if ctx is None:
             return
-        flow = get_flow(_lookup_job_type(job_id))
-        if flow is None:
-            _finish_job(job_id, JOB_STATUS_FAILED, error=f"no flow registered for job type")
+        meta = get_stage(ctx.stage)
+        if meta is None or meta.handler is None:
+            _finish_job(job_id, JOB_STATUS_FAILED,
+                        error=f"no handler for stage {ctx.stage!r}")
             return
         ctx.check_cancelled()
-        flow(ctx)
+        if ctx.account_id and ctx.stage != "register":
+            ctx.require_identity()
+        meta.handler(ctx)
         _finish_job(job_id, JOB_STATUS_SUCCEEDED)
+        success = True
     except JobCancelled as exc:
         _finish_job(job_id, JOB_STATUS_CANCELLED, error=str(exc) or "cancelled")
     except Exception as exc:
         tb = traceback.format_exc()
         logger.exception("job %s failed", job_id)
-        _finish_job(job_id, JOB_STATUS_FAILED, error=str(exc) or exc.__class__.__name__, traceback=tb)
+        _finish_job(job_id, JOB_STATUS_FAILED,
+                    error=str(exc) or exc.__class__.__name__, traceback=tb)
     finally:
-        # Pipeline orchestrator runs on every terminal event.
+        if ctx is not None:
+            try:
+                ctx.auto_release_all(success=success)
+            except Exception:
+                logger.exception("auto release failed for job %s", job_id)
         try:
             from backend.core.pipeline import on_job_finished
-
             on_job_finished(job_id)
         except Exception:
             logger.exception("pipeline orchestration failed for job %s", job_id)
@@ -305,17 +386,11 @@ def _load_running_context(job_id: int) -> JobContext | None:
             pipeline_id=job.pipeline_id,
             account_id=job.account_id,
             payment_link_id=job.payment_link_id,
+            proxy_id=job.proxy_id,
             proxy_url=job.proxy_url,
-            input=__import__("backend.core.json_utils", fromlist=["json_loads"]).json_loads(
-                job.input_json, fallback={}
-            ) or {},
+            stage=str(job.type or ""),
+            input=json_loads(job.input_json, fallback={}) or {},
         )
-
-
-def _lookup_job_type(job_id: int) -> str:
-    with Session(engine) as s:
-        job = s.get(Job, job_id)
-        return str(job.type or "") if job is not None else ""
 
 
 def _finish_job(

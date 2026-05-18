@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import Index
 from sqlmodel import Field, SQLModel
 
 from backend.core.constants import JOB_STATUS_QUEUED, DEFAULT_MAX_ATTEMPTS
@@ -12,9 +13,13 @@ from backend.core.time_utils import utcnow
 
 class Job(SQLModel, table=True):
     __tablename__ = "jobs"
+    __table_args__ = (
+        Index("ix_jobs_type_status", "type", "status"),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     pipeline_id: Optional[int] = Field(default=None, index=True)
+    # `type` is the stage name, see `backend/core/stages.py`.
     type: str = Field(index=True)
     status: str = Field(default=JOB_STATUS_QUEUED, index=True)
     priority: int = Field(default=0, index=True)

@@ -1,4 +1,4 @@
-"""chatgpt_payment_link flow.
+"""payment_link stage.
 
 Produces a Team hosted long-link for the linked ChatGPT account and writes a
 row into `payment_links`.
@@ -9,24 +9,33 @@ from sqlmodel import Session
 
 from backend.core.constants import (
     ACCOUNT_STATUS_PAYMENT_LINK_READY,
-    JOB_TYPE_CHATGPT_PAYMENT_LINK,
     PAYMENT_LINK_STATUS_CREATED,
     PAYMENT_LINK_STATUS_FAILED,
     TEAM_PROMO_CODE,
 )
 from backend.core.db import engine, session_scope
-from backend.core.flow_registry import register_flow
 from backend.core.job_context import JobContext
 from backend.core.json_utils import json_dumps, json_loads
+from backend.core.stages import stage
 from backend.core.time_utils import utcnow
 from backend.models.account import ChatGPTAccount
 from backend.models.payment import PaymentLink
+from backend.schemas.stage_io import PaymentLinkInput, PaymentLinkOutput
 
 
+@stage(
+    name="payment_link",
+    requires_resources=[],
+    optional_resources=["proxy_pool"],
+    default_concurrency=3,
+    input_schema=PaymentLinkInput,
+    output_schema=PaymentLinkOutput,
+    description="Generate ChatGPT Team/Plus hosted payment long-link.",
+)
 def run(ctx: JobContext) -> None:
     account_id = ctx.account_id or int(ctx.input.get("account_id") or 0) or None
     if not account_id:
-        raise RuntimeError("payment_link flow requires account_id")
+        raise RuntimeError("payment_link stage requires account_id")
     ctx.attach_account(account_id)
 
     plan = str(ctx.input.get("plan") or "team").strip().lower()
@@ -40,7 +49,7 @@ def run(ctx: JobContext) -> None:
     currency_override = ctx.input.get("currency")
 
     ctx.log(
-        f"starting payment-link flow ({plan})",
+        f"starting payment-link stage ({plan})",
         payload={
             "plan": plan,
             "account_id": account_id,
@@ -65,11 +74,20 @@ def run(ctx: JobContext) -> None:
         generate_team_link,
     )
 
+    payload_for_log = {
+        "plan": plan,
+        "workspace_name": workspace_name,
+        "price_interval": price_interval,
+        "seat_quantity": seat_quantity,
+        "country": country,
+        "currency": currency_override,
+    }
+
     try:
         if plan == "plus":
             url = generate_plus_link(
                 adapter,
-                proxy=ctx.proxy_url or None,
+                proxy=ctx.effective_proxy_url() or None,
                 country=country,
                 currency=str(currency_override) if currency_override else None,
             )
@@ -84,7 +102,7 @@ def run(ctx: JobContext) -> None:
                 workspace_name=workspace_name,
                 price_interval=price_interval,
                 seat_quantity=seat_quantity,
-                proxy=ctx.proxy_url or None,
+                proxy=ctx.effective_proxy_url() or None,
                 country=country,
             )
             payload_for_log = {
@@ -165,8 +183,13 @@ class _AccountAdapter:
         )
         meta = json_loads(account.metadata_json, fallback={}) or {}
         self.access_token = account.access_token
+        fingerprint = json_loads(account.browser_fingerprint_json, fallback={}) or {}
+        self.user_agent = account.user_agent
+        self.browser_fingerprint = fingerprint
         self.extra = {
             **meta,
+            "browser_fingerprint": fingerprint,
+            "user_agent": account.user_agent,
             "x_oai_is": meta.get("x_oai_is") or "",
             "oai_client_version": meta.get("oai_client_version") or "",
             "oai_client_build_number": meta.get("oai_client_build_number") or "",
@@ -174,6 +197,3 @@ class _AccountAdapter:
         }
         self.oai_client_version = str(meta.get("oai_client_version") or "")
         self.oai_client_build_number = str(meta.get("oai_client_build_number") or "")
-
-
-register_flow(JOB_TYPE_CHATGPT_PAYMENT_LINK, run)

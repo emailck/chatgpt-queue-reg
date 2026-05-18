@@ -9,8 +9,8 @@ from sqlalchemy import select as sa_select
 from sqlmodel import Session
 
 from backend.api.schemas import payment_link_to_dict
-from backend.core.constants import JOB_TYPE_BROWSER_DEBUG, JOB_TYPE_PAYMENT_EMPTY
 from backend.core.db import engine, session_scope
+from backend.core.browser_debug import open_debug_session
 from backend.core.queue import enqueue_job
 from backend.models.payment import PaymentLink
 
@@ -28,6 +28,10 @@ class DebugBrowserRequest(BaseModel):
 
 class IdsRequest(BaseModel):
     ids: list[int]
+
+
+class TriggerPaymentRequest(BaseModel):
+    payment_proxy_region: str
 
 
 @router.get("/api/payment-links", tags=["payment-links"])
@@ -57,14 +61,17 @@ def get_payment_link(payment_link_id: int):
 
 
 @router.post("/api/payment-links/{payment_link_id}/payment", tags=["payment-links"])
-def trigger_empty_payment(payment_link_id: int):
+def trigger_payment(payment_link_id: int, body: TriggerPaymentRequest):
     with Session(engine) as s:
         row = s.get(PaymentLink, payment_link_id)
         if row is None:
             raise HTTPException(status_code=404, detail="payment_link not found")
+    region = str(body.payment_proxy_region or "").strip()
+    if not region:
+        raise HTTPException(status_code=400, detail="payment_proxy_region 不能为空")
     job_id = enqueue_job(
-        type=JOB_TYPE_PAYMENT_EMPTY,
-        input={"payment_link_id": payment_link_id},
+        type="payment",
+        input={"payment_link_id": payment_link_id, "account_id": row.account_id, "payment_proxy_region": region},
         payment_link_id=payment_link_id,
         account_id=row.account_id,
     )
@@ -81,23 +88,17 @@ def debug_browser(payment_link_id: int, body: DebugBrowserRequest):
         account_id = row.account_id
     if not target:
         raise HTTPException(status_code=409, detail="payment_link has no checkout_url")
-    job_id = enqueue_job(
-        type=JOB_TYPE_BROWSER_DEBUG,
-        input={
-            "target_url": target,
-            "account_id": account_id,
-            "payment_link_id": payment_link_id,
-            "browser_type": body.browser_type,
-            "inject_cookies": body.inject_cookies,
-            "inject_local_storage": body.inject_local_storage,
-            "inject_fingerprint": body.inject_fingerprint,
-            "record_har": body.record_har,
-            "omit_har_content": body.omit_har_content,
-        },
+    return open_debug_session(
+        target_url=target,
         account_id=account_id,
         payment_link_id=payment_link_id,
+        browser_type=body.browser_type,
+        inject_cookies=body.inject_cookies,
+        inject_local_storage=body.inject_local_storage,
+        inject_fingerprint=body.inject_fingerprint,
+        record_har=body.record_har,
+        omit_har_content=body.omit_har_content,
     )
-    return {"job_id": job_id}
 
 
 @router.delete("/api/payment-links/{payment_link_id}", tags=["payment-links"])

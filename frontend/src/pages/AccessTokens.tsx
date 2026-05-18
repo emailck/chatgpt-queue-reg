@@ -7,6 +7,7 @@ import {
   Input,
   Modal,
   Popconfirm,
+  Radio,
   Select,
   Space,
   Switch,
@@ -26,6 +27,8 @@ import { API_BASE, apiFetch, formatDateTime } from '@/lib/api'
 
 const { Text, Paragraph } = Typography
 
+type FreePool = 'at' | 'rt'
+
 interface AccessTokenAccount {
   id: number
   pipeline_id: number | null
@@ -35,10 +38,20 @@ interface AccessTokenAccount {
   account_id: string
   workspace_id: string
   access_token: string
+  refresh_token: string
   id_token: string
   session_token: string
   has_access_token: boolean
+  has_refresh_token: boolean
   has_session_token: boolean
+  codex_token_id: number | null
+  codex_token_alive: boolean
+  codex_token_has_refresh_token: boolean
+  codex_token_last_error: string
+  sub2api_external_id: string
+  sub2api_status: string
+  sub2api_uploaded_at: string | null
+  sub2api_status_checked_at: string | null
   user_agent: string
   proxy_url: string
   note: string
@@ -53,34 +66,54 @@ const TXT_FIELD_OPTIONS = [
   'account_id',
   'workspace_id',
   'access_token',
+  'refresh_token',
   'id_token',
   'session_token',
   'proxy_url',
   'user_agent',
 ] as const
 
+const SUB2API_STATUS_COLORS: Record<string, string> = {
+  uploaded: 'blue',
+  active: 'green',
+  alive: 'green',
+  ok: 'green',
+  pending_upload: 'orange',
+  upload_failed: 'red',
+  sync_failed: 'red',
+  dead: 'red',
+  disabled: 'default',
+  invalid: 'red',
+  expired: 'red',
+}
+
 export default function AccessTokens() {
   const [rows, setRows] = useState<AccessTokenAccount[]>([])
   const [loading, setLoading] = useState(false)
+  const [pool, setPool] = useState<FreePool>('at')
   const [showSecrets, setShowSecrets] = useState(false)
   const [selected, setSelected] = useState<React.Key[]>([])
   const [exportOpen, setExportOpen] = useState(false)
   const [detail, setDetail] = useState<AccessTokenAccount | null>(null)
+  const [fetchingRtId, setFetchingRtId] = useState<number | null>(null)
   const [exportForm] = Form.useForm()
 
   const reload = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await apiFetch<AccessTokenAccount[]>(`/access-tokens?include_secrets=${showSecrets}`)
+      const data = await apiFetch<AccessTokenAccount[]>(`/access-tokens?pool=${pool}&include_secrets=${showSecrets}`)
       setRows(data)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载失败')
     } finally {
       setLoading(false)
     }
-  }, [showSecrets])
+  }, [pool, showSecrets])
 
-  useEffect(() => { reload() }, [reload])
+  useEffect(() => {
+    const initial = setTimeout(reload, 0)
+    return () => clearTimeout(initial)
+  }, [reload])
 
   const openDetail = useCallback(async (row: AccessTokenAccount) => {
     try {
@@ -100,6 +133,29 @@ export default function AccessTokens() {
       reload()
     } catch (err) {
       message.error(err instanceof Error ? err.message : '删除失败')
+    }
+  }
+
+  const fetchRefreshToken = async (row: AccessTokenAccount) => {
+    setFetchingRtId(row.id)
+    try {
+      const resp = await apiFetch<{
+        job_id: number | null
+        already_has_refresh_token: boolean
+        already_running: boolean
+      }>(`/access-tokens/${row.id}/refresh-token`, { method: 'POST' })
+      if (resp.already_has_refresh_token) {
+        message.success('该账号已有 RT')
+      } else if (resp.already_running) {
+        message.info(`RT 任务已在运行：#${resp.job_id}`)
+      } else {
+        message.success(`已提交获取 RT 任务：#${resp.job_id}`)
+      }
+      reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '提交获取 RT 失败')
+    } finally {
+      setFetchingRtId(null)
     }
   }
 
@@ -127,8 +183,9 @@ export default function AccessTokens() {
     if (values.fmt === 'txt') {
       params.set('separator', values.separator || '----')
       const f = (values.fields || []) as string[]
-      params.set('fields', f.length ? f.join(',') : 'email,password,access_token,session_token')
+      params.set('fields', f.length ? f.join(',') : 'email,password,access_token,refresh_token,session_token')
     }
+    params.set('pool', pool)
     const url = `${API_BASE}/access-tokens/export?${params.toString()}`
     window.open(url, '_blank')
     setExportOpen(false)
@@ -156,6 +213,24 @@ export default function AccessTokens() {
         </Space>
       ),
     },
+    {
+      title: 'Codex RT',
+      render: (_v: unknown, row: AccessTokenAccount) => (
+        <Space direction="vertical" size={2}>
+          <Space size={2}>
+            <Text code style={{ fontSize: 11 }}>{row.refresh_token || '-'}</Text>
+            {row.refresh_token && <CopyButton value={row.refresh_token} />}
+          </Space>
+          {row.codex_token_id && (
+            <Space size={4} wrap>
+              <Text type="secondary">#{row.codex_token_id}</Text>
+              <Tag color={SUB2API_STATUS_COLORS[row.sub2api_status] || 'default'}>{row.sub2api_status || 'unknown'}</Tag>
+              {!row.codex_token_alive && <Tag color="red">失效</Tag>}
+            </Space>
+          )}
+        </Space>
+      ),
+    },
     { title: '代理', dataIndex: 'proxy_url', ellipsis: true, width: 180 },
     { title: 'pipeline', dataIndex: 'pipeline_id', width: 90, render: (v: number | null) => (v ? `#${v}` : '-') },
     { title: '创建时间', width: 170, render: (_v: unknown, row: AccessTokenAccount) => formatDateTime(row.created_at) },
@@ -165,6 +240,16 @@ export default function AccessTokens() {
       render: (_v: unknown, row: AccessTokenAccount) => (
         <Space size={4}>
           <Button size="small" onClick={() => openDetail(row)}>详情</Button>
+          {pool === 'at' && !row.codex_token_has_refresh_token && (
+            <Button
+              size="small"
+              type="primary"
+              loading={fetchingRtId === row.id}
+              onClick={() => fetchRefreshToken(row)}
+            >
+              获取 RT
+            </Button>
+          )}
           <Popconfirm title="删除该 AT?" onConfirm={() => deleteOne(row)}>
             <Button size="small" danger>删除</Button>
           </Popconfirm>
@@ -177,6 +262,16 @@ export default function AccessTokens() {
     <>
       <Card>
         <Space style={{ marginBottom: 12 }} wrap>
+          <Radio.Group
+            value={pool}
+            onChange={(e) => { setPool(e.target.value); setSelected([]) }}
+            optionType="button"
+            buttonStyle="solid"
+            options={[
+              { value: 'at', label: 'Free AT 池' },
+              { value: 'rt', label: 'Free RT 池' },
+            ]}
+          />
           <Button icon={<ReloadOutlined />} onClick={reload}>刷新</Button>
           <Button icon={<DownloadOutlined />} type="primary" onClick={() => setExportOpen(true)}>
             导出{selected.length ? `（${selected.length}）` : '全部'}
@@ -211,7 +306,7 @@ export default function AccessTokens() {
 
       <Modal
         open={exportOpen}
-        title="导出 AT 号池"
+        title={`导出 ${pool === 'rt' ? 'Free RT 池' : 'Free AT 池'}`}
         onCancel={() => setExportOpen(false)}
         onOk={submitExport}
         okText="下载"
@@ -228,7 +323,7 @@ export default function AccessTokens() {
           initialValues={{
             fmt: 'txt',
             separator: '----',
-            fields: ['email', 'password', 'access_token', 'session_token'],
+            fields: ['email', 'password', 'access_token', 'refresh_token', 'session_token'],
           }}
         >
           <Form.Item label="格式" name="fmt">
@@ -276,6 +371,10 @@ export default function AccessTokens() {
               ['account_id', detail.account_id],
               ['workspace_id', detail.workspace_id],
               ['access_token', detail.access_token],
+              ['codex_refresh_token', detail.refresh_token],
+              ['sub2api_status', detail.sub2api_status],
+              ['sub2api_external_id', detail.sub2api_external_id],
+              ['codex_token_last_error', detail.codex_token_last_error],
               ['id_token', detail.id_token],
               ['session_token', detail.session_token],
               ['user_agent', detail.user_agent],

@@ -1,35 +1,40 @@
 # chatgpt-queue-reg
 
-队列式 ChatGPT 注册 + Team 支付长链 + 微软邮箱（含裂变）+ 随处调起 Camoufox / HAR 的精简版项目。
+队列式 ChatGPT 注册 + Team/Plus 支付长链 + Codex RT 同步 + 微软邮箱（含裂变）+ 随处调起 Camoufox / HAR 的精简版项目。
 
 ## 模块边界
 
-- **后端 (`backend/`)**：FastAPI + SQLModel/SQLite，多线程 worker 池。
+- **后端 (`backend/`)**：FastAPI + SQLModel/SQLite，按 stage 拆分的多 worker pool。
 - **前端 (`frontend/`)**：React 19 + Vite + Ant Design，统一 dark theme。
-- **集成 (`backend/integrations/`)**：从原项目复制并重写 import 路径的 ChatGPT 注册 / 长链生成代码 + 自写的 Microsoft Graph 邮箱模块。
-- **占位 (`backend/flows/payment_empty.py`)**：长链生成成功后 pipeline 进入“占位支付”一步，永远 succeeded，方便接真实支付时再替换。
+- **集成 (`backend/integrations/`)**：ChatGPT 注册 / 长链生成 / OAuth、Microsoft Graph 邮箱、sub2api RT 池同步。
 
 ## Pipeline
 
-每条 pipeline 自动串联 3 步：
+后端统一走声明式 pipeline：`POST /api/pipelines` 传 `preset` 或显式 `stages`，并可用 `stop_after` 截停在任意 stage。
 
-1. `chatgpt_register` 注册账号 → 入库 `chatgpt_accounts`
-2. `chatgpt_payment_link` 生成 Team hosted 长链 → 入库 `payment_links`
-3. `payment_empty` 占位支付步骤
+当前只有 5 个 WorkPool stage：
+
+1. `register`：注册账号，绑定账号身份（proxy_id/proxy_url/UA/fingerprint/cookies/local_storage）。
+2. `payment_link`：复用账号身份生成 Team/Plus hosted 长链，写入 `payment_links`。
+3. `payment`：支付浏览器自动化框架位，当前 v1 stub；支付代理必须按 region 选择且不同于账号代理。
+4. `oauth_codex`：对已注册账号执行 OpenAI OAuth PKCE，获取 Codex RT/AT 并上传 sub2api。
+5. `rt_keepalive`：同步本地 `codex_tokens` 镜像与 sub2api 状态；RT 轮转由 sub2api 负责。
 
 任何一步失败/取消，pipeline 整体标记失败并停止推进。
 
 ## 核心 API
 
-- `POST /api/pipelines/chatgpt-account` 创建 N 条 pipeline
-- `GET /api/pipelines` / `GET /api/pipelines/{id}`
-- `GET /api/jobs` / `GET /api/jobs/{id}/events/stream` (SSE 日志)
-- `GET /api/accounts` / `POST /api/accounts/{id}/read-email|debug-browser|payment-link/retry`
-- `GET /api/payment-links` / `POST /api/payment-links/{id}/payment|debug-browser`
-- `POST /api/email/import` (支持 `alias_split_enabled` 邮箱裂变 + 含原邮箱)
-- `POST /api/email/read` 主动收一封邮件 / OTP
-- `POST /api/browser-debug/open` 任何上下文调起 Camoufox/Chromium，注入 cookies/UA/localStorage 并抓 HAR
-- `GET /api/queue/stats` / `GET /api/healthz`
+- `POST /api/pipelines` 创建声明式 pipeline；`GET /api/pipelines` / `GET /api/pipelines/{id}` 查询。
+- `GET /api/jobs` / `GET /api/jobs/{id}/events/stream` 查看 job 与 SSE 日志。
+- `GET /api/pools` / `GET /api/stages` / `GET /api/queue/stats` 查看 stage/resource pool 状态。
+- `GET /api/accounts` / `GET /api/accounts/subscriptions` / `POST /api/accounts/{id}/refresh-token|read-email|debug-browser|payment-link/retry`。
+- `GET /api/payment-links` / `POST /api/payment-links/{id}/payment|debug-browser`；payment 请求必须带 `payment_proxy_region`。
+- `GET /api/access-tokens` / `POST /api/access-tokens/{id}/refresh-token` / `GET /api/codex-tokens` / `POST /api/codex-tokens/{id}/sync`。
+- `POST /api/email/import` (支持 `alias_split_enabled` 邮箱裂变 + 含原邮箱) / `POST /api/email/read`。
+- `GET/POST/PATCH/DELETE /api/proxies`、`/api/cards`、`/api/sms/projects` 管理资源池数据。
+- `GET/PUT /api/settings` 管理全局配置和 sub2api/SMS/注册参数。
+- `POST /api/browser-debug/open` 任何上下文调起 Camoufox/Chromium，注入 cookies/UA/localStorage 并抓 HAR。
+- `GET /api/healthz`。
 
 ## 开发
 
@@ -56,9 +61,10 @@ pnpm dev   # localhost:5173 -> 代理到 8000
 启动时自动 `init_db()`，使用的表：
 
 - `pipelines` / `jobs` / `job_events`
-- `chatgpt_accounts` / `payment_links`
+- `chatgpt_accounts` / `access_token_accounts` / `payment_links`
 - `email_accounts` / `email_messages`
 - `proxies` / `browser_debug_sessions`
+- `payment_cards` / `sms_projects` / `codex_tokens`
 - `settings`
 
 非 SQLite 的 DB 也行，把 `DATABASE_URL` 指过去即可（SQLite 上自动开 WAL + busy_timeout）。

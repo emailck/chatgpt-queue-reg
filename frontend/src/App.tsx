@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { App as AntdApp, ConfigProvider, Layout, Menu, Typography } from 'antd'
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
@@ -17,9 +17,11 @@ import zhCN from 'antd/locale/zh_CN'
 import Pipelines from '@/pages/Pipelines'
 import Accounts from '@/pages/Accounts'
 import AccessTokens from '@/pages/AccessTokens'
+import SubscriptionAccounts from '@/pages/SubscriptionAccounts'
 import PaymentLinks from '@/pages/PaymentLinks'
 import Emails from '@/pages/Emails'
 import Proxies from '@/pages/Proxies'
+import Pools from '@/pages/Pools'
 import BrowserDebug from '@/pages/BrowserDebug'
 import Settings from '@/pages/Settings'
 
@@ -29,8 +31,10 @@ const { Sider, Content, Header } = Layout
 
 const MENU = [
   { key: '/pipelines', icon: <PlayCircleOutlined />, label: '任务队列' },
+  { key: '/pools', icon: <AppstoreOutlined />, label: '池子 / WorkPools' },
   { key: '/accounts', icon: <UserOutlined />, label: '账号' },
-  { key: '/access-tokens', icon: <KeyOutlined />, label: 'AT 号池' },
+  { key: '/access-tokens', icon: <KeyOutlined />, label: 'Free 号池' },
+  { key: '/subscription-accounts', icon: <LinkOutlined />, label: '订阅号池' },
   { key: '/payment-links', icon: <LinkOutlined />, label: '支付长链' },
   { key: '/emails', icon: <MailOutlined />, label: '邮箱' },
   { key: '/proxies', icon: <GlobalOutlined />, label: '代理' },
@@ -81,8 +85,10 @@ function Shell() {
           <Routes>
             <Route path="/" element={<Navigate to="/pipelines" replace />} />
             <Route path="/pipelines" element={<Pipelines />} />
+            <Route path="/pools" element={<Pools />} />
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/access-tokens" element={<AccessTokens />} />
+            <Route path="/subscription-accounts" element={<SubscriptionAccounts />} />
             <Route path="/payment-links" element={<PaymentLinks />} />
             <Route path="/emails" element={<Emails />} />
             <Route path="/proxies" element={<Proxies />} />
@@ -96,8 +102,6 @@ function Shell() {
 }
 
 export default function App() {
-  const [, setMounted] = useState(false)
-  useEffect(() => setMounted(true), [])
   return (
     <ConfigProvider theme={darkTheme} locale={zhCN}>
       <AntdApp>

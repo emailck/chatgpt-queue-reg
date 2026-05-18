@@ -1,4 +1,4 @@
-"""ChatGPT registration flow.
+"""register stage.
 
 Runs the access-token-only ChatGPT registration engine and writes the resulting
 account/session metadata into the new `chatgpt_accounts` table.
@@ -11,35 +11,58 @@ mailbox via the bundled adapter.
 from __future__ import annotations
 
 import threading
-from datetime import datetime
 from typing import Any
-
-from sqlmodel import Session
 
 from backend.core.constants import (
     ACCOUNT_STATUS_FAILED,
     ACCOUNT_STATUS_REGISTERED,
-    ACCOUNT_STATUS_REGISTERING,
-    JOB_TYPE_CHATGPT_REGISTER,
-    PIPELINE_TYPE_CHATGPT_REGISTER_ONLY,
 )
-from backend.core.db import engine, session_scope
+from backend.core.db import session_scope
 from backend.core.email_domain_policy import validate_email_domain_policy
 from backend.core.errors import JobCancelled
-from backend.core.flow_registry import register_flow
 from backend.core.job_context import JobContext
 from backend.core.json_utils import json_dumps, json_loads
 from backend.core.settings import settings
+from backend.core.stages import stage
 from backend.core.time_utils import utcnow
 from backend.models.account import ChatGPTAccount
+from backend.models.proxy import Proxy
+from backend.schemas.stage_io import RegisterInput, RegisterOutput
 
 
+@stage(
+    name="register",
+    requires_resources=["email_pool"],
+    optional_resources=["proxy_pool"],
+    default_concurrency=3,
+    input_schema=RegisterInput,
+    output_schema=RegisterOutput,
+    description="Register a ChatGPT account; binds identity (proxy/UA/cookies/fp).",
+)
 def run(ctx: JobContext) -> None:
     payload = dict(ctx.input or {})
     requested_email = str(payload.get("email") or "").strip()
     requested_password = str(payload.get("password") or "").strip()
     proxy_url = ctx.proxy_url or str(payload.get("proxy_url") or "").strip()
+    proxy_id = ctx.proxy_id or int(payload.get("proxy_id") or 0) or None
+    proxy_region = str(payload.get("proxy_region") or payload.get("region") or "").strip()
+    if not proxy_url:
+        proxy_resource = ctx.acquire(
+            "proxy_pool",
+            hint={"stage": "register", "proxy_id": proxy_id, "region": proxy_region},
+        )
+        proxy_payload = proxy_resource.payload or {}
+        proxy_url = str(proxy_payload.get("url") or proxy_resource.id or "").strip()
+        proxy_id = int(proxy_payload.get("proxy_id") or 0) or proxy_id
+        proxy_region = str(proxy_payload.get("region") or proxy_region or "")
+    elif not proxy_id:
+        proxy_id, proxy_region = _resolve_proxy_identity(proxy_url)
+
+    if not proxy_id or not proxy_url:
+        raise RuntimeError("register stage requires a bound proxy_id and proxy_url")
+    ctx.attach_proxy(proxy_id=proxy_id, proxy_url=proxy_url)
     extra_config = dict(payload.get("extra_config") or {})
+    also_record_to_at_pool = bool(ctx.input.get("also_record_to_at_pool", False))
 
     # Soft validation up front — the engine repeats it deeper, but failing
     # fast keeps the queue clean.
@@ -51,11 +74,14 @@ def run(ctx: JobContext) -> None:
             raise
 
     ctx.log(
-        "starting ChatGPT register flow",
+        "starting ChatGPT register stage",
         payload={
             "email_provided": bool(requested_email),
             "password_provided": bool(requested_password),
             "proxy_provided": bool(proxy_url),
+            "proxy_id": proxy_id,
+            "proxy_region": proxy_region,
+            "also_record_to_at_pool": also_record_to_at_pool,
         },
     )
 
@@ -81,7 +107,6 @@ def run(ctx: JobContext) -> None:
         _checkpoint()
 
     merged_extra = {**settings.get_all(), **extra_config}
-    register_only = _is_register_only_pipeline(ctx.pipeline_id)
     if requested_email:
         merged_extra["chatgpt_register_fixed_email"] = requested_email
     if requested_password:
@@ -120,12 +145,15 @@ def run(ctx: JobContext) -> None:
         raise
     _checkpoint()
 
-    account_id = _persist_account(result, proxy_url=proxy_url)
+    account_id = _persist_account(result, proxy_id=proxy_id, proxy_url=proxy_url)
     if account_id:
         ctx.attach_account(account_id)
         ctx.update_result({
             "account_id": account_id,
             "email": result.email,
+            "email_address": result.email,
+            "proxy_id": proxy_id,
+            "proxy_url": proxy_url or "",
             "registered_account_id": result.account_id,
             "workspace_id": result.workspace_id,
             "source": result.source,
@@ -141,11 +169,14 @@ def run(ctx: JobContext) -> None:
 
     _consume_email(email_service, ctx, note="registered")
 
-    # If this register job belongs to a register-only pipeline, also stash
-    # an entry in the AT pool so it's retrievable independently.
-    if account_id and register_only:
+    # If the caller asked us to also stash a row in the AT pool (e.g. the
+    # pipeline only runs `register` and wants the AT retrievable independently),
+    # do so now. The legacy `_is_register_only_pipeline` gating is gone:
+    # callers express intent via `also_record_to_at_pool` in stage_input.
+    if account_id and also_record_to_at_pool:
         at_id = _persist_access_token_account(
             result,
+            proxy_id=proxy_id,
             proxy_url=proxy_url,
             chatgpt_account_id=account_id,
             pipeline_id=ctx.pipeline_id,
@@ -155,6 +186,9 @@ def run(ctx: JobContext) -> None:
             ctx.log(f"access_token_accounts row created id={at_id}")
 
     ctx.log("register succeeded", payload={"account_id": account_id})
+
+
+# ---- helpers ---------------------------------------------------------------
 
 
 def _read_int_config(
@@ -177,6 +211,11 @@ def _result_consumed_email(result) -> bool:
     return bool(metadata.get("mailbox_account_consumed"))
 
 
+def _free_pool_note(reason: str) -> str:
+    text = str(reason or "").strip()
+    return text or "released"
+
+
 def _release_email_back_to_pool(email_service, ctx, *, reason: str) -> None:
     target = getattr(email_service, "claimed_email", None) or ""
     if not target:
@@ -186,7 +225,7 @@ def _release_email_back_to_pool(email_service, ctx, *, reason: str) -> None:
 
         ok = requeue(email=str(target))
         if ok:
-            ctx.log(f"邮箱已退回池: {target} ({reason})", level="warning")
+            ctx.log(f"邮箱已退回池: {target} ({_free_pool_note(reason)})", level="warning")
     except Exception as exc:
         ctx.log(f"邮箱退回池失败: {target} -> {exc}", level="error")
 
@@ -204,7 +243,16 @@ def _consume_email(email_service, ctx, *, note: str) -> None:
         ctx.log(f"邮箱标记消费失败: {target} -> {exc}", level="warning")
 
 
-# ---- internals ---------------------------------------------------------------
+def _resolve_proxy_identity(proxy_url: str) -> tuple[int | None, str]:
+    if not proxy_url:
+        return None, ""
+    with session_scope() as s:
+        from sqlalchemy import select as sa_select
+
+        row = s.exec(sa_select(Proxy).where(Proxy.url == proxy_url)).scalars().first()
+        if row is None:
+            return None, ""
+        return int(row.id or 0) or None, str(row.region or "")
 
 
 def _resolve_email_service(extra_config: dict[str, Any]):
@@ -218,7 +266,7 @@ def _resolve_email_service(extra_config: dict[str, Any]):
     return MicrosoftEmailService(extra_config=extra_config)
 
 
-def _persist_account(result, *, proxy_url: str) -> int | None:
+def _persist_account(result, *, proxy_id: int | None, proxy_url: str) -> int | None:
     metadata = dict(getattr(result, "metadata", None) or {})
     user_agent = str(metadata.get("user_agent") or "")
     cookies = metadata.get("cookies") or metadata.get("cookies_json") or []
@@ -250,6 +298,7 @@ def _persist_account(result, *, proxy_url: str) -> int | None:
             local_storage_json=json_dumps(local_storage or {}),
             browser_fingerprint_json=json_dumps(fingerprint or {}),
             user_agent=user_agent,
+            proxy_id=proxy_id,
             proxy_url=proxy_url or "",
             last_error=result.error_message or "",
             registered_at=utcnow() if result.success else None,
@@ -261,22 +310,10 @@ def _persist_account(result, *, proxy_url: str) -> int | None:
         return int(account.id or 0)
 
 
-def _is_register_only_pipeline(pipeline_id: int | None) -> bool:
-    if not pipeline_id:
-        return False
-    from backend.core.constants import PIPELINE_TYPE_CHATGPT_REGISTER_ONLY
-    from backend.models.pipeline import Pipeline
-
-    with Session(engine) as s:
-        pipeline = s.get(Pipeline, pipeline_id)
-        if pipeline is None:
-            return False
-        return str(pipeline.type or "") == PIPELINE_TYPE_CHATGPT_REGISTER_ONLY
-
-
 def _persist_access_token_account(
     result,
     *,
+    proxy_id: int | None,
     proxy_url: str,
     chatgpt_account_id: int | None,
     pipeline_id: int | None,
@@ -313,6 +350,7 @@ def _persist_access_token_account(
             local_storage_json=json_dumps(local_storage or {}),
             browser_fingerprint_json=json_dumps(fingerprint or {}),
             user_agent=user_agent,
+            proxy_id=proxy_id,
             proxy_url=proxy_url or "",
             metadata_json=json_dumps(metadata),
         )
@@ -320,6 +358,3 @@ def _persist_access_token_account(
         s.commit()
         s.refresh(row)
         return int(row.id or 0)
-
-
-register_flow(JOB_TYPE_CHATGPT_REGISTER, run)

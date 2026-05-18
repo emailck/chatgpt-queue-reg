@@ -1,6 +1,7 @@
 """Email APIs: import, list, ad-hoc read, message history, pool ops."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -9,9 +10,8 @@ from sqlalchemy import select as sa_select
 from sqlmodel import Session
 
 from backend.api.schemas import email_account_to_dict, email_message_to_dict
-from backend.core.constants import JOB_TYPE_EMAIL_READ
 from backend.core.db import engine, session_scope
-from backend.core.queue import enqueue_job
+from backend.core.json_utils import json_dumps, json_loads
 from backend.integrations.mail.imports import (
     MailImportBatchDeleteRequest,
     MailImportDeleteItem,
@@ -20,10 +20,12 @@ from backend.integrations.mail.imports import (
     MicrosoftMailImportStrategy,
 )
 from backend.integrations.mail import pool as email_pool
+from backend.integrations.mail.microsoft import MicrosoftMailbox, wait_for_otp
 from backend.models.email import EmailAccount, EmailMessage
 
 router = APIRouter()
 _strategy = MicrosoftMailImportStrategy()
+OTP_REQUEST_GRACE_SECONDS = 30
 
 
 class ImportRequest(BaseModel):
@@ -97,17 +99,59 @@ def batch_delete_emails(body: BatchDeleteRequest):
 
 @router.post("/api/email/read", tags=["email"])
 def read_email(body: ReadRequest):
-    job_id = enqueue_job(
-        type=JOB_TYPE_EMAIL_READ,
-        input={
-            "email": body.email,
-            "timeout_seconds": body.timeout_seconds,
-            "keyword": body.keyword,
-            "code_regex": body.code_regex,
-        },
-        email_address=body.email,
+    email = body.email.strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="email 不能为空")
+
+    with Session(engine) as s:
+        row = (
+            s.exec(
+                sa_select(EmailAccount)
+                .where(EmailAccount.provider == "microsoft")
+                .where(EmailAccount.email == email)
+            ).scalars().first()
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"邮箱不在 Microsoft 池中: {email}")
+
+    meta = json_loads(row.metadata_json, fallback={}) or {}
+    client_id = str(meta.get("client_id") or "")
+    refresh_token = row.refresh_token
+    if not client_id or not refresh_token:
+        raise HTTPException(status_code=409, detail=f"邮箱缺少 OAuth client_id/refresh_token: {email}")
+
+    since_dt = datetime.now(timezone.utc) - timedelta(seconds=OTP_REQUEST_GRACE_SECONDS)
+    data = wait_for_otp(
+        mailbox=MicrosoftMailbox(),
+        client_id=client_id,
+        refresh_token=refresh_token,
+        keyword=body.keyword,
+        code_pattern=body.code_regex,
+        timeout=int(body.timeout_seconds or 120),
+        poll_interval=5,
+        since_iso=since_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
-    return {"job_id": job_id}
+
+    with session_scope() as s:
+        s.add(EmailMessage(
+            account_id=row.id,
+            job_id=None,
+            email=row.email,
+            provider="microsoft",
+            subject=str(data.get("subject") or ""),
+            sender=str(data.get("sender") or ""),
+            body_text=str(data.get("body_text") or ""),
+            code=str(data.get("code") or ""),
+            raw_json=json_dumps(data.get("raw") or {}),
+        ))
+
+    return {
+        "email": email,
+        "code": data.get("code"),
+        "subject": data.get("subject"),
+        "sender": data.get("sender"),
+        "received_at": data.get("received_at"),
+    }
 
 
 @router.get("/api/email/messages", tags=["email"])

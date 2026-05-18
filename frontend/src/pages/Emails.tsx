@@ -127,14 +127,19 @@ export default function Emails() {
   }, [])
 
   useEffect(() => {
-    reloadAccounts()
-    reloadMessages()
-    reloadPoolStats()
+    const initial = setTimeout(() => {
+      reloadAccounts()
+      reloadMessages()
+      reloadPoolStats()
+    }, 0)
     const t = setInterval(() => {
       reloadMessages()
       reloadPoolStats()
     }, 6000)
-    return () => clearInterval(t)
+    return () => {
+      clearTimeout(initial)
+      clearInterval(t)
+    }
   }, [reloadAccounts, reloadMessages, reloadPoolStats])
 
   const submitImport = async () => {
@@ -442,8 +447,8 @@ export default function Emails() {
       <Drawer
         open={logJobId !== null}
         onClose={() => setLogJobId(null)}
-        width={680}
-        title={logJobId ? `Job #${logJobId}` : ''}
+        width={760}
+        title={logJobId ? `Job #${logJobId} 原始日志` : ''}
       >
         {logJobId !== null && <JobLogPanel jobId={logJobId} onTerminal={() => reloadMessages()} />}
       </Drawer>

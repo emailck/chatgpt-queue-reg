@@ -1,12 +1,25 @@
-"""Pipeline orchestrator.
+"""Pipeline orchestrator (declarative).
 
-Watches job terminal events.  When a job that belongs to a pipeline finishes,
-we either advance to the next step or close the pipeline out.
+A `Pipeline` carries:
+
+  * `stages_json`            — ordered list of stage names to walk through
+  * `stop_after`             — optional stage name; once it succeeds the
+                               pipeline closes out without enqueuing the rest
+  * `stage_inputs_json`      — per-stage private input dict
+  * `resource_bindings_json` — overrides for sms project routing etc.
+
+There is exactly one entry point (`create_pipeline(...)`); presets are sugar
+on top. Advancing is a pure function of the persisted lists, so the queue
+can support arbitrary stage chains and arbitrary cut-off points without
+adding new pipeline types.
+
+Carry-over fields between stages (whitelist; see ARCHITECTURE.md §3.2):
+  account_id, payment_link_id, email_address, proxy_id, proxy_url, codex_rt, codex_at
 """
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Iterable, Optional
 
 from sqlmodel import Session
 
@@ -17,22 +30,11 @@ from backend.core.constants import (
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
-    JOB_TYPE_CHATGPT_PAYMENT_LINK,
-    JOB_TYPE_CHATGPT_REGISTER,
-    JOB_TYPE_PAYMENT_EMPTY,
-    PIPELINE_STEP_DONE,
-    PIPELINE_STEP_PAYMENT_EMPTY,
-    PIPELINE_STEP_PAYMENT_LINK,
-    PIPELINE_STEP_REGISTER,
-    PIPELINE_STEP_TO_JOB_TYPE,
-    PIPELINE_STEPS_ORDERED,
-    PIPELINE_STEPS_REGISTER_ONLY,
-    PIPELINE_TYPE_CHATGPT_ACCOUNT,
-    PIPELINE_TYPE_CHATGPT_REGISTER_ONLY,
 )
 from backend.core.db import engine, session_scope
 from backend.core.json_utils import json_dumps, json_loads
 from backend.core.queue import enqueue_job
+from backend.core.stages import STAGE_REGISTRY
 from backend.core.time_utils import utcnow
 from backend.models.job import Job, JobEvent
 from backend.models.pipeline import Pipeline
@@ -40,67 +42,85 @@ from backend.models.pipeline import Pipeline
 logger = logging.getLogger(__name__)
 
 
-def create_chatgpt_account_pipeline(
+# ---- presets ---------------------------------------------------------------
+
+PRESETS: dict[str, tuple[str, ...]] = {
+    "register_only":             ("register",),
+    "register_with_codex_rt":    ("register", "oauth_codex"),
+    "account_paid":              ("register", "payment_link", "payment"),
+    "account_paid_with_codex_rt": ("register", "payment_link", "payment", "oauth_codex"),
+    "link_only":                 ("register", "payment_link"),
+    "codex_rt_only":             ("oauth_codex",),
+}
+
+
+CARRY_OVER_KEYS: tuple[str, ...] = (
+    "account_id",
+    "payment_link_id",
+    "email_address",
+    "proxy_id",
+    "proxy_url",
+    "codex_rt",
+    "codex_at",
+)
+
+
+# ---- creation --------------------------------------------------------------
+
+
+def resolve_stages(*, preset: str | None, stages: Iterable[str] | None) -> list[str]:
+    """Resolve `(preset, stages)` request inputs into a concrete stage list."""
+    if stages is not None:
+        result = [str(s).strip() for s in stages if str(s).strip()]
+    elif preset:
+        if preset not in PRESETS:
+            raise ValueError(f"unknown preset {preset!r}")
+        result = list(PRESETS[preset])
+    else:
+        raise ValueError("either preset or stages must be provided")
+
+    if not result:
+        raise ValueError("stage list is empty")
+    unknown = [s for s in result if s not in STAGE_REGISTRY]
+    if unknown:
+        raise ValueError(f"unknown stage(s): {unknown}")
+    return result
+
+
+def create_pipeline(
     *,
-    input: dict[str, Any] | None = None,
+    stages: list[str],
+    preset: str = "",
+    stop_after: str = "",
+    stage_inputs: dict[str, dict[str, Any]] | None = None,
+    resource_bindings: dict[str, dict[str, Any]] | None = None,
     proxy_id: int | None = None,
     proxy_url: str = "",
+    request_payload: dict[str, Any] | None = None,
 ) -> int:
-    """Full pipeline: register → payment link → empty placeholder."""
-    return _create_pipeline(
-        pipeline_type=PIPELINE_TYPE_CHATGPT_ACCOUNT,
-        steps=PIPELINE_STEPS_ORDERED,
-        input=input,
-        proxy_id=proxy_id,
-        proxy_url=proxy_url,
-    )
+    """Create a pipeline row and enqueue its first stage's job."""
+    if not stages:
+        raise ValueError("stages cannot be empty")
+    if stop_after and stop_after not in stages:
+        raise ValueError(f"stop_after {stop_after!r} not in stages list")
 
+    payload = dict(request_payload or {})
+    stage_inputs = dict(stage_inputs or {})
+    resource_bindings = dict(resource_bindings or {})
+    first_stage = stages[0]
 
-def create_chatgpt_register_only_pipeline(
-    *,
-    input: dict[str, Any] | None = None,
-    proxy_id: int | None = None,
-    proxy_url: str = "",
-) -> int:
-    """Register-only pipeline: stash access_token, no payment link."""
-    return _create_pipeline(
-        pipeline_type=PIPELINE_TYPE_CHATGPT_REGISTER_ONLY,
-        steps=PIPELINE_STEPS_REGISTER_ONLY,
-        input=input,
-        proxy_id=proxy_id,
-        proxy_url=proxy_url,
-    )
-
-
-def _create_pipeline(
-    *,
-    pipeline_type: str,
-    steps: tuple[str, ...],
-    input: dict[str, Any] | None,
-    proxy_id: int | None,
-    proxy_url: str,
-) -> int:
-    payload = dict(input or {})
-
-    # Auto-acquire a proxy from the pool when the caller didn't pin one.
     effective_proxy_url = (proxy_url or "").strip()
-    if not effective_proxy_url:
-        try:
-            from backend.core.proxy_pool import proxy_pool
 
-            picked = proxy_pool.get_next()
-            if picked:
-                effective_proxy_url = str(picked).strip()
-        except Exception:
-            effective_proxy_url = ""
-
-    first_step = steps[0]
     with session_scope() as s:
         pipeline = Pipeline(
-            type=pipeline_type,
+            preset=preset or "",
             status=JOB_STATUS_QUEUED,
-            current_step=first_step,
-            total_steps=len(steps),
+            stages_json=json_dumps(stages),
+            stop_after=stop_after or "",
+            stage_inputs_json=json_dumps(stage_inputs),
+            resource_bindings_json=json_dumps(resource_bindings),
+            current_stage=first_stage,
+            total_steps=len(stages),
             completed_steps=0,
             proxy_id=proxy_id,
             proxy_url=effective_proxy_url,
@@ -112,13 +132,16 @@ def _create_pipeline(
         pipeline_id = int(pipeline.id or 0)
 
     enqueue_job(
-        type=PIPELINE_STEP_TO_JOB_TYPE[first_step],
-        input=payload,
+        type=first_stage,
+        input=_compose_stage_input(stage_inputs, first_stage, prior_result={}, request_payload=payload),
         pipeline_id=pipeline_id,
         proxy_id=proxy_id,
         proxy_url=effective_proxy_url,
     )
     return pipeline_id
+
+
+# ---- cancellation ----------------------------------------------------------
 
 
 def cancel_pipeline(pipeline_id: int) -> bool:
@@ -131,7 +154,6 @@ def cancel_pipeline(pipeline_id: int) -> bool:
         pipeline.cancel_requested = True
         pipeline.updated_at = utcnow()
         s.add(pipeline)
-        # Also cancel any queued/running children so they exit fast.
         children = s.exec(
             __import__("sqlalchemy", fromlist=["select"]).select(Job).where(Job.pipeline_id == pipeline_id)
         ).scalars()
@@ -140,6 +162,9 @@ def cancel_pipeline(pipeline_id: int) -> bool:
                 job.cancel_requested = True
                 s.add(job)
     return True
+
+
+# ---- progression -----------------------------------------------------------
 
 
 def on_job_finished(job_id: int) -> None:
@@ -158,46 +183,62 @@ def on_job_finished(job_id: int) -> None:
             "job_result": json_loads(job.result_json, fallback={}),
             "job_account_id": job.account_id,
             "job_payment_link_id": job.payment_link_id,
-            "pipeline_type": pipeline.type,
             "pipeline_status": pipeline.status,
-            "pipeline_step": pipeline.current_step,
+            "pipeline_current_stage": pipeline.current_stage,
             "pipeline_id": pipeline.id,
         }
 
     _advance_pipeline(snapshot)
 
 
-def _advance_pipeline(snapshot: dict[str, Any]) -> None:
-    pipeline_id = int(snapshot["pipeline_id"])
-    pipeline_type = str(snapshot.get("pipeline_type") or "")
-    job_status = str(snapshot["job_status"])
-    job_type = str(snapshot["job_type"])
-    job_error = str(snapshot["job_error"] or "")
-    job_account_id = snapshot.get("job_account_id")
-    job_payment_link_id = snapshot.get("job_payment_link_id")
-    job_result = snapshot.get("job_result") or {}
+def _advance_pipeline(snap: dict[str, Any]) -> None:
+    pipeline_id = int(snap["pipeline_id"])
+    job_status = str(snap["job_status"])
+    job_type = str(snap["job_type"])
+    job_error = str(snap["job_error"] or "")
+    job_account_id = snap.get("job_account_id")
+    job_payment_link_id = snap.get("job_payment_link_id")
+    job_result = snap.get("job_result") or {}
 
     if job_status == JOB_STATUS_SUCCEEDED:
-        next_step = _next_step_after(pipeline_type, job_type)
         with session_scope() as s:
             pipeline = s.get(Pipeline, pipeline_id)
             if pipeline is None:
                 return
             if pipeline.status in {JOB_STATUS_FAILED, JOB_STATUS_CANCELLED}:
                 return
-            pipeline.completed_steps = pipeline.completed_steps + 1
+            stages = json_loads(pipeline.stages_json, fallback=[]) or []
+            stop_after = str(pipeline.stop_after or "")
+            stage_inputs = json_loads(pipeline.stage_inputs_json, fallback={}) or {}
+            request_payload = json_loads(pipeline.input_json, fallback={}) or {}
+
+            try:
+                idx = stages.index(job_type)
+            except ValueError:
+                # Job not in this pipeline's stages (shouldn't happen in
+                # normal flow). Treat as terminal.
+                pipeline.status = JOB_STATUS_SUCCEEDED
+                pipeline.finished_at = utcnow()
+                pipeline.updated_at = utcnow()
+                s.add(pipeline)
+                return
+
+            pipeline.completed_steps = max(int(pipeline.completed_steps or 0), idx + 1)
             pipeline.updated_at = utcnow()
             if job_account_id and not pipeline.account_id:
                 pipeline.account_id = int(job_account_id)
             if job_payment_link_id and not pipeline.payment_link_id:
                 pipeline.payment_link_id = int(job_payment_link_id)
-            if next_step is None:
+
+            terminal = (idx == len(stages) - 1) or (stop_after and stages[idx] == stop_after)
+            if terminal:
                 pipeline.status = JOB_STATUS_SUCCEEDED
-                pipeline.current_step = PIPELINE_STEP_DONE
+                pipeline.current_stage = stages[idx]
                 pipeline.finished_at = utcnow()
-                pipeline.result_json = json_dumps(
-                    {**(json_loads(pipeline.result_json, fallback={}) or {}), "last_job_result": job_result}
-                )
+                pipeline.result_json = json_dumps({
+                    **(json_loads(pipeline.result_json, fallback={}) or {}),
+                    "last_job_result": job_result,
+                })
                 s.add(pipeline)
                 s.add(JobEvent(
                     job_id=0,
@@ -207,7 +248,9 @@ def _advance_pipeline(snapshot: dict[str, Any]) -> None:
                     message="pipeline succeeded",
                 ))
                 return
-            pipeline.current_step = next_step
+
+            next_stage = stages[idx + 1]
+            pipeline.current_stage = next_stage
             pipeline.status = JOB_STATUS_RUNNING
             if pipeline.started_at is None:
                 pipeline.started_at = utcnow()
@@ -216,18 +259,28 @@ def _advance_pipeline(snapshot: dict[str, Any]) -> None:
                 job_id=0,
                 pipeline_id=pipeline_id,
                 level="info",
-                event_type="pipeline_step",
-                message=f"pipeline advanced to step={next_step}",
+                event_type="pipeline_stage",
+                message=f"pipeline advanced to stage={next_stage}",
             ))
-            input_payload = _build_step_input(pipeline, next_step, job_result)
+            input_payload = _compose_stage_input(stage_inputs, next_stage,
+                                                 prior_result=job_result,
+                                                 request_payload=request_payload)
             proxy_id = pipeline.proxy_id
             proxy_url = pipeline.proxy_url
+            if isinstance(input_payload, dict):
+                if input_payload.get("proxy_id") not in (None, ""):
+                    try:
+                        proxy_id = int(input_payload.get("proxy_id") or 0) or proxy_id
+                    except Exception:
+                        pass
+                if input_payload.get("proxy_url") not in (None, ""):
+                    proxy_url = str(input_payload.get("proxy_url") or proxy_url or "")
             account_id = pipeline.account_id
             payment_link_id = pipeline.payment_link_id
 
-        next_job_type = PIPELINE_STEP_TO_JOB_TYPE[next_step]
+        # Outside the session: enqueue.
         enqueue_job(
-            type=next_job_type,
+            type=next_stage,
             input=input_payload,
             pipeline_id=pipeline_id,
             account_id=account_id,
@@ -263,32 +316,28 @@ def _advance_pipeline(snapshot: dict[str, Any]) -> None:
             ))
 
 
-def _next_step_after(pipeline_type: str, job_type: str) -> str | None:
-    # register-only pipelines stop right after `chatgpt_register` succeeds.
-    if pipeline_type == PIPELINE_TYPE_CHATGPT_REGISTER_ONLY:
-        return None
-    if job_type == JOB_TYPE_CHATGPT_REGISTER:
-        return PIPELINE_STEP_PAYMENT_LINK
-    if job_type == JOB_TYPE_CHATGPT_PAYMENT_LINK:
-        return PIPELINE_STEP_PAYMENT_EMPTY
-    if job_type == JOB_TYPE_PAYMENT_EMPTY:
-        return None
-    return None
+def _compose_stage_input(
+    stage_inputs: dict[str, dict[str, Any]],
+    stage: str,
+    *,
+    prior_result: dict[str, Any],
+    request_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the final input dict for `stage`.
 
-
-def _build_step_input(pipeline: Pipeline, next_step: str, prior_result: dict[str, Any]) -> dict[str, Any]:
-    base = json_loads(pipeline.input_json, fallback={}) or {}
-    if next_step == PIPELINE_STEP_PAYMENT_LINK:
-        opts = dict(base.get("payment_link_options") or {})
-        opts["account_id"] = pipeline.account_id or prior_result.get("account_id")
-        # Default plan / country selection mirrors `payment.py` defaults.
-        plan = str(opts.get("plan") or "team").lower()
-        opts["plan"] = plan
-        if not opts.get("country"):
-            opts["country"] = "ID" if plan == "plus" else "US"
-        return opts
-    if next_step == PIPELINE_STEP_PAYMENT_EMPTY:
-        return {
-            "payment_link_id": pipeline.payment_link_id or prior_result.get("payment_link_id"),
-        }
-    return {}
+    Layering (later wins):
+      1. carry-over fields from `prior_result` (whitelist)
+      2. fields from the original `request_payload` that match carry-over keys
+         (so e.g. a top-level proxy_url survives even before the first stage runs)
+      3. explicit `stage_inputs[stage]`
+    """
+    out: dict[str, Any] = {}
+    for k in CARRY_OVER_KEYS:
+        if k in request_payload and request_payload.get(k) not in (None, ""):
+            out[k] = request_payload[k]
+    for k in CARRY_OVER_KEYS:
+        if k in prior_result and prior_result.get(k) not in (None, ""):
+            out[k] = prior_result[k]
+    explicit = dict(stage_inputs.get(stage) or {})
+    out.update(explicit)
+    return out

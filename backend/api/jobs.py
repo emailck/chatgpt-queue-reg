@@ -1,8 +1,11 @@
-"""Pipeline + Job APIs.
+"""Pipeline + Job APIs (v2).
 
-Pipelines own the user-facing batch ("create N ChatGPT accounts and produce
-their long-links"); Jobs are the per-step rows the worker pool actually
-consumes.
+Pipelines own the user-facing batch ("create N accounts walking these stages");
+Jobs are the per-stage rows the worker pool actually consumes.
+
+Everything is data-driven now:
+  - `POST /api/pipelines` takes either a `preset` or an explicit `stages` list.
+  - `POST /api/jobs` takes any registered stage name as `type`.
 """
 from __future__ import annotations
 
@@ -15,31 +18,27 @@ from sqlalchemy import select as sa_select
 from sqlmodel import Session
 
 from backend.api.schemas import (
-    account_to_dict,
     event_to_dict,
     job_to_dict,
-    payment_link_to_dict,
     pipeline_to_dict,
 )
 from backend.core.constants import (
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
     JOB_TERMINAL_STATUSES,
-    PIPELINE_TYPE_CHATGPT_ACCOUNT,
 )
 from backend.core.db import engine, session_scope
 from backend.core.job_context import subscribe_job_events
-from backend.core.json_utils import json_loads
 from backend.core.pipeline import (
+    PRESETS,
     cancel_pipeline,
-    create_chatgpt_account_pipeline,
-    create_chatgpt_register_only_pipeline,
+    create_pipeline,
+    resolve_stages,
 )
 from backend.core.queue import enqueue_job, get_pool
+from backend.core.stages import STAGE_REGISTRY
 from backend.core.time_utils import utcnow
-from backend.models.account import ChatGPTAccount
 from backend.models.job import Job, JobEvent
-from backend.models.payment import PaymentLink
 from backend.models.pipeline import Pipeline
 
 router = APIRouter()
@@ -48,34 +47,16 @@ router = APIRouter()
 # ---- request bodies ---------------------------------------------------------
 
 
-class PaymentLinkOptions(BaseModel):
-    plan: str = "team"  # "team" | "plus"
-    workspace_name: str = "MyWorkspace"
-    price_interval: str = "month"
-    seat_quantity: int = Field(default=2, ge=1, le=99)
-    country: str | None = None  # default chosen by plan
-    currency: str | None = None
-
-
-class ChatGPTPipelineRequest(BaseModel):
+class CreatePipelineRequest(BaseModel):
+    preset: Optional[str] = None
+    stages: Optional[list[str]] = None
+    stop_after: Optional[str] = None
+    stage_inputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    resource_bindings: dict[str, dict[str, Any]] = Field(default_factory=dict)
     count: int = Field(default=1, ge=1, le=200)
-    concurrency: Optional[int] = Field(default=None, ge=1, le=64)
-    email: Optional[str] = None
-    password: Optional[str] = None
     proxy_id: Optional[int] = None
     proxy_url: Optional[str] = None
-    payment_link_options: PaymentLinkOptions = Field(default_factory=PaymentLinkOptions)
-    extra_config: dict[str, Any] = Field(default_factory=dict)
-
-
-class ChatGPTRegisterOnlyRequest(BaseModel):
-    count: int = Field(default=1, ge=1, le=200)
-    concurrency: Optional[int] = Field(default=None, ge=1, le=64)
-    email: Optional[str] = None
-    password: Optional[str] = None
-    proxy_id: Optional[int] = None
-    proxy_url: Optional[str] = None
-    extra_config: dict[str, Any] = Field(default_factory=dict)
+    concurrency: Optional[dict[str, int]] = None  # {stage_name: n} per-stage resize
 
 
 class JobEnqueueRequest(BaseModel):
@@ -95,50 +76,55 @@ class IdsRequest(BaseModel):
 # ---- pipeline endpoints -----------------------------------------------------
 
 
-@router.post("/api/pipelines/chatgpt-account", tags=["pipelines"])
-def create_chatgpt_pipeline(body: ChatGPTPipelineRequest):
-    if body.concurrency is not None:
-        get_pool().set_concurrency(int(body.concurrency))
-    pipeline_ids: list[int] = []
-    for _ in range(body.count):
-        payload = {
-            "email": body.email,
-            "password": body.password,
-            "proxy_url": body.proxy_url,
-            "payment_link_options": body.payment_link_options.model_dump(),
-            "extra_config": body.extra_config or {},
-        }
-        pipeline_ids.append(
-            create_chatgpt_account_pipeline(
-                input=payload,
-                proxy_id=body.proxy_id,
-                proxy_url=body.proxy_url or "",
-            )
-        )
-    return {"pipeline_ids": pipeline_ids, "concurrency": get_pool().concurrency}
+@router.get("/api/pipelines/presets", tags=["pipelines"])
+def list_presets():
+    return {name: list(stages) for name, stages in PRESETS.items()}
 
 
-@router.post("/api/pipelines/chatgpt-register-only", tags=["pipelines"])
-def create_register_only_pipeline(body: ChatGPTRegisterOnlyRequest):
-    """Stop after access_token is obtained — no payment-link step."""
-    if body.concurrency is not None:
-        get_pool().set_concurrency(int(body.concurrency))
+@router.post("/api/pipelines", tags=["pipelines"])
+def create_pipeline_endpoint(body: CreatePipelineRequest):
+    try:
+        stages = resolve_stages(preset=body.preset, stages=body.stages)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if body.stop_after and body.stop_after not in stages:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stop_after {body.stop_after!r} not in resolved stage list",
+        )
+
+    if body.concurrency:
+        for stage_name, n in body.concurrency.items():
+            if stage_name not in STAGE_REGISTRY:
+                raise HTTPException(
+                    status_code=400, detail=f"unknown stage {stage_name!r}"
+                )
+            try:
+                get_pool().set_concurrency(stage_name, int(n))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+
     pipeline_ids: list[int] = []
     for _ in range(body.count):
-        payload = {
-            "email": body.email,
-            "password": body.password,
-            "proxy_url": body.proxy_url,
-            "extra_config": body.extra_config or {},
-        }
-        pipeline_ids.append(
-            create_chatgpt_register_only_pipeline(
-                input=payload,
-                proxy_id=body.proxy_id,
-                proxy_url=body.proxy_url or "",
-            )
+        pid = create_pipeline(
+            stages=list(stages),
+            preset=body.preset or "",
+            stop_after=body.stop_after or "",
+            stage_inputs=dict(body.stage_inputs or {}),
+            resource_bindings=dict(body.resource_bindings or {}),
+            proxy_id=body.proxy_id,
+            proxy_url=body.proxy_url or "",
         )
-    return {"pipeline_ids": pipeline_ids, "concurrency": get_pool().concurrency}
+        pipeline_ids.append(pid)
+
+    return {
+        "pipeline_ids": pipeline_ids,
+        "stages": list(stages),
+        "preset": body.preset,
+        "stop_after": body.stop_after or "",
+        "concurrency": get_pool().concurrency_map(),
+    }
 
 
 @router.get("/api/pipelines", tags=["pipelines"])
@@ -190,7 +176,6 @@ def delete_pipeline(pipeline_id: int):
             raise HTTPException(status_code=404, detail="pipeline not found")
         if pipeline.status in {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}:
             raise HTTPException(status_code=409, detail="cannot delete an active pipeline")
-        # Drop child jobs + events first.
         children = list(s.exec(sa_select(Job).where(Job.pipeline_id == pipeline_id)).scalars())
         for job in children:
             s.delete(job)
@@ -233,14 +218,32 @@ def batch_delete_pipelines(body: IdsRequest):
 
 @router.post("/api/jobs", tags=["jobs"])
 def enqueue_job_endpoint(body: JobEnqueueRequest):
+    stage_name = str(body.type or "").strip()
+    if not stage_name:
+        raise HTTPException(status_code=400, detail="job type is required")
+    if stage_name not in STAGE_REGISTRY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown stage {stage_name!r}; known: {sorted(STAGE_REGISTRY.keys())}",
+        )
+    payload = dict(body.input or {})
+    account_id = body.account_id
+    payment_link_id = body.payment_link_id
+    proxy_id = body.proxy_id
+    if account_id is None and payload.get("account_id") not in (None, ""):
+        account_id = int(payload.get("account_id") or 0) or None
+    if payment_link_id is None and payload.get("payment_link_id") not in (None, ""):
+        payment_link_id = int(payload.get("payment_link_id") or 0) or None
+    if proxy_id is None and payload.get("proxy_id") not in (None, ""):
+        proxy_id = int(payload.get("proxy_id") or 0) or None
     job_id = enqueue_job(
-        type=body.type,
-        input=body.input or {},
+        type=stage_name,
+        input=payload,
         pipeline_id=body.pipeline_id,
-        account_id=body.account_id,
-        payment_link_id=body.payment_link_id,
-        proxy_id=body.proxy_id,
-        proxy_url=body.proxy_url or "",
+        account_id=account_id,
+        payment_link_id=payment_link_id,
+        proxy_id=proxy_id,
+        proxy_url=body.proxy_url or str(payload.get("proxy_url") or ""),
     )
     return {"job_id": job_id}
 
@@ -405,7 +408,9 @@ def queue_stats():
             value = row
         key = str(value or "")
         counts[key] = counts.get(key, 0) + 1
+    pool = get_pool()
     return {
-        "pool_concurrency": get_pool().concurrency,
+        "concurrency": pool.concurrency_map(),
+        "inflight": pool.inflight_map(),
         "counts": counts,
     }

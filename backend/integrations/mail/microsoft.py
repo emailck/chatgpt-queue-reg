@@ -217,6 +217,7 @@ class MicrosoftMailbox:
         folders: Iterable[str] = DEFAULT_FOLDERS,
         top: int = 20,
         since_iso: str | None = None,
+        exclude_codes: Iterable[str] | None = None,
     ) -> dict[str, Any] | None:
         messages = self.list_messages(
             client_id=client_id,
@@ -226,12 +227,13 @@ class MicrosoftMailbox:
             since_iso=since_iso,
         )
         keyword_lower = (keyword or "").lower()
+        excluded = {str(code or "").strip() for code in (exclude_codes or ()) if str(code or "").strip()}
         for message in messages:
             haystack = f"{message.subject}\n{message.body_text}"
             if keyword_lower and keyword_lower not in haystack.lower():
                 continue
             code = _extract_otp(haystack, code_pattern)
-            if code:
+            if code and code not in excluded:
                 return {
                     "code": code,
                     "subject": message.subject,
@@ -305,6 +307,7 @@ def wait_for_otp(
     poll_interval: float = 5.0,
     log: Callable[[str], None] | None = None,
     since_iso: str | None = None,
+    exclude_codes: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     deadline = time.time() + max(1, int(timeout))
     last_seen_id: str = ""
@@ -315,6 +318,7 @@ def wait_for_otp(
             keyword=keyword,
             code_pattern=code_pattern,
             since_iso=since_iso,
+            exclude_codes=exclude_codes,
         )
         if result and result["id"] != last_seen_id:
             last_seen_id = result["id"]

@@ -97,6 +97,21 @@ class AccessTokenOnlyRegistrationEngine:
         metadata["mailbox_account_consumed"] = True
         result.metadata = metadata
 
+    def _build_phone_provider(self):
+        try:
+            from backend.integrations.chatgpt.phone_service import build_phone_provider
+
+            provider = build_phone_provider(
+                self.extra_config,
+                log_fn=self._log,
+                proxy_url=self.proxy_url or "",
+            )
+        except Exception as exc:
+            raise RuntimeError(f"初始化手机接码失败: {exc}") from exc
+        if provider:
+            self._log(f"手机接码已开启: provider={provider.provider_name}")
+        return provider
+
     def _should_retry(self, message: str) -> bool:
         text = str(message or "").lower()
         retriable_markers = [
@@ -116,6 +131,10 @@ class AccessTokenOnlyRegistrationEngine:
             "organization",
             "otp",
             "验证码",
+            "add-phone",
+            "手机验证",
+            "接码",
+            "phone verification",
             "session",
             "accessToken",
             "next-auth",
@@ -185,6 +204,7 @@ class AccessTokenOnlyRegistrationEngine:
                         browser_mode=self.browser_mode,
                     )
                     chatgpt_client._log = self._log
+                    phone_provider = self._build_phone_provider()
 
                     self._log("步骤 1/2: 执行注册状态机...")
 
@@ -197,6 +217,7 @@ class AccessTokenOnlyRegistrationEngine:
                         skymail_adapter,
                         otp_wait_timeout=register_otp_wait_seconds,
                         otp_resend_wait_timeout=register_otp_resend_wait_seconds,
+                        phone_provider=phone_provider,
                     )
 
                     if not success:
@@ -222,8 +243,10 @@ class AccessTokenOnlyRegistrationEngine:
                             or ("v2_acct_" + chatgpt_client.device_id[:8])
                         )
                         result.workspace_id = session_result.get("workspace_id", "")
+                        identity_state = chatgpt_client.export_identity_state()
                         result.metadata = {
                             **(result.metadata or {}),
+                            **identity_state,
                             "auth_provider": session_result.get("auth_provider", ""),
                             "expires": session_result.get("expires", ""),
                             "user_id": session_result.get("user_id", ""),

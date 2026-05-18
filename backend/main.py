@@ -14,14 +14,19 @@ from backend.api.accounts import router as accounts_router
 from backend.api.access_tokens import router as access_tokens_router
 from backend.api.auth import router as auth_router
 from backend.api.browser_debug import router as browser_debug_router
+from backend.api.cards import router as cards_router
+from backend.api.codex_tokens import router as codex_tokens_router
 from backend.api.emails import router as emails_router
 from backend.api.jobs import router as jobs_router
 from backend.api.payments import router as payments_router
+from backend.api.pools import router as pools_router
 from backend.api.proxies import router as proxies_router
 from backend.api.settings import router as settings_router
+from backend.api.sms import router as sms_router
 import backend.compat  # noqa: F401 (installs sys.modules shims)
 from backend.core.db import init_db
 from backend.core.queue import get_pool, recover_orphan_jobs
+from backend.core.scheduler import get_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -29,18 +34,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # Importing the flow modules registers them with the dispatcher.
-    import backend.flows  # noqa: F401
+    import backend.stages  # noqa: F401
+    import backend.core.pools  # noqa: F401
 
     interrupted = recover_orphan_jobs()
     if interrupted:
         logging.getLogger(__name__).warning("recovered %s orphan jobs as interrupted", interrupted)
 
     pool = get_pool()
+    scheduler = get_scheduler()
     pool.start()
+    scheduler.start()
     try:
         yield
     finally:
+        scheduler.stop()
         pool.stop()
 
 
@@ -60,6 +68,10 @@ app.include_router(access_tokens_router)
 app.include_router(payments_router)
 app.include_router(emails_router)
 app.include_router(proxies_router)
+app.include_router(cards_router)
+app.include_router(sms_router)
+app.include_router(codex_tokens_router)
+app.include_router(pools_router)
 app.include_router(browser_debug_router)
 app.include_router(settings_router)
 

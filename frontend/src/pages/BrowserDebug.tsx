@@ -43,9 +43,12 @@ export default function BrowserDebug() {
   }, [])
 
   useEffect(() => {
-    reload()
+    const initial = setTimeout(reload, 0)
     const t = setInterval(reload, 4000)
-    return () => clearInterval(t)
+    return () => {
+      clearTimeout(initial)
+      clearInterval(t)
+    }
   }, [reload])
 
   const submit = async () => {

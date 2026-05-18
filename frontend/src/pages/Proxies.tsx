@@ -53,7 +53,10 @@ export default function Proxies() {
     }
   }, [])
 
-  useEffect(() => { reload() }, [reload])
+  useEffect(() => {
+    const initial = setTimeout(reload, 0)
+    return () => clearTimeout(initial)
+  }, [reload])
 
   const submitCreate = async () => {
     const values = await form.validateFields()

@@ -50,11 +50,14 @@ def _import_models() -> None:
     from backend.models import access_token  # noqa: F401
     from backend.models import account  # noqa: F401
     from backend.models import browser_session  # noqa: F401
+    from backend.models import codex_token  # noqa: F401
     from backend.models import email as _email_models  # noqa: F401
     from backend.models import job  # noqa: F401
     from backend.models import payment  # noqa: F401
+    from backend.models import payment_card  # noqa: F401
     from backend.models import pipeline  # noqa: F401
     from backend.models import proxy  # noqa: F401
+    from backend.models import sms_project  # noqa: F401
 
 
 def init_db() -> None:
