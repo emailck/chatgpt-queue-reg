@@ -123,7 +123,19 @@ def paypal_guest_signup_authorize(
         cookie_count = len(list(http.cookies))
     except Exception:
         pass
-    emit(log, f"paypal_http: signup access_token={'present' if access_token else 'EMPTY'} cookies={cookie_count}")
+    cookie_names = []
+    try:
+        cookie_names = [getattr(c, "name", str(c)) for c in http.cookies][:20]
+    except Exception:
+        pass
+    signup_keys = ""
+    try:
+        inner = find_key_recursive(signup_data, "onboardAccount") or signup_data
+        if isinstance(inner, dict):
+            signup_keys = str(list(inner.keys())[:15])
+    except Exception:
+        pass
+    emit(log, f"paypal_http: signup access_token={'present' if access_token else 'EMPTY'} cookies={cookie_count} names={cookie_names} response_keys={signup_keys}")
     if access_token:
         http.headers.update({"x-paypal-internal-euat": access_token})
     else:
