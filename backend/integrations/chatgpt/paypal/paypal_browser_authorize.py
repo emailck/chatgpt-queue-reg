@@ -243,6 +243,16 @@ def _wait_for_signup_page(
             return
         if "paypal.com" in cur and _check_rsc_redirect(page, log):
             continue
+        if "paypal.com" in cur and _check_paypal_error_page(page, log) and approve_url:
+            emit(log, "paypal_http: PayPal 'Something went wrong' page — navigating back to approve URL")
+            try:
+                page.goto(approve_url, wait_until="commit", timeout=15000)
+                time.sleep(5)
+                loaded = False
+            except Exception as exc:
+                emit(log, f"paypal_http: goto approve_url failed: {str(exc)[:80]}")
+                time.sleep(3)
+            continue
         if ("/pay" in cur or "/agreements/approve" in cur) and "paypal.com" in cur:
             if not loaded:
                 emit(log, "paypal_http: browser on /pay page, waiting for load...")
@@ -277,6 +287,19 @@ def _wait_for_signup_page(
                 continue
         time.sleep(2)
     raise PayPalHttpError(f"browser: 等待 signup 页超时 (120s), url={page.url[:120]}")
+
+
+def _check_paypal_error_page(page: Any, log: LogFn | None) -> bool:
+    """Detect PayPal's 'Something went wrong on our end' error page."""
+    try:
+        return bool(page.evaluate("""() => {
+            const text = (document.body && document.body.innerText || '').toLowerCase();
+            return text.includes("something went wrong on our end") ||
+                   text.includes("we're having some trouble completing your request") ||
+                   text.includes("having some trouble completing");
+        }"""))
+    except Exception:
+        return False
 
 
 def _hard_reload(page: Any, approve_url: str, log: LogFn | None) -> None:
