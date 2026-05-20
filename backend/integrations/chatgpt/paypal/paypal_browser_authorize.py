@@ -898,29 +898,27 @@ def _submit_and_handle_otp(
 
 
 def _wait_after_otp(page: Any, log: LogFn | None) -> None:
-    """After OTP fill, wait for PayPal to process and navigate AWAY from signup.
-
-    Critical: do NOT click any submit button while still on /checkoutweb/signup.
-    The OTP dialog disappearing doesn't mean the page is ready — PayPal still
-    processes the signup form. Clicking before navigation triggers anti-fraud
-    (re-submits the signup form). Just wait for URL change.
-    """
+    """After OTP fill, wait for navigation AWAY from /checkoutweb/signup via event-driven URL match."""
     emit(log, "paypal_http: browser waiting for OTP to process (URL change)...")
-    start_url = page.url
-    deadline = time.time() + 90
-    while time.time() < deadline:
+    try:
+        page.wait_for_url(
+            lambda url: ("/webapps/hermes" in url
+                         or "pay.openai.com" in url
+                         or "chatgpt.com" in url
+                         or "/agreements/approve" in url
+                         or ("paypal.com" in url and "/checkoutweb/signup" not in url and "/checkoutweb/" not in url)),
+            timeout=90000,
+        )
         try:
-            cur = page.url
-            if "/webapps/hermes" in cur or "pay.openai.com" in cur or "chatgpt.com" in cur or "/agreements/approve" in cur:
-                emit(log, f"paypal_http: browser OTP processed, navigated to {cur[:80]}")
-                return
-            if cur != start_url and "/checkoutweb/signup" not in cur:
-                emit(log, f"paypal_http: browser navigated post-OTP to {cur[:80]}")
-                return
+            emit(log, f"paypal_http: browser OTP processed, navigated to {page.url[:120]}")
         except Exception:
             pass
-        time.sleep(1)
-    emit(log, "paypal_http: browser OTP wait timed out (no navigation)", level="warning")
+    except Exception:
+        try:
+            cur = page.url
+        except Exception:
+            cur = "?"
+        emit(log, f"paypal_http: browser OTP wait timed out (no navigation), url={cur[:120]}", level="warning")
 
 
 def _click_submit(page: Any) -> None:
