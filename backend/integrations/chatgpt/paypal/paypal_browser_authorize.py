@@ -64,7 +64,16 @@ def browser_paypal_checkout(
 
             _wait_for_signup_page(page, log)
 
-            _fill_signup_form(page, phone, password, address, log)
+            for fill_attempt in range(3):
+                fill_ok = _fill_signup_form(page, phone, password, address, log)
+                if fill_ok:
+                    break
+                emit(log, f"paypal_http: browser form fill failed (attempt {fill_attempt + 1}/3), refreshing page")
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+                time.sleep(3)
+                _wait_for_signup_page(page, log)
+            else:
+                raise PayPalHttpError("browser: signup 表单填写 3 次均失败")
 
             _submit_and_handle_otp(page, paypal_cfg, smsurl, log)
 
@@ -173,10 +182,13 @@ def _fill_signup_form(
     _fill_field_safe(page, "zip", address.get("postal_code") or "37167", log)
     _fill_field_safe(page, "password", password, log)
 
-    _verify_fields(page, fields + [("zip", address.get("postal_code") or "37167")], log)
+    mismatches = _verify_fields(page, fields + [("zip", address.get("postal_code") or "37167")], log)
+    if mismatches:
+        emit(log, f"paypal_http: browser form verification failed: {mismatches}", level="warning")
+        return False
 
     emit(log, f"paypal_http: browser form filled email={email} phone={phone_norm[:4]}...")
-    return {"email": email, "card_number": card["number"], "password": password}
+    return True
 
 
 _FIELD_SELECTORS = {
@@ -262,8 +274,8 @@ def _fill_field_safe(page: Any, name: str, value: str, log: LogFn | None) -> Non
     time.sleep(0.3)
 
 
-def _verify_fields(page: Any, fields: list[tuple[str, str]], log: LogFn | None) -> None:
-    """Read back field values and warn on mismatches."""
+def _verify_fields(page: Any, fields: list[tuple[str, str]], log: LogFn | None) -> list[str]:
+    """Read back field values; return list of field names that are empty or mismatched."""
     mismatches = []
     for name, expected in fields:
         if not expected:
@@ -282,8 +294,7 @@ def _verify_fields(page: Any, fields: list[tuple[str, str]], log: LogFn | None) 
                     break
             except Exception:
                 continue
-    if mismatches:
-        emit(log, f"paypal_http: browser WARNING field value mismatch: {mismatches}", level="warning")
+    return mismatches
 
 
 def _set_country_us(page: Any) -> None:
