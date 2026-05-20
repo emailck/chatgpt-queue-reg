@@ -116,17 +116,59 @@ def _build_camoufox_proxy(proxy_url: str) -> dict[str, str] | None:
 
 
 def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
-    for i in range(30):
+    for i in range(60):
         cur = page.url
         if "/checkoutweb/signup" in cur:
-            emit(log, f"paypal_http: browser on signup page")
+            emit(log, "paypal_http: browser on signup page")
             time.sleep(2)
             return
         if "/webapps/hermes" in cur:
             emit(log, "paypal_http: browser landed on hermes directly (already authed?)")
             return
+        if "/pay" in cur and "paypal.com" in cur:
+            if i == 0:
+                emit(log, "paypal_http: browser on /pay page, clicking through to signup")
+                time.sleep(3)
+            _click_through_pay_page(page, log)
         time.sleep(1)
     raise PayPalHttpError(f"browser: 等待 signup 页超时, url={page.url[:120]}")
+
+
+def _click_through_pay_page(page: Any, log: LogFn | None) -> None:
+    """Handle PayPal's /pay intermediate page — click 'Pay with Card' → 'Continue'."""
+    try:
+        for text in [
+            "Debit or Credit Card",
+            "Pay with Debit or Credit Card",
+            "Pay With Card",
+            "Credit or debit card",
+            "Card",
+        ]:
+            btn = page.query_selector(f'button:has-text("{text}"), a:has-text("{text}"), div[role="button"]:has-text("{text}")')
+            if btn:
+                try:
+                    if btn.is_visible():
+                        btn.scroll_into_view_if_needed()
+                        btn.click()
+                        emit(log, f"paypal_http: browser clicked '{text}' on /pay page")
+                        time.sleep(2)
+                        break
+                except Exception:
+                    continue
+        for text in ["Continue to Payment", "Continue", "Next"]:
+            btn = page.query_selector(f'button:has-text("{text}")')
+            if btn:
+                try:
+                    if btn.is_visible():
+                        btn.scroll_into_view_if_needed()
+                        btn.click()
+                        emit(log, f"paypal_http: browser clicked '{text}' on /pay page")
+                        time.sleep(2)
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
 
 def _rand_email() -> str:
