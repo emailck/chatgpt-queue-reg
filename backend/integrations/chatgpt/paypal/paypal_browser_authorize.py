@@ -140,36 +140,43 @@ def _fill_signup_form(
     password: str,
     address: dict[str, str],
     log: LogFn | None,
-) -> None:
-    """Fill all fields on /checkoutweb/signup using page.fill() for speed."""
+) -> dict[str, str]:
+    """Fill all fields on /checkoutweb/signup with React-safe value injection."""
     emit(log, "paypal_http: browser filling signup form")
 
+    _remove_captcha_elements(page)
     _set_country_us(page)
     time.sleep(1)
 
     email = _rand_email()
-
-    _fill_field(page, "email", email)
-    _fill_field(page, "phone", _normalize_phone(phone))
-
     card = _generate_visa_card()
-    _fill_field(page, "cardNumber", card["number"])
-    _fill_field(page, "expiry", card["expiry"])
-    _fill_field(page, "cvv", card["cvv"])
-
     first_name = address.get("first_name") or "Tommy"
     last_name = address.get("last_name") or "Jacobs"
-    _fill_field(page, "firstName", first_name)
-    _fill_field(page, "lastName", last_name)
-    _fill_field(page, "street", address.get("line1") or "283 Clearview Drive")
-    _fill_field(page, "city", address.get("city") or "Smyrna")
+    phone_norm = _normalize_phone(phone)
+
+    fields = [
+        ("email", email),
+        ("phone", phone_norm),
+        ("cardNumber", card["number"]),
+        ("expiry", card["expiry"]),
+        ("cvv", card["cvv"]),
+        ("firstName", first_name),
+        ("lastName", last_name),
+        ("street", address.get("line1") or "283 Clearview Drive"),
+        ("city", address.get("city") or "Smyrna"),
+    ]
+    for name, value in fields:
+        _fill_field_safe(page, name, value, log)
 
     _set_state(page, address.get("state") or "TN")
 
-    _fill_field(page, "zip", address.get("postal_code") or "37167")
-    _fill_field(page, "password", password)
+    _fill_field_safe(page, "zip", address.get("postal_code") or "37167", log)
+    _fill_field_safe(page, "password", password, log)
 
-    emit(log, f"paypal_http: browser form filled email={email} phone={_normalize_phone(phone)[:4]}...")
+    _verify_fields(page, fields + [("zip", address.get("postal_code") or "37167")], log)
+
+    emit(log, f"paypal_http: browser form filled email={email} phone={phone_norm[:4]}...")
+    return {"email": email, "card_number": card["number"], "password": password}
 
 
 _FIELD_SELECTORS = {
@@ -187,18 +194,96 @@ _FIELD_SELECTORS = {
 }
 
 
-def _fill_field(page: Any, name: str, value: str) -> None:
-    if not value:
-        return
+def _remove_captcha_elements(page: Any) -> None:
+    try:
+        page.evaluate("""() => {
+            const sels = [
+                '#captchaComponent', '.captcha-overlay', '.captcha-container',
+                '.appChallengeNS', '#g-anomalydetection-div',
+                'iframe[src*="recaptcha"]', 'iframe[title*="recaptcha" i]',
+            ];
+            for (const sel of sels) {
+                document.querySelectorAll(sel).forEach(el => el.remove());
+            }
+            document.querySelectorAll('iframe').forEach(f => {
+                if (/recaptcha|captcha|challenge/i.test((f.src||'')+(f.title||''))) f.remove();
+            });
+            document.documentElement.style.overflow = '';
+            document.body.style.overflow = '';
+        }""")
+    except Exception:
+        pass
+
+
+def _wait_for_field(page: Any, name: str, timeout: int = 15000) -> Any:
+    """Wait for a field to appear and become visible, then return it."""
     for sel in _FIELD_SELECTORS.get(name, []):
         try:
-            el = page.query_selector(sel)
-            if el and el.is_visible():
-                el.scroll_into_view_if_needed()
-                el.fill(value)
-                return
+            el = page.wait_for_selector(sel, state="visible", timeout=timeout)
+            if el:
+                return el
         except Exception:
             continue
+    return None
+
+
+def _react_fill(page: Any, el: Any, value: str) -> None:
+    """Fill an input using the native setter + event dispatch to bypass React controlled inputs."""
+    try:
+        el.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    page.evaluate("""([el, value]) => {
+        el.focus();
+        // clear
+        const proto = el instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) desc.set.call(el, '');
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        // set value
+        if (desc && desc.set) desc.set.call(el, value);
+        else el.value = value;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        el.dispatchEvent(new Event('blur', {bubbles: true}));
+    }""", [el, value])
+
+
+def _fill_field_safe(page: Any, name: str, value: str, log: LogFn | None) -> None:
+    """Wait for field → fill with React-safe injection → verify."""
+    if not value:
+        return
+    el = _wait_for_field(page, name)
+    if not el:
+        emit(log, f"paypal_http: browser WARNING field '{name}' not found", level="warning")
+        return
+    _react_fill(page, el, value)
+    time.sleep(0.3)
+
+
+def _verify_fields(page: Any, fields: list[tuple[str, str]], log: LogFn | None) -> None:
+    """Read back field values and warn on mismatches."""
+    mismatches = []
+    for name, expected in fields:
+        if not expected:
+            continue
+        for sel in _FIELD_SELECTORS.get(name, []):
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    actual = (el.input_value() or "").strip()
+                    exp_digits = re.sub(r"\D", "", expected)
+                    act_digits = re.sub(r"\D", "", actual)
+                    if not actual:
+                        mismatches.append(name)
+                    elif exp_digits and len(exp_digits) >= 3 and exp_digits[-3:] not in act_digits:
+                        mismatches.append(name)
+                    break
+            except Exception:
+                continue
+    if mismatches:
+        emit(log, f"paypal_http: browser WARNING field value mismatch: {mismatches}", level="warning")
 
 
 def _set_country_us(page: Any) -> None:
