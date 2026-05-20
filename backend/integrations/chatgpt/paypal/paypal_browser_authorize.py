@@ -394,7 +394,8 @@ def _fill_signup_form(
     emit(log, f"paypal_http: browser signup page diag: {diag}")
 
     _set_country_us(page)
-    time.sleep(1)
+    time.sleep(3)
+    _wait_for_any_field(page, timeout=10)
 
     email = _rand_email()
     card = _generate_visa_card()
@@ -520,16 +521,20 @@ def _find_field(page: Any, name: str) -> Any:
 
 
 def _fill_field_safe(page: Any, name: str, value: str, log: LogFn | None) -> None:
-    """Find field, type value with human-like keystrokes."""
+    """Find field, type value with human-like keystrokes. Retries on DOM detach."""
     if not value:
         return
-    deadline = time.time() + 5
+    deadline = time.time() + 8
     while time.time() < deadline:
         el = _find_field(page, name)
         if el:
-            _human_type(page, el, value)
-            _human_delay(0.3, 0.8)
-            return
+            try:
+                _human_type(page, el, value)
+                _human_delay(0.3, 0.8)
+                return
+            except Exception:
+                time.sleep(1)
+                continue
         time.sleep(0.5)
     emit(log, f"paypal_http: browser WARNING field '{name}' not found", level="warning")
 
