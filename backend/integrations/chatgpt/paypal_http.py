@@ -289,6 +289,8 @@ def _stripe_init(session: Any, pk: str, session_id: str, ctx: dict[str, Any]) ->
         "redirect_type": "url",
     }
     resp = session.post(url, data=data, headers=_stripe_headers(), timeout=30)
+    if resp.status_code == 400 and "parameter_unknown" in _short_body(resp):
+        resp = session.post(url, data={"key": pk, "eid": ctx["eid"]}, headers=_stripe_headers(), timeout=30)
     payload = _json_response(resp, "stripe init")
     if not payload.get("init_checksum"):
         raise PayPalHttpError(f"stripe init 未返回 init_checksum: {_short_body(resp)}")
