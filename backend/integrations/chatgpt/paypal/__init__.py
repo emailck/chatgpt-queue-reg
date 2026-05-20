@@ -1,5 +1,6 @@
 from __future__ import annotations
 
-from backend.integrations.chatgpt.paypal import PayPalHttpError, run_paypal_http_payment
+from .orchestrator import run_paypal_http_payment
+from .runtime import PayPalHttpError
 
 __all__ = ["PayPalHttpError", "run_paypal_http_payment"]
