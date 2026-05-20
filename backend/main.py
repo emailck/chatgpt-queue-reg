@@ -19,6 +19,7 @@ from backend.api.codex_tokens import router as codex_tokens_router
 from backend.api.emails import router as emails_router
 from backend.api.jobs import router as jobs_router
 from backend.api.payments import router as payments_router
+from backend.api.paypal_numbers import router as paypal_numbers_router
 from backend.api.pools import router as pools_router
 from backend.api.proxies import router as proxies_router
 from backend.api.settings import router as settings_router
@@ -69,6 +70,7 @@ app.include_router(payments_router)
 app.include_router(emails_router)
 app.include_router(proxies_router)
 app.include_router(cards_router)
+app.include_router(paypal_numbers_router)
 app.include_router(sms_router)
 app.include_router(codex_tokens_router)
 app.include_router(pools_router)

@@ -55,6 +55,7 @@ def _import_models() -> None:
     from backend.models import job  # noqa: F401
     from backend.models import payment  # noqa: F401
     from backend.models import payment_card  # noqa: F401
+    from backend.models import paypal_number  # noqa: F401
     from backend.models import pipeline  # noqa: F401
     from backend.models import proxy  # noqa: F401
     from backend.models import sms_project  # noqa: F401
