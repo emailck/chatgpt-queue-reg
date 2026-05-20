@@ -99,7 +99,7 @@ def paypal_guest_signup_authorize(
         country=country,
         label="paypal InitiateRiskBasedTwoFactorPhoneConfirmationMutation",
     )
-    phone_state = _extract_phone_confirmation(init_data)
+    phone_state = _extract_phone_confirmation(init_data, require_auth_ids=True)
     otp = fetch_paypal_otp({**paypal_cfg, "otp_file": paypal_cfg.get("otp_file") or "", "smsurl": smsurl}, timeout=int(paypal_cfg.get("otp_timeout") or 90), log=log)
     if not otp:
         raise PayPalHttpError("PayPal phone OTP 获取失败")
@@ -111,7 +111,9 @@ def paypal_guest_signup_authorize(
         country=country,
         label="paypal ConfirmRiskBasedTwoFactorPhoneConfirmationMutation",
     )
-    _extract_phone_confirmation(confirm_data)
+    confirm_state = _extract_phone_confirmation(confirm_data, require_auth_ids=False)
+    if confirm_state["state"].upper() != "CONFIRMED":
+        raise PayPalHttpError(f"PayPal phone confirmation 未通过 state={confirm_state['state']!r}: {confirm_data}")
 
     signup_payload = _signup_payload(ec_token, paypal_cfg, phone_number, phone_country_code_value, country, signup_email)
     signup_data = graphql_checkoutweb(http, signup_payload, referer=signup_url, ec_token=ec_token, country=country, label="paypal SignUpNewMemberMutation")
@@ -480,15 +482,22 @@ def _signup_address(paypal_cfg: dict[str, Any], first_name: str, last_name: str,
     }
 
 
-def _extract_phone_confirmation(payload: Any) -> dict[str, str]:
+def _extract_phone_confirmation(payload: Any, *, require_auth_ids: bool) -> dict[str, str]:
+    """Pull authId/challengeId/state from initiate or confirm responses.
+
+    `require_auth_ids` should be True for the initiate response (we need both
+    ids to call confirm next), False for the confirm response (server returns
+    them as null on success; only `state` is meaningful there).
+    """
     found = find_key_recursive(payload, "initiateRiskBasedTwoFactorPhoneConfirmation") or find_key_recursive(payload, "confirmRiskBasedTwoFactorPhoneConfirmation")
     if not isinstance(found, dict):
         raise PayPalHttpError(f"PayPal phone confirmation 响应缺少确认状态: {payload}")
     auth_id = str(found.get("authId") or "")
     challenge_id = str(found.get("challengeId") or "")
-    if not auth_id or not challenge_id:
+    state = str(found.get("state") or "")
+    if require_auth_ids and (not auth_id or not challenge_id):
         raise PayPalHttpError(f"PayPal phone confirmation 响应缺少 authId/challengeId: {payload}")
-    return {"authId": auth_id, "challengeId": challenge_id, "state": str(found.get("state") or "")}
+    return {"authId": auth_id, "challengeId": challenge_id, "state": state}
 
 
 def _extract_buyer_access_token(payload: Any) -> str:
