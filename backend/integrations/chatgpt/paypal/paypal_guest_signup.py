@@ -115,6 +115,8 @@ def paypal_guest_signup_authorize(
     if confirm_state["state"].upper() != "CONFIRMED":
         raise PayPalHttpError(f"PayPal phone confirmation 未通过 state={confirm_state['state']!r}: {confirm_data}")
 
+    if not paypal_cfg.get("signup_password") and not paypal_cfg.get("guest_password") and not paypal_cfg.get("password"):
+        paypal_cfg["signup_password"] = gen_paypal_password()
     signup_payload = _signup_payload(ec_token, paypal_cfg, phone_number, phone_country_code_value, country, signup_email)
     signup_data = graphql_checkoutweb(http, signup_payload, referer=signup_url, ec_token=ec_token, country=country, label="paypal SignUpNewMemberMutation")
     access_token = _extract_buyer_access_token(signup_data)
@@ -148,7 +150,38 @@ def paypal_guest_signup_authorize(
     hermes_url = str(drop_resp.url)
     if "/webapps/hermes" not in hermes_url:
         hermes_url = _hermes_url(signup_url, ba_token, ec_token)
-    return authorize_from_hermes_fn(http, hermes_url, ba_token, log)
+
+    try:
+        return authorize_from_hermes_fn(http, hermes_url, ba_token, log)
+    except PayPalHttpError as exc:
+        if "ANONYMOUS" not in str(exc):
+            raise
+        emit(log, "paypal_http: HTTP authorize failed (ANONYMOUS) — falling back to browser", level="warning")
+
+    proxy_url = str(paypal_cfg.get("_proxy_url") or "")
+    from .paypal_browser_authorize import browser_authorize_from_hermes
+
+    http_cookies = []
+    try:
+        for c in http.cookies:
+            http_cookies.append({
+                "name": getattr(c, "name", ""),
+                "value": getattr(c, "value", ""),
+                "domain": getattr(c, "domain", ".paypal.com"),
+                "path": getattr(c, "path", "/"),
+            })
+    except Exception:
+        pass
+
+    return browser_authorize_from_hermes(
+        hermes_url=hermes_url,
+        ba_token=ba_token,
+        proxy_url=proxy_url,
+        log=log,
+        signup_email=signup_email,
+        signup_password=str(paypal_cfg.get("signup_password") or paypal_cfg.get("guest_password") or paypal_cfg.get("password") or ""),
+        http_cookies=http_cookies,
+    )
 
 
 def _otp_challenge_check(

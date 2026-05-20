@@ -47,11 +47,16 @@ def _gen_birthday() -> tuple[str, str, str]:
 
 
 def _parse_proxy(proxy_url: str):
-    """Camoufox 需要 socks5 + 无 auth 的格式。socks5 + auth 需要走 gost 中继。"""
+    """构建 Camoufox/Playwright proxy dict。
+
+    - HTTP/HTTPS + basic auth: username/password 正确 unquote 后传入
+    - SOCKS5 + auth: Camoufox 不支持，走 gost 中继
+    """
+    from backend.core.proxy import build_playwright_proxy_config, is_authenticated_socks5_proxy
+
     if not proxy_url:
         return None
-    pp = urlparse(proxy_url)
-    if pp.scheme in ("socks5", "socks5h") and pp.username:
+    if is_authenticated_socks5_proxy(proxy_url):
         import socket as _sock
         relay_port = 18899
         try:
@@ -62,11 +67,7 @@ def _parse_proxy(proxy_url: str):
             raise RuntimeError(
                 f"需要 gost 中继: gost -L=socks5://:{relay_port} -F={proxy_url}"
             )
-    return {
-        "server": f"{pp.scheme}://{pp.hostname}:{pp.port}",
-        "username": pp.username or "",
-        "password": pp.password or "",
-    }
+    return build_playwright_proxy_config(proxy_url)
 
 
 def browser_register(cfg, mail_provider) -> dict:

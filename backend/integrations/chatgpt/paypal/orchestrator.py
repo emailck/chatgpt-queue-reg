@@ -121,7 +121,7 @@ def run_paypal_http_payment(
     paypal_approve_url = resolve_paypal_approve_url(http, redirect_url)
     checkpoint(check_cancelled)
 
-    paypal_runtime = {**paypal, "_runtime": ctx}
+    paypal_runtime = {**paypal, "_runtime": ctx, "_proxy_url": proxy_url}
     emit(log, "paypal_http: authorize paypal billing agreement")
     paypal_result = authorize_paypal_http(paypal_approve_url, paypal_runtime, proxy_url, log)
     checkpoint(check_cancelled)
