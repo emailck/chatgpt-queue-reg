@@ -23,8 +23,10 @@ from backend.api.schemas import (
     pipeline_to_dict,
 )
 from backend.core.constants import (
+    JOB_STATUS_FAILED,
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
+    JOB_STATUS_SUCCEEDED,
     JOB_TERMINAL_STATUSES,
 )
 from backend.core.db import engine, session_scope
@@ -279,6 +281,43 @@ def cancel_job_endpoint(job_id: int):
         job.updated_at = utcnow()
         s.add(job)
     return {"ok": True}
+
+
+@router.post("/api/jobs/{job_id}/force-stop", tags=["jobs"])
+def force_stop_job(job_id: int):
+    with session_scope() as s:
+        job = s.get(Job, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        if job.status == JOB_STATUS_SUCCEEDED:
+            raise HTTPException(status_code=409, detail="cannot force-stop a succeeded job")
+        if job.status == JOB_STATUS_FAILED:
+            return {"ok": True, "detail": "already failed", "job_id": job_id}
+
+        prev_status = job.status
+        job.status = JOB_STATUS_FAILED
+        job.error = job.error or "force stopped by user"
+        job.finished_at = job.finished_at or utcnow()
+        job.updated_at = utcnow()
+        s.add(job)
+        s.add(JobEvent(
+            job_id=job_id,
+            pipeline_id=job.pipeline_id,
+            level="warning",
+            event_type="force_stop",
+            message=f"job force-stopped by user (was {prev_status})",
+        ))
+
+        if job.pipeline_id is not None:
+            pipeline = s.get(Pipeline, job.pipeline_id)
+            if pipeline is not None and pipeline.status not in {JOB_STATUS_SUCCEEDED, JOB_STATUS_FAILED}:
+                pipeline.status = JOB_STATUS_FAILED
+                pipeline.error = pipeline.error or f"force-stopped at stage {job.type}"
+                pipeline.finished_at = pipeline.finished_at or utcnow()
+                pipeline.updated_at = utcnow()
+                s.add(pipeline)
+
+    return {"ok": True, "job_id": job_id}
 
 
 @router.post("/api/jobs/{job_id}/retry", tags=["jobs"])

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Button, Empty, Input, Progress, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Button, Empty, Input, Popconfirm, Progress, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 
@@ -202,6 +202,7 @@ export default function Jobs() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [selectedLogJobId, setSelectedLogJobId] = useState<number | null>(null)
   const [retryingJobId, setRetryingJobId] = useState<number | null>(null)
+  const [stoppingJobId, setStoppingJobId] = useState<number | null>(null)
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -296,6 +297,19 @@ export default function Jobs() {
       message.error(err instanceof Error ? err.message : '重试失败')
     } finally {
       setRetryingJobId(null)
+    }
+  }, [openDetail, reload])
+
+  const forceStopJob = useCallback(async (jobId: number, pipelineId: number) => {
+    setStoppingJobId(jobId)
+    try {
+      await apiFetch(`/jobs/${jobId}/force-stop`, { method: 'POST' })
+      message.success(`Job #${jobId} 已强制停止`)
+      await Promise.all([reload(), openDetail(pipelineId)])
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '强制停止失败')
+    } finally {
+      setStoppingJobId(null)
     }
   }, [openDetail, reload])
 
@@ -474,7 +488,7 @@ export default function Jobs() {
     {
       title: '操作',
       key: 'actions',
-      width: 180,
+      width: 250,
       render: (_, row) => {
         const registerIdx = (detailPipeline?.stages || []).indexOf('register')
         const canRetry = Boolean(
@@ -485,32 +499,37 @@ export default function Jobs() {
           registerIdx >= 0 &&
           row.index > registerIdx,
         )
-        const retryDisabledHint = !row.job
-          ? '该模块尚无 job'
-          : row.job.status !== 'failed'
-            ? `当前 job 状态 ${row.job.status}`
-            : row.index <= registerIdx
-              ? '注册及之前模块不可手动重试'
-              : detailPipeline?.status !== 'failed'
-                ? `pipeline 状态 ${detailPipeline?.status || '-'}`
-                : detailPipeline?.current_stage !== row.stage
-                  ? `pipeline 当前模块 ${detailPipeline?.current_stage || '-'}`
-                  : ''
+        const canForceStop = Boolean(
+          row.job &&
+          row.job.status !== 'succeeded' &&
+          row.job.status !== 'failed',
+        )
         return (
           <Space size={4} wrap>
-            <Button size="small" disabled={!row.job} onClick={() => row.job && setSelectedLogJobId(row.job.id)}>看日志</Button>
-            <Tooltip title={canRetry ? '重新入队该模块' : retryDisabledHint || '不可重试'}>
+            <Button size="small" disabled={!row.job} onClick={() => row.job && setSelectedLogJobId(row.job.id)}>日志</Button>
+            {canForceStop && (
+              <Popconfirm title="强制停止该 job 并将 pipeline 标记为失败？" onConfirm={() => row.job && detailPipeline && forceStopJob(row.job.id, detailPipeline.id)}>
+                <Button
+                  size="small"
+                  danger
+                  loading={row.job ? stoppingJobId === row.job.id : false}
+                >
+                  强制停止
+                </Button>
+              </Popconfirm>
+            )}
+            {canRetry && (
               <Button
                 size="small"
                 type="primary"
                 ghost
-                disabled={!canRetry || (row.job ? retryingJobId === row.job.id : false)}
+                disabled={row.job ? retryingJobId === row.job.id : false}
                 loading={row.job ? retryingJobId === row.job.id : false}
                 onClick={() => row.job && detailPipeline && retryStageJob(row.job.id, detailPipeline.id)}
               >
                 重试
               </Button>
-            </Tooltip>
+            )}
           </Space>
         )
       },
