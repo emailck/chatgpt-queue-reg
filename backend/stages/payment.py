@@ -63,19 +63,15 @@ def run(ctx: JobContext) -> None:
 
     payment_region = str(
         payload.get("payment_proxy_region")
-        or payload.get("proxy_region")
-        or payload.get("region")
         or merged_extra.get("payment_proxy_region")
-        or merged_extra.get("proxy_region")
-        or merged_extra.get("region")
+        or settings.get("workpool.payment.proxy_region", "")
         or ""
     ).strip()
     explicit_payment_proxy = _proxy_url_from_config(
         payload.get("payment_proxy_url")
         or merged_extra.get("payment_proxy_url")
         or merged_extra.get("paypal_proxy_url")
-        or fresh_checkout_cfg.get("proxy")
-        or merged_extra.get("proxy")
+        or fresh_checkout_cfg.get("payment_proxy")
         or ""
     )
     payment_proxy = None
@@ -94,6 +90,7 @@ def run(ctx: JobContext) -> None:
             auto_outcome_on_failure=AcquireOutcome.FAILED.value,
         )
         payment_proxy_url = str((payment_proxy.payload or {}).get("url") or "")
+    payment_proxy_actual_region = str((payment_proxy.payload or {}).get("region") or "") if payment_proxy else payment_region
 
     paypal_cfg = _section_config(
         merged_extra,
@@ -207,6 +204,7 @@ def run(ctx: JobContext) -> None:
             "plan": plan,
             "payment_proxy_id": (payment_proxy.payload or {}).get("proxy_id") if payment_proxy else None,
             "payment_proxy_region": payment_region,
+            "payment_proxy_actual_region": payment_proxy_actual_region,
             "payment_proxy_explicit": bool(explicit_payment_proxy),
             "paypal_has_cookies": bool(paypal_cfg.get("cookies") or paypal_cfg.get("cookie_header")),
             "paypal_number_id": (paypal_number.payload or {}).get("id") if paypal_number else None,
@@ -266,6 +264,7 @@ def run(ctx: JobContext) -> None:
         "payment_method_id": result.get("payment_method_id") or "",
         "payment_proxy_id": (payment_proxy.payload or {}).get("proxy_id") if payment_proxy else None,
         "payment_proxy_region": payment_region,
+        "payment_proxy_actual_region": payment_proxy_actual_region,
         "paypal_number_id": (paypal_number.payload or {}).get("id") if paypal_number else None,
         "paypal_ba_token": result.get("paypal_ba_token") or "",
         "paypal_ec_token": result.get("paypal_ec_token") or "",
