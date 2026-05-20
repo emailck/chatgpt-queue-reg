@@ -19,31 +19,22 @@ def _op_name(payload: Any) -> str:
 
 
 def _euat_from_session(http: Any) -> str:
-    """Extract x-paypal-internal-euat from session cookies.
+    """Read x-paypal-internal-euat that paypal_guest_signup stashed on the session.
 
-    PayPal sets it under randomised cookie names like AV894Kt2TSumQQrJwe-8mzmyREO.
-    The value is a base64-like opaque token. We grab the first cookie value that
-    looks like one (length and charset heuristic).
+    The guest-signup flow extracts buyer.auth.accessToken from the SignUp
+    response and writes it to http.headers under this key. Multiple PayPal
+    cookies share the AV894Kt2*-style shape so we can't reliably pick the
+    right one by heuristic; the explicit header set after SignUp is the
+    source of truth.
     """
-    jar = getattr(http, "cookies", None)
-    if jar is None:
+    headers = getattr(http, "headers", None)
+    if headers is None:
         return ""
     try:
-        items = list(jar)
+        value = headers.get("x-paypal-internal-euat") or headers.get("X-Paypal-Internal-Euat") or ""
     except Exception:
-        try:
-            items = list(jar.items())
-        except Exception:
-            return ""
-    for item in items:
-        name = getattr(item, "name", None) or (item[0] if isinstance(item, tuple) else "")
-        value = getattr(item, "value", None) or (item[1] if isinstance(item, tuple) else "")
-        if not isinstance(name, str) or not isinstance(value, str):
-            continue
-        if len(name) >= 27 and name[0].isalpha() and name.replace("_", "").isalnum():
-            if len(value) >= 60 and "-" in value or "_" in value:
-                return value
-    return ""
+        return ""
+    return str(value or "")
 
 
 def graphql_checkoutweb(

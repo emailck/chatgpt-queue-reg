@@ -119,7 +119,9 @@ def paypal_guest_signup_authorize(
     signup_data = graphql_checkoutweb(http, signup_payload, referer=signup_url, ec_token=ec_token, country=country, label="paypal SignUpNewMemberMutation")
     access_token = _extract_buyer_access_token(signup_data)
     if access_token:
-        http.headers.update({"Authorization": f"Bearer {access_token}"})
+        # Same token PayPal stores in the randomised AV894Kt2*-style auth cookie;
+        # graphql_authorize and downstream /webapps/hermes calls expect it on this header.
+        http.headers.update({"x-paypal-internal-euat": access_token})
 
     drop_resp = http.get("https://www.paypal.com/checkoutweb/drop", headers={"Referer": signup_url}, allow_redirects=True, timeout=30)
     hermes_url = str(drop_resp.url)
