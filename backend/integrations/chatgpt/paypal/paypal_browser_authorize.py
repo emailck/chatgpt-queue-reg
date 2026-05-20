@@ -116,13 +116,13 @@ def _build_camoufox_proxy(proxy_url: str) -> dict[str, str] | None:
 
 
 def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
-    """Wait for SPA auto-navigation from /pay → /checkoutweb/signup.
+    """Poll /pay page like the plugin's tick() — every 5s check state and act.
 
-    HAR shows /pay auto-redirects to signup in ~140ms with zero clicks.
-    Only attempt manual click-through as a last resort after 30s timeout.
+    The /pay SPA may auto-redirect (HAR shows ~140ms) or require manual
+    interaction (#startOnboardingFlow → Create Account → email → Continue).
     """
-    pay_logged = False
-    for i in range(90):
+    logged = False
+    for i in range(24):
         cur = page.url
         if "/checkoutweb/signup" in cur:
             emit(log, "paypal_http: browser on signup page")
@@ -131,121 +131,119 @@ def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
         if "/webapps/hermes" in cur:
             emit(log, "paypal_http: browser landed on hermes directly")
             return
+        if "chatgpt.com" in cur or "pay.openai.com" in cur:
+            emit(log, f"paypal_http: browser already returned to Stripe: {cur[:80]}")
+            return
         if "/pay" in cur and "paypal.com" in cur:
-            if not pay_logged:
-                emit(log, "paypal_http: browser on /pay page, waiting for SPA auto-redirect...")
-                pay_logged = True
-            if i == 30:
-                emit(log, "paypal_http: browser /pay auto-redirect not firing after 30s, trying manual click-through")
-                _click_through_pay_page(page, log)
-        time.sleep(1)
-    raise PayPalHttpError(f"browser: 等待 signup 页超时, url={page.url[:120]}")
+            if not logged:
+                emit(log, "paypal_http: browser on /pay page, starting poll loop")
+                logged = True
+            _pay_page_tick(page, log)
+        if "/agreements/approve" in cur and "paypal.com" in cur:
+            if not logged:
+                emit(log, "paypal_http: browser on approve page, starting poll loop")
+                logged = True
+            _pay_page_tick(page, log)
+        time.sleep(5)
+    raise PayPalHttpError(f"browser: 等待 signup 页超时 (120s), url={page.url[:120]}")
 
 
-def _click_through_pay_page(page: Any, log: LogFn | None) -> None:
-    """Handle PayPal's /pay intermediate page.
+def _pay_page_tick(page: Any, log: LogFn | None) -> None:
+    """Single tick of the /pay page poll loop — mirrors plugin's middle.js tick().
 
-    Mirrors the plugin's middle.js flow:
-    1. Click #startOnboardingFlow repeatedly
-    2. Click "Create an Account"
-    3. Fill email input
-    4. Click "Continue to Payment" / "Keep Paying"
+    Priority order:
+    1. "Create an Account" button visible → click → fill email → click Continue
+    2. Email input visible → fill email → click Continue
+    3. Page shows "Open a PayPal account" text → fill email → click Continue
+    4. #startOnboardingFlow visible → click it (next tick will see the result)
     """
-    try:
-        start_btn = page.query_selector('#startOnboardingFlow')
-        if start_btn:
-            try:
-                if start_btn.is_visible():
-                    start_btn.click()
-                    emit(log, "paypal_http: browser clicked #startOnboardingFlow")
-                    time.sleep(3)
-            except Exception:
-                pass
+    result = page.evaluate("""() => {
+        function canClick(btn) {
+            if (!btn || btn.disabled) return false;
+            const s = getComputedStyle(btn);
+            if (s.display === 'none' || s.visibility === 'hidden') return false;
+            const r = btn.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        }
 
-        created = _click_create_account(page, log)
-        if created:
-            _fill_pay_page_email(page, log)
-            _click_keep_paying(page, log)
-    except Exception:
-        pass
+        // 1. Create an Account
+        const onboardForm = document.querySelector('form[data-testid="xo-onboarding-form"] button[type="submit"]');
+        if (canClick(onboardForm)) return 'create_account';
+        const createBtns = Array.from(document.querySelectorAll('button'));
+        const createBtn = createBtns.find(b => /create an account|create account/i.test((b.innerText||'').trim()));
+        if (canClick(createBtn)) return 'create_account';
+
+        // 2. Email input
+        const emailSels = ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]'];
+        for (const sel of emailSels) {
+            const el = document.querySelector(sel);
+            if (el && !el.disabled && el.getBoundingClientRect().width > 0) return 'email_visible';
+        }
+
+        // 3. Stop texts
+        const bodyText = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ');
+        if (bodyText.includes('Open a PayPal account') || bodyText.includes('Already have an account')) return 'email_visible';
+
+        // 4. #startOnboardingFlow
+        const start = document.querySelector('#startOnboardingFlow');
+        if (canClick(start)) return 'start_onboarding';
+
+        return 'waiting';
+    }""")
+
+    if result == "create_account":
+        page.evaluate("""() => {
+            const btn = document.querySelector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
+                || Array.from(document.querySelectorAll('button')).find(b => /create an account|create account/i.test((b.innerText||'').trim()));
+            if (btn) { btn.scrollIntoView({block:'center'}); btn.click(); }
+        }""")
+        emit(log, "paypal_http: /pay tick: clicked Create an Account")
+        time.sleep(2)
+        _fill_pay_email_and_continue(page, log)
+    elif result == "email_visible":
+        _fill_pay_email_and_continue(page, log)
+    elif result == "start_onboarding":
+        page.evaluate("() => { const b = document.querySelector('#startOnboardingFlow'); if (b) b.click(); }")
+        emit(log, "paypal_http: /pay tick: clicked #startOnboardingFlow")
+    else:
+        emit(log, "paypal_http: /pay tick: waiting for elements...")
 
 
-def _click_create_account(page: Any, log: LogFn | None) -> bool:
-    for _ in range(10):
-        try:
-            btn = page.query_selector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
-            if not btn:
-                for text in ["Create an Account", "Create account"]:
-                    btn = page.query_selector(f'button:has-text("{text}")')
-                    if btn:
-                        break
-            if btn and btn.is_visible():
-                btn.scroll_into_view_if_needed()
-                time.sleep(0.5)
-                btn.click()
-                emit(log, "paypal_http: browser clicked Create an Account")
-                time.sleep(2)
-                return True
-        except Exception:
-            pass
-        time.sleep(0.8)
-    return False
-
-
-def _fill_pay_page_email(page: Any, log: LogFn | None) -> None:
+def _fill_pay_email_and_continue(page: Any, log: LogFn | None) -> None:
+    """Fill email on /pay page and click Continue/Keep Paying."""
     email = _rand_email()
-    for sel in ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]']:
-        try:
-            el = page.wait_for_selector(sel, state="visible", timeout=10000)
-            if el:
-                _react_fill(page, el, email)
-                emit(log, f"paypal_http: browser filled /pay email={email}")
-                time.sleep(1)
-                return
-        except Exception:
-            continue
+    filled = page.evaluate("""(email) => {
+        const sels = ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]'];
+        for (const sel of sels) {
+            const el = document.querySelector(sel);
+            if (el && !el.disabled && el.getBoundingClientRect().width > 0) {
+                const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                if (desc && desc.set) desc.set.call(el, email);
+                else el.value = email;
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.dispatchEvent(new Event('blur', {bubbles: true}));
+                return true;
+            }
+        }
+        return false;
+    }""", email)
+    if filled:
+        emit(log, f"paypal_http: /pay tick: filled email={email}")
+    time.sleep(1)
 
-
-def _click_keep_paying(page: Any, log: LogFn | None) -> None:
-    for _ in range(15):
-        try:
-            btn = page.evaluate("""() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                const found = buttons.find(b => {
-                    const text = (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim();
-                    const intent = b.getAttribute('data-atomic-wait-intent') || '';
-                    if (/cancel|back|log in|login/i.test(text)) return false;
-                    return /submit_email/i.test(intent) ||
-                        (b.type === 'submit' && /keep paying|continue to payment|continue/i.test(text));
-                });
-                if (found && !found.disabled) {
-                    found.scrollIntoView({block:'center'});
-                    return true;
-                }
-                // fallback: actionContinue
-                const ac = document.querySelector('button.actionContinue[type="submit"]');
-                if (ac && !ac.disabled) { ac.scrollIntoView({block:'center'}); return true; }
-                return false;
-            }""")
-            if btn:
-                time.sleep(0.5)
-                page.evaluate("""() => {
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const found = buttons.find(b => {
-                        const text = (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim();
-                        const intent = b.getAttribute('data-atomic-wait-intent') || '';
-                        if (/cancel|back|log in|login/i.test(text)) return false;
-                        return /submit_email/i.test(intent) ||
-                            (b.type === 'submit' && /keep paying|continue to payment|continue/i.test(text));
-                    }) || document.querySelector('button.actionContinue[type="submit"]');
-                    if (found) found.click();
-                }""")
-                emit(log, "paypal_http: browser clicked Keep Paying / Continue to Payment")
-                time.sleep(3)
-                return
-        except Exception:
-            pass
-        time.sleep(1)
+    page.evaluate("""() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const btn = buttons.find(b => {
+            const text = (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim();
+            const intent = b.getAttribute('data-atomic-wait-intent') || '';
+            if (/cancel|back|log in|login/i.test(text)) return false;
+            return /submit_email/i.test(intent) ||
+                (b.type === 'submit' && /keep paying|continue to payment|continue|next/i.test(text));
+        }) || document.querySelector('button.actionContinue[type="submit"]');
+        if (btn && !btn.disabled) { btn.scrollIntoView({block:'center'}); btn.click(); }
+    }""")
+    emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
 
 
 def _rand_email() -> str:
