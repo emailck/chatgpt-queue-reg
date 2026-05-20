@@ -437,6 +437,7 @@ export default function Jobs() {
     {
       title: '模块 / Stage',
       key: 'stage',
+      width: 180,
       render: (_, row) => (
         <Space direction="vertical" size={2}>
           <Text strong>{row.index + 1}. {stageLabel(row.stage)}</Text>
@@ -597,7 +598,7 @@ export default function Jobs() {
               <KeyValue label="updated" value={formatDateTime(detailPipeline.updated_at || detailPipeline.created_at)} />
             </KeyValueGrid>
             <ErrorCallout error={detailPipeline.error} />
-            <Table rowKey="key" size="small" columns={stageColumns} dataSource={stageRows} pagination={false} scroll={{ x: 960 }} />
+            <Table rowKey="key" size="small" columns={stageColumns} dataSource={stageRows} pagination={false} scroll={{ x: 1200 }} />
             <ActionCard title={selectedLogJobId ? `Job #${selectedLogJobId} 原始日志` : '原始日志'} description="选择上方模块行的 job 查看对应 transcript。" />
             {selectedLogJobId ? (
               <JobLogPanel jobId={selectedLogJobId} onTerminal={() => { reload(); openDetail(detailPipeline.id) }} />
