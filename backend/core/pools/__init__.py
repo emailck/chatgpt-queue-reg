@@ -53,8 +53,10 @@ from .email_pool import email_pool
 from .card_pool import card_pool
 from .sms_pool import sms_pool
 from .proxy_pool import proxy_pool as proxy_resource_pool
+from .paypal_number_pool import paypal_number_pool
 
 register_resource(email_pool)
 register_resource(card_pool)
 register_resource(sms_pool)
 register_resource(proxy_resource_pool)
+register_resource(paypal_number_pool)
