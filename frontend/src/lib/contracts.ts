@@ -80,6 +80,31 @@ export type PoolStats = EmailPoolStats | CardPoolStats | PayPalNumberPoolStats |
 
 export type PoolsResponse = Record<string, PoolStats>
 
+export interface Pipeline {
+  id: number
+  preset: string
+  stages: string[]
+  stop_after: string
+  stage_inputs?: Record<string, unknown>
+  resource_bindings?: Record<string, unknown>
+  status: string
+  current_stage: string
+  total_steps: number
+  completed_steps: number
+  account_id: number | null
+  payment_link_id: number | null
+  proxy_id?: number | null
+  proxy_url: string
+  input?: Record<string, unknown>
+  result?: Record<string, unknown>
+  error: string
+  cancel_requested?: boolean
+  created_at: string | null
+  started_at?: string | null
+  finished_at: string | null
+  updated_at: string | null
+}
+
 export interface Job {
   id: number
   pipeline_id: number | null
@@ -102,6 +127,11 @@ export interface Job {
   started_at: string | null
   finished_at: string | null
   updated_at?: string | null
+}
+
+export interface PipelineDetail {
+  pipeline: Pipeline
+  jobs: Job[]
 }
 
 export interface JobEvent {

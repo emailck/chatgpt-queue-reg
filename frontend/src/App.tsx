@@ -10,11 +10,13 @@ import {
   PhoneOutlined,
   PlayCircleOutlined,
   SettingOutlined,
+  UnorderedListOutlined,
   UserOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 
 import Pipelines from '@/pages/Pipelines'
+import Jobs from '@/pages/Jobs'
 import Accounts from '@/pages/Accounts'
 import AccessTokens from '@/pages/AccessTokens'
 import SubscriptionAccounts from '@/pages/SubscriptionAccounts'
@@ -32,6 +34,7 @@ const { Sider, Content, Header } = Layout
 
 const MENU = [
   { key: '/pipelines', icon: <PlayCircleOutlined />, label: '任务队列' },
+  { key: '/jobs', icon: <UnorderedListOutlined />, label: 'Jobs 追踪' },
   { key: '/pools', icon: <AppstoreOutlined />, label: '池子 / WorkPools' },
   { key: '/accounts', icon: <UserOutlined />, label: '账号' },
   { key: '/access-tokens', icon: <KeyOutlined />, label: 'Free 号池' },
@@ -74,6 +77,7 @@ function Shell() {
           <Routes>
             <Route path="/" element={<Navigate to="/pipelines" replace />} />
             <Route path="/pipelines" element={<Pipelines />} />
+            <Route path="/jobs" element={<Jobs />} />
             <Route path="/pools" element={<Pools />} />
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/access-tokens" element={<AccessTokens />} />

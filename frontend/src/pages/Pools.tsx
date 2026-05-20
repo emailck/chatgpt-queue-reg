@@ -2,11 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, Col, Empty, Form, Input, InputNumber, Progress, Row, Select, Space, Switch, Tag, Typography, message } from 'antd'
 import { ReloadOutlined, SaveOutlined, SettingOutlined } from '@ant-design/icons'
 
-import { JobLogPanel } from '@/components/JobLogPanel'
-import { StatusTag } from '@/components/StatusTag'
-import { ActionCard, CardToolbar, CodeSurface, EntityCard, EntityGrid, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
-import { CopyableText, LinkedIdBadges } from '@/components/ui/DomainBits'
-import { apiFetch, formatDateTime, formatDuration } from '@/lib/api'
+import { ActionCard, CardToolbar, CodeSurface, EntityCard, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
+import { apiFetch } from '@/lib/api'
 import type { CardPoolStats, EmailPoolStats, Job, PayPalNumberPoolStats, PoolsResponse, ProxyPoolStats, QueueStats, SmsPoolStats, StageMap, StageMeta } from '@/lib/contracts'
 import { stageLabel } from '@/lib/contracts'
 import type { PoolSettingGroup, SettingField } from '@/lib/poolSettings'
@@ -55,9 +52,7 @@ export default function Pools() {
   const [settings, setSettings] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(false)
   const [savingSettings, setSavingSettings] = useState(false)
-  const [logJobId, setLogJobId] = useState<number | null>(null)
   const [configGroup, setConfigGroup] = useState<PoolSettingGroup | null>(null)
-  const [jobsPage, setJobsPage] = useState(1)
   const [configForm] = Form.useForm()
 
   const reload = useCallback(async () => {
@@ -239,32 +234,6 @@ export default function Pools() {
         ))}
       </div>
 
-      <ActionCard title="Recent Jobs" description="最近 job 以卡片展示，日志使用居中弹出卡片显示原始 transcript。" />
-      <EntityGrid
-        items={jobs}
-        page={jobsPage}
-        pageSize={12}
-        onPageChange={setJobsPage}
-        renderItem={(job) => (
-          <EntityCard
-            key={job.id}
-            title={`Job #${job.id}`}
-            subtitle={stageLabel(job.type)}
-            status={<StatusTag status={job.status} />}
-            badges={<LinkedIdBadges pipelineId={job.pipeline_id} accountId={job.account_id} paymentLinkId={job.payment_link_id} />}
-            actions={<Button size="small" onClick={() => setLogJobId(job.id)}>原始日志</Button>}
-            footer={formatDateTime(job.created_at)}
-          >
-            <KeyValueGrid>
-              <KeyValue label="邮箱" value={<CopyableText value={job.email_address || ''} label="邮箱" />} />
-              <KeyValue label="代理" value={<CopyableText value={job.proxy_url || ''} label="代理" />} />
-              <KeyValue label="耗时" value={formatDuration(job.started_at, job.finished_at)} />
-              <KeyValue label="Stage" value={<Text code>{job.type}</Text>} />
-            </KeyValueGrid>
-          </EntityCard>
-        )}
-      />
-
       <PopupCard
         open={!!configGroup}
         onCancel={() => setConfigGroup(null)}
@@ -294,10 +263,6 @@ export default function Pools() {
             )}
           </Space>
         )}
-      </PopupCard>
-
-      <PopupCard open={logJobId !== null} onCancel={() => setLogJobId(null)} width={900} title={logJobId ? `Job #${logJobId} 原始日志` : ''} footer={null}>
-        {logJobId !== null && <JobLogPanel jobId={logJobId} />}
       </PopupCard>
     </PageScaffold>
   )
