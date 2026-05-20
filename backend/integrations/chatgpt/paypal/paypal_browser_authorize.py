@@ -30,35 +30,42 @@ def _type_delay() -> int:
     return random.randint(60, 160)
 
 
-def _human_click(page: Any, el: Any) -> None:
-    """Click with mouse move — Playwright moves to element center, then clicks."""
-    try:
-        el.scroll_into_view_if_needed()
-    except Exception:
-        pass
-    _human_delay(0.2, 0.5)
-    el.click()
-    _human_delay(0.3, 0.8)
+def _human_click(page: Any, el: Any, timeout: int = 5000) -> None:
+    """Click with mouse move — Playwright moves to element center, then clicks.
 
-
-def _human_type(page: Any, el: Any, value: str) -> None:
-    """Click field, clear, type with Playwright's trusted input pipeline.
-
-    Playwright's el.type() generates isTrusted:true events through the
-    browser's native input system — more realistic than JS-dispatched events.
+    Short timeout (5s) so we can detect stuck buttons quickly and refresh.
     """
     try:
         el.scroll_into_view_if_needed()
     except Exception:
         pass
     _human_delay(0.2, 0.5)
-    el.click()
-    _human_delay(0.1, 0.3)
-    el.press("Control+a")
-    el.press("Backspace")
-    _human_delay(0.1, 0.2)
-    el.type(value, delay=random.randint(80, 180))
+    el.click(timeout=timeout)
     _human_delay(0.3, 0.8)
+
+
+def _human_type(page: Any, el: Any, value: str) -> None:
+    """Instant JS-based fill via native setter — fast, no autocomplete dropdown trigger.
+
+    We delete captchas anyway via _remove_captcha_elements, so isTrusted:false
+    doesn't matter. Speed is more important: typing slowly into street address
+    triggers PayPal's address autocomplete which blocks clicks on other fields.
+    """
+    page.evaluate("""([el, value]) => {
+        el.scrollIntoView({block:'center'});
+        el.focus();
+        const proto = el instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) desc.set.call(el, '');
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        if (desc && desc.set) desc.set.call(el, value);
+        else el.value = value;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        el.dispatchEvent(new Event('blur', {bubbles: true}));
+    }""", [el, value])
+    time.sleep(0.1)
 
 
 def browser_paypal_checkout(
@@ -229,6 +236,15 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
                 msg = str(exc)
                 if "has been closed" in msg or "crashed" in msg or "Target closed" in msg:
                     raise PayPalHttpError(f"browser tab crashed: {msg[:120]}")
+                if "Timeout" in msg and "click" in msg.lower():
+                    emit(log, "paypal_http: /pay tick: click timed out, refreshing page")
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(3)
+                        loaded = False
+                    except Exception as reload_exc:
+                        emit(log, f"paypal_http: /pay reload failed: {str(reload_exc)[:80]}")
+                    continue
                 emit(log, f"paypal_http: /pay tick exception: {msg[:80]}")
                 time.sleep(2)
                 continue
@@ -723,22 +739,31 @@ def _submit_and_handle_otp(
     emit(log, "paypal_http: browser submitting signup form")
     _click_submit(page)
 
-    for attempt in range(3):
+    max_card_retries = 4
+    for attempt in range(max_card_retries):
         checkpoint(check_cancelled)
         result = _wait_post_submit(page, timeout=15000)
-        emit(log, f"paypal_http: browser post-submit state={result}")
+        emit(log, f"paypal_http: browser post-submit state={result} (attempt {attempt + 1}/{max_card_retries})")
         if result == "otp":
             break
         if result in ("hermes", "navigated"):
             return
         if result == "card_error":
-            emit(log, "paypal_http: browser card error, regenerating card")
+            if attempt >= max_card_retries - 1:
+                raise PayPalHttpError(f"browser: card declined {attempt + 1} times in a row")
             card = _generate_visa_card()
+            emit(log, f"paypal_http: browser card error, regenerating card={card['number'][:6]}...{card['number'][-4:]}")
             _fill_field_safe(page, "cardNumber", card["number"], log)
-            time.sleep(0.5)
+            _fill_field_safe(page, "expiry", card["expiry"], log)
+            _fill_field_safe(page, "cvv", card["cvv"], log)
+            time.sleep(1)
             _click_submit(page)
             continue
-        if attempt < 2:
+        if result == "timeout":
+            emit(log, "paypal_http: browser post-submit timeout, re-clicking submit")
+            _click_submit(page)
+            continue
+        if attempt < max_card_retries - 1:
             _click_submit(page)
 
     checkpoint(check_cancelled)
@@ -842,10 +867,32 @@ def _wait_post_submit(page: Any, timeout: int = 15000) -> str:
         except Exception:
             pass
         try:
-            alerts = page.query_selector_all('[role="alert"]')
-            for a in alerts:
-                text = (a.inner_text() or "").lower()
-                if any(kw in text for kw in ("card", "declined", "not accepted", "try another")):
+            err_text = page.evaluate("""() => {
+                const sels = ['[role="alert"]', '[aria-live="assertive"]', '[aria-live="polite"]',
+                    '[data-testid*="error" i]', '[id*="error" i]', '.notification-critical',
+                    '.vx_alert-critical'];
+                const seen = new Set();
+                let collected = '';
+                for (const sel of sels) {
+                    for (const el of document.querySelectorAll(sel)) {
+                        if (seen.has(el)) continue;
+                        seen.add(el);
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        if (r.width === 0 || r.height === 0 || s.display === 'none' || s.visibility === 'hidden') continue;
+                        const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+                        if (text.length >= 5) collected += text + ' ';
+                    }
+                }
+                return collected.slice(0, 500);
+            }""")
+            if err_text:
+                low = err_text.lower()
+                if any(kw in low for kw in (
+                    "weren't able to add this card", "wasn't able to add this card", "try a different card",
+                    "declined", "not accepted", "try another", "invalid card", "card was declined",
+                    "check all the details", "无法", "拒绝", "换一张",
+                )):
                     return "card_error"
         except Exception:
             pass
