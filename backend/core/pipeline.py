@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable, Optional
 
+from sqlalchemy import select as sa_select
 from sqlmodel import Session
 
 from backend.core.constants import (
@@ -40,6 +41,13 @@ from backend.models.job import Job, JobEvent
 from backend.models.pipeline import Pipeline
 
 logger = logging.getLogger(__name__)
+
+
+class PipelineRetryError(Exception):
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
 
 
 # ---- presets ---------------------------------------------------------------
@@ -165,6 +173,160 @@ def cancel_pipeline(pipeline_id: int) -> bool:
                 job.cancel_requested = True
                 s.add(job)
     return True
+
+
+# ---- manual retry ----------------------------------------------------------
+
+
+def retry_failed_pipeline_job(job_id: int) -> dict[str, Any]:
+    """Manually retry a failed stage job within a failed pipeline.
+
+    Only valid for stages strictly after `register`. Creates a fresh job and
+    resets the pipeline so the existing `_advance_pipeline(...)` flow can
+    continue once the retry succeeds.
+    """
+    with Session(engine) as s:
+        job = s.get(Job, job_id)
+        if job is None:
+            raise PipelineRetryError(404, f"job {job_id} not found")
+        if job.pipeline_id is None:
+            raise PipelineRetryError(409, "standalone jobs cannot be retried")
+        if job.status != JOB_STATUS_FAILED:
+            raise PipelineRetryError(409, f"job is not failed (status={job.status})")
+
+        pipeline = s.get(Pipeline, job.pipeline_id)
+        if pipeline is None:
+            raise PipelineRetryError(404, f"pipeline {job.pipeline_id} not found")
+        if pipeline.status != JOB_STATUS_FAILED:
+            raise PipelineRetryError(409, f"pipeline is not failed (status={pipeline.status})")
+
+        stage = str(job.type or "")
+        if stage == "register":
+            raise PipelineRetryError(400, "register stage cannot be retried manually")
+
+        stages = json_loads(pipeline.stages_json, fallback=[]) or []
+        if "register" not in stages:
+            raise PipelineRetryError(409, "pipeline does not contain a register stage")
+        if stage not in stages:
+            raise PipelineRetryError(409, f"stage {stage!r} is not in pipeline.stages")
+
+        register_idx = stages.index("register")
+        stage_idx = stages.index(stage)
+        if stage_idx <= register_idx:
+            raise PipelineRetryError(400, f"stage {stage!r} must come after register")
+        if pipeline.current_stage != stage:
+            raise PipelineRetryError(
+                409,
+                f"pipeline current_stage={pipeline.current_stage!r}; cannot retry {stage!r}",
+            )
+
+        latest_for_stage = s.exec(
+            sa_select(Job)
+            .where(Job.pipeline_id == pipeline.id)
+            .where(Job.type == stage)
+            .order_by(Job.id.desc())
+            .limit(1)
+        ).scalars().first()
+        if latest_for_stage is None or int(latest_for_stage.id or 0) != job_id:
+            raise PipelineRetryError(409, "a newer job exists for this stage; refresh and retry the latest")
+
+        active_for_stage = list(
+            s.exec(
+                sa_select(Job)
+                .where(Job.pipeline_id == pipeline.id)
+                .where(Job.type == stage)
+                .where(Job.status.in_([JOB_STATUS_QUEUED, JOB_STATUS_RUNNING]))
+            ).scalars()
+        )
+        if active_for_stage:
+            raise PipelineRetryError(409, "an active job already exists for this stage")
+
+        prev_stage = stages[stage_idx - 1]
+        prev_succeeded = s.exec(
+            sa_select(Job)
+            .where(Job.pipeline_id == pipeline.id)
+            .where(Job.type == prev_stage)
+            .where(Job.status == JOB_STATUS_SUCCEEDED)
+            .order_by(Job.id.desc())
+            .limit(1)
+        ).scalars().first()
+        if prev_succeeded is None:
+            raise PipelineRetryError(
+                409,
+                f"cannot retry: previous stage {prev_stage!r} has no succeeded job to resume from",
+            )
+
+        prior_result = json_loads(prev_succeeded.result_json, fallback={}) or {}
+        stage_inputs = json_loads(pipeline.stage_inputs_json, fallback={}) or {}
+        request_payload = json_loads(pipeline.input_json, fallback={}) or {}
+        input_payload = _compose_stage_input(
+            stage_inputs, stage,
+            prior_result=prior_result,
+            request_payload=request_payload,
+        )
+
+        account_id = pipeline.account_id
+        payment_link_id = pipeline.payment_link_id
+        proxy_id = pipeline.proxy_id
+        proxy_url = pipeline.proxy_url or ""
+        if isinstance(input_payload, dict):
+            if input_payload.get("account_id") not in (None, ""):
+                try:
+                    account_id = int(input_payload.get("account_id") or 0) or account_id
+                except Exception:
+                    pass
+            if input_payload.get("payment_link_id") not in (None, ""):
+                try:
+                    payment_link_id = int(input_payload.get("payment_link_id") or 0) or payment_link_id
+                except Exception:
+                    pass
+            if input_payload.get("proxy_id") not in (None, ""):
+                try:
+                    proxy_id = int(input_payload.get("proxy_id") or 0) or proxy_id
+                except Exception:
+                    pass
+            if input_payload.get("proxy_url") not in (None, ""):
+                proxy_url = str(input_payload.get("proxy_url") or proxy_url or "")
+
+        pipeline_id = int(pipeline.id or 0)
+
+    with session_scope() as s:
+        pipeline_row = s.get(Pipeline, pipeline_id)
+        if pipeline_row is None:
+            raise PipelineRetryError(404, f"pipeline {pipeline_id} disappeared")
+        if pipeline_row.status != JOB_STATUS_FAILED:
+            raise PipelineRetryError(409, f"pipeline status changed to {pipeline_row.status}")
+        pipeline_row.status = JOB_STATUS_QUEUED
+        pipeline_row.current_stage = stage
+        pipeline_row.completed_steps = min(int(pipeline_row.completed_steps or 0), stage_idx)
+        pipeline_row.error = ""
+        pipeline_row.finished_at = None
+        pipeline_row.cancel_requested = False
+        pipeline_row.updated_at = utcnow()
+        s.add(pipeline_row)
+        s.add(JobEvent(
+            job_id=0,
+            pipeline_id=pipeline_id,
+            level="info",
+            event_type="pipeline_retry",
+            message=f"manual retry stage={stage} retried_job_id={job_id}",
+        ))
+
+    new_job_id = enqueue_job(
+        type=stage,
+        input=input_payload,
+        pipeline_id=pipeline_id,
+        account_id=account_id,
+        payment_link_id=payment_link_id,
+        proxy_id=proxy_id,
+        proxy_url=proxy_url,
+    )
+    return {
+        "job_id": new_job_id,
+        "retried_job_id": job_id,
+        "pipeline_id": pipeline_id,
+        "stage": stage,
+    }
 
 
 # ---- progression -----------------------------------------------------------

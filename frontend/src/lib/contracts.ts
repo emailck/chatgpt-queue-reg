@@ -134,6 +134,13 @@ export interface PipelineDetail {
   jobs: Job[]
 }
 
+export interface JobRetryResponse {
+  job_id: number
+  retried_job_id: number
+  pipeline_id: number
+  stage: string
+}
+
 export interface JobEvent {
   id: number
   job_id: number

@@ -32,9 +32,11 @@ from backend.core.job_context import subscribe_job_events
 from backend.core.pipeline import (
     DEFAULT_PRESET,
     PRESETS,
+    PipelineRetryError,
     cancel_pipeline,
     create_pipeline,
     resolve_stages,
+    retry_failed_pipeline_job,
 )
 from backend.core.queue import enqueue_job, get_pool
 from backend.core.stages import STAGE_REGISTRY
@@ -277,6 +279,14 @@ def cancel_job_endpoint(job_id: int):
         job.updated_at = utcnow()
         s.add(job)
     return {"ok": True}
+
+
+@router.post("/api/jobs/{job_id}/retry", tags=["jobs"])
+def retry_job_endpoint(job_id: int):
+    try:
+        return retry_failed_pipeline_job(job_id)
+    except PipelineRetryError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
 @router.delete("/api/jobs/{job_id}", tags=["jobs"])

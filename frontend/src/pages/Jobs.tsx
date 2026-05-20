@@ -8,7 +8,7 @@ import { StatusTag } from '@/components/StatusTag'
 import { ActionCard, CardToolbar, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
 import { CopyableText, ErrorCallout, LinkedIdBadges, Sub2ApiBadge, TokenBadges } from '@/components/ui/DomainBits'
 import { apiFetch, formatDateTime, formatDuration } from '@/lib/api'
-import type { Job, Pipeline, PipelineDetail } from '@/lib/contracts'
+import type { Job, JobRetryResponse, Pipeline, PipelineDetail } from '@/lib/contracts'
 import { stageLabel } from '@/lib/contracts'
 
 const { Text } = Typography
@@ -201,6 +201,7 @@ export default function Jobs() {
   const [detail, setDetail] = useState<PipelineDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [selectedLogJobId, setSelectedLogJobId] = useState<number | null>(null)
+  const [retryingJobId, setRetryingJobId] = useState<number | null>(null)
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -283,6 +284,20 @@ export default function Jobs() {
     setDetail(null)
     setSelectedLogJobId(null)
   }
+
+  const retryStageJob = useCallback(async (jobId: number, pipelineId: number) => {
+    setRetryingJobId(jobId)
+    try {
+      const resp = await apiFetch<JobRetryResponse>(`/jobs/${jobId}/retry`, { method: 'POST' })
+      message.success(`已重新入队 Job #${resp.job_id}（${stageLabel(resp.stage)}）`)
+      await Promise.all([reload(), openDetail(pipelineId)])
+      setSelectedLogJobId(resp.job_id)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '重试失败')
+    } finally {
+      setRetryingJobId(null)
+    }
+  }, [openDetail, reload])
 
   const tableColumns: TableColumnsType<JobTrackerRow> = [
     {
@@ -459,8 +474,46 @@ export default function Jobs() {
     {
       title: '操作',
       key: 'actions',
-      width: 100,
-      render: (_, row) => <Button size="small" disabled={!row.job} onClick={() => row.job && setSelectedLogJobId(row.job.id)}>看日志</Button>,
+      width: 180,
+      render: (_, row) => {
+        const registerIdx = (detailPipeline?.stages || []).indexOf('register')
+        const canRetry = Boolean(
+          row.job &&
+          row.job.status === 'failed' &&
+          detailPipeline?.status === 'failed' &&
+          detailPipeline?.current_stage === row.stage &&
+          registerIdx >= 0 &&
+          row.index > registerIdx,
+        )
+        const retryDisabledHint = !row.job
+          ? '该模块尚无 job'
+          : row.job.status !== 'failed'
+            ? `当前 job 状态 ${row.job.status}`
+            : row.index <= registerIdx
+              ? '注册及之前模块不可手动重试'
+              : detailPipeline?.status !== 'failed'
+                ? `pipeline 状态 ${detailPipeline?.status || '-'}`
+                : detailPipeline?.current_stage !== row.stage
+                  ? `pipeline 当前模块 ${detailPipeline?.current_stage || '-'}`
+                  : ''
+        return (
+          <Space size={4} wrap>
+            <Button size="small" disabled={!row.job} onClick={() => row.job && setSelectedLogJobId(row.job.id)}>看日志</Button>
+            <Tooltip title={canRetry ? '重新入队该模块' : retryDisabledHint || '不可重试'}>
+              <Button
+                size="small"
+                type="primary"
+                ghost
+                disabled={!canRetry || (row.job ? retryingJobId === row.job.id : false)}
+                loading={row.job ? retryingJobId === row.job.id : false}
+                onClick={() => row.job && detailPipeline && retryStageJob(row.job.id, detailPipeline.id)}
+              >
+                重试
+              </Button>
+            </Tooltip>
+          </Space>
+        )
+      },
     },
   ]
 
