@@ -42,7 +42,11 @@ def _human_click(page: Any, el: Any) -> None:
 
 
 def _human_type(page: Any, el: Any, value: str) -> None:
-    """Type using the plugin's proven humanType: execCommand('insertText') + full keyboard event chain."""
+    """Click field, clear, type with Playwright's trusted input pipeline.
+
+    Playwright's el.type() generates isTrusted:true events through the
+    browser's native input system — more realistic than JS-dispatched events.
+    """
     try:
         el.scroll_into_view_if_needed()
     except Exception:
@@ -50,27 +54,10 @@ def _human_type(page: Any, el: Any, value: str) -> None:
     _human_delay(0.2, 0.5)
     el.click()
     _human_delay(0.1, 0.3)
-    page.evaluate("""async ([el, value]) => {
-        const sleep = ms => new Promise(r => setTimeout(r, ms));
-        el.focus();
-        try { el.select && el.select(); document.execCommand('delete'); } catch(_) {}
-        const proto = el instanceof HTMLTextAreaElement
-            ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-        if (desc && desc.set) desc.set.call(el, '');
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        for (const char of String(value)) {
-            el.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
-            el.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true }));
-            document.execCommand('insertText', false, char);
-            el.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
-            let d = 80 + Math.random() * 140;
-            if (Math.random() < 0.08) d += 200 + Math.random() * 300;
-            await sleep(d);
-        }
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('blur', { bubbles: true }));
-    }""", [el, value])
+    el.press("Control+a")
+    el.press("Backspace")
+    _human_delay(0.1, 0.2)
+    el.type(value, delay=random.randint(80, 180))
     _human_delay(0.3, 0.8)
 
 
