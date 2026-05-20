@@ -18,10 +18,9 @@ from .runtime import (
 def requires_manual_approval(payload: Any) -> bool:
     """Structured detection of Stripe confirm responses that need ChatGPT approval.
 
-    Looks at `payment_status`, `status`, `next_action.type`, and recurses into
-    `payment_object` / `setup_intent` / `payment_intent`. Avoids substring
-    matches that can be triggered by unrelated fields containing the literal
-    "requires_approval".
+    Only matches the literal `requires_approval` marker — `requires_action`
+    is normal Stripe flow control (e.g. PayPal redirect / 3DS) and is NOT a
+    manual-approval signal.
     """
     return _check(payload)
 
@@ -29,13 +28,13 @@ def requires_manual_approval(payload: Any) -> bool:
 def _check(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
-    matchset = {"requires_approval", "requires_action"}
-    if str(payload.get("payment_status") or "").lower() in matchset:
+    target = "requires_approval"
+    if str(payload.get("payment_status") or "").lower() == target:
         return True
-    if str(payload.get("status") or "").lower() in matchset:
+    if str(payload.get("status") or "").lower() == target:
         return True
     next_action = payload.get("next_action") or {}
-    if isinstance(next_action, dict) and str(next_action.get("type") or "").lower() in matchset:
+    if isinstance(next_action, dict) and str(next_action.get("type") or "").lower() == target:
         return True
     for nested_key in ("payment_object", "setup_intent", "payment_intent"):
         nested = payload.get(nested_key)
