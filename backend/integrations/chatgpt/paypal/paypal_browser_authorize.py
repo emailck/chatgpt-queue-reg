@@ -270,18 +270,31 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> None:
     }""")
 
     if state == "click_continue":
+        btn = None
         for sel in ['button[data-atomic-wait-intent*="submit_email" i]', 'button.actionContinue[type="submit"]']:
             el = page.query_selector(sel)
             if el and el.is_visible():
-                _human_click(page, el)
-                emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
-                return
-        for text in ["Keep paying", "Continue to payment", "Continue", "Next"]:
-            el = page.query_selector(f'button[type="submit"]:has-text("{text}")')
-            if el and el.is_visible():
-                _human_click(page, el)
-                emit(log, f"paypal_http: /pay tick: clicked '{text}'")
-                return
+                btn = el
+                break
+        if not btn:
+            for text in ["Keep paying", "Continue to payment", "Continue", "Next"]:
+                el = page.query_selector(f'button[type="submit"]:has-text("{text}")')
+                if el and el.is_visible():
+                    btn = el
+                    break
+        if btn:
+            before_url = page.url
+            _human_click(page, btn)
+            emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
+            for _ in range(8):
+                time.sleep(0.5)
+                try:
+                    if page.url != before_url:
+                        emit(log, "paypal_http: /pay tick: Continue click confirmed (URL changed)")
+                        return
+                except Exception:
+                    return
+            emit(log, "paypal_http: /pay tick: Continue click may not have registered, will retry")
     elif state == "fill_email":
         email = _rand_email()
         for sel in ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]']:
@@ -298,8 +311,23 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> None:
                 if el and el.is_visible():
                     break
         if el and el.is_visible():
+            before_url = page.url
             _human_click(page, el)
             emit(log, "paypal_http: /pay tick: clicked Create an Account")
+            for _ in range(8):
+                time.sleep(0.5)
+                try:
+                    now_url = page.url
+                    if now_url != before_url:
+                        emit(log, "paypal_http: /pay tick: Create an Account click confirmed (URL changed)")
+                        return
+                    still_there = page.query_selector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
+                    if not still_there or not still_there.is_visible():
+                        emit(log, "paypal_http: /pay tick: Create an Account click confirmed (button gone)")
+                        return
+                except Exception:
+                    return
+            emit(log, "paypal_http: /pay tick: Create an Account click may not have registered, will retry next tick")
     elif state == "start_onboarding":
         el = page.query_selector('#startOnboardingFlow')
         if el:
