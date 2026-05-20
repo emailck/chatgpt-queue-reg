@@ -197,6 +197,8 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
         if "chatgpt.com" in cur or "pay.openai.com" in cur:
             emit(log, f"paypal_http: browser already returned to Stripe: {cur[:80]}")
             return
+        if "paypal.com" in cur and _check_rsc_redirect(page, log):
+            continue
         if ("/pay" in cur or "/agreements/approve" in cur) and "paypal.com" in cur:
             if not loaded:
                 emit(log, "paypal_http: browser on /pay page, waiting for load...")
@@ -218,6 +220,25 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
                 continue
         time.sleep(2)
     raise PayPalHttpError(f"browser: 等待 signup 页超时 (120s), url={page.url[:120]}")
+
+
+def _check_rsc_redirect(page: Any, log: LogFn | None) -> bool:
+    """Detect raw RSC response with onboardingRedirectUrl and navigate to it."""
+    try:
+        result = page.evaluate("""() => {
+            const text = document.body && document.body.innerText || '';
+            if (!text.includes('onboardingRedirectUrl')) return '';
+            const m = text.match(/"onboardingRedirectUrl":"(https?:\\/\\/[^"]+)"/);
+            return m ? m[1] : '';
+        }""")
+        if result:
+            emit(log, f"paypal_http: browser detected RSC redirect, navigating to onboardingRedirectUrl")
+            page.goto(result, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _pay_page_tick(page: Any, log: LogFn | None) -> bool:
