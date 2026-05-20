@@ -271,6 +271,32 @@ def _fill_signup_form(
     emit(log, "paypal_http: browser filling signup form")
 
     _remove_captcha_elements(page)
+
+    diag = page.evaluate("""() => {
+        const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
+        const visible = inputs.filter(el => {
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+        });
+        return {
+            url: location.href.slice(0, 150),
+            title: document.title.slice(0, 100),
+            totalInputs: inputs.length,
+            visibleInputs: visible.length,
+            fields: visible.slice(0, 20).map(el => ({
+                tag: el.tagName,
+                type: el.getAttribute('type') || '',
+                name: el.name || '',
+                id: el.id || '',
+                placeholder: el.placeholder || '',
+                ariaLabel: el.getAttribute('aria-label') || '',
+                autoComplete: el.autocomplete || '',
+            })),
+        };
+    }""")
+    emit(log, f"paypal_http: browser signup page diag: {diag}")
+
     _set_country_us(page)
     time.sleep(1)
 
@@ -357,7 +383,7 @@ def _fill_field_safe(page: Any, name: str, value: str, log: LogFn | None) -> Non
     labels = cfg.get("labels", [])
     tag = cfg.get("tag", "input")
 
-    deadline = time.time() + 30
+    deadline = time.time() + 5
     while time.time() < deadline:
         found = page.evaluate("""([tag, selectors, names, placeholders, labels, value]) => {
             function isFillable(el) {
