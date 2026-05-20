@@ -116,7 +116,8 @@ def _build_camoufox_proxy(proxy_url: str) -> dict[str, str] | None:
 
 
 def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
-    for i in range(60):
+    pay_page_handled = False
+    for i in range(90):
         cur = page.url
         if "/checkoutweb/signup" in cur:
             emit(log, "paypal_http: browser on signup page")
@@ -125,11 +126,12 @@ def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
         if "/webapps/hermes" in cur:
             emit(log, "paypal_http: browser landed on hermes directly (already authed?)")
             return
-        if "/pay" in cur and "paypal.com" in cur:
-            if i == 0:
-                emit(log, "paypal_http: browser on /pay page, clicking through to signup")
-                time.sleep(3)
+        if "/pay" in cur and "paypal.com" in cur and not pay_page_handled:
+            emit(log, "paypal_http: browser on /pay page, clicking through to signup")
+            time.sleep(3)
             _click_through_pay_page(page, log)
+            pay_page_handled = True
+            emit(log, "paypal_http: browser waiting for /pay SPA to navigate...")
         time.sleep(1)
     raise PayPalHttpError(f"browser: 等待 signup 页超时, url={page.url[:120]}")
 
