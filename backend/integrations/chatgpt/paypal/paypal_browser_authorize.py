@@ -74,7 +74,14 @@ def browser_paypal_checkout(
                 if fill_ok:
                     break
                 emit(log, f"paypal_http: browser form fill incomplete (attempt {fill_attempt + 1}/3), refreshing page")
-                page.reload(wait_until="domcontentloaded", timeout=60000)
+                try:
+                    cur_url = page.url
+                    page.goto(cur_url, wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    try:
+                        page.reload(timeout=30000)
+                    except Exception:
+                        pass
                 time.sleep(5)
                 checkpoint(check_cancelled)
                 if "/checkoutweb/signup" not in page.url:
@@ -150,8 +157,15 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
             return
         if ("/pay" in cur or "/agreements/approve" in cur) and "paypal.com" in cur:
             if not logged:
-                emit(log, f"paypal_http: browser on {cur.split('?')[0].split('/')[-1]} page, starting poll loop")
+                emit(log, f"paypal_http: browser on {cur.split('?')[0].split('/')[-1]} page, waiting for load...")
                 logged = True
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                time.sleep(3)
+                emit(log, "paypal_http: browser /pay page loaded, starting poll loop")
+                continue
             try:
                 _pay_page_tick(page, log)
             except Exception as exc:
