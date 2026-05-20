@@ -10,8 +10,10 @@ from urllib.parse import parse_qs, urlparse
 
 from .paypal_login import fetch_paypal_otp
 from .runtime import (
+    CheckCancelledFn,
     LogFn,
     PayPalHttpError,
+    checkpoint,
     emit,
     gen_paypal_password,
     query_value,
@@ -25,6 +27,7 @@ def browser_paypal_checkout(
     paypal_cfg: dict[str, Any],
     address: dict[str, str],
     log: LogFn | None,
+    check_cancelled: CheckCancelledFn | None = None,
 ) -> dict[str, Any]:
     """Drive the entire PayPal side in Camoufox: approve → signup → OTP → hermes Continue.
 
@@ -61,8 +64,10 @@ def browser_paypal_checkout(
 
             emit(log, "paypal_http: browser navigating to approve URL")
             page.goto(approve_url, wait_until="domcontentloaded", timeout=60000)
+            checkpoint(check_cancelled)
 
-            _wait_for_signup_page(page, log)
+            _wait_for_signup_page(page, log, check_cancelled)
+            checkpoint(check_cancelled)
 
             for fill_attempt in range(3):
                 fill_ok = _fill_signup_form(page, phone, password, address, log)
@@ -71,14 +76,17 @@ def browser_paypal_checkout(
                 emit(log, f"paypal_http: browser form fill incomplete (attempt {fill_attempt + 1}/3), refreshing page")
                 page.reload(wait_until="domcontentloaded", timeout=60000)
                 time.sleep(5)
+                checkpoint(check_cancelled)
                 if "/checkoutweb/signup" not in page.url:
-                    _wait_for_signup_page(page, log)
+                    _wait_for_signup_page(page, log, check_cancelled)
             else:
                 raise PayPalHttpError("browser: signup 表单填写 3 次均失败")
 
-            _submit_and_handle_otp(page, paypal_cfg, smsurl, log)
+            checkpoint(check_cancelled)
+            _submit_and_handle_otp(page, paypal_cfg, smsurl, log, check_cancelled)
+            checkpoint(check_cancelled)
 
-            return_url = _wait_for_stripe_return(page, log)
+            return_url = _wait_for_stripe_return(page, log, check_cancelled)
 
             ec_token = query_value(page.url, "token") or ""
             return {
@@ -116,7 +124,7 @@ def _build_camoufox_proxy(proxy_url: str) -> dict[str, str] | None:
     return build_playwright_proxy_config(proxy_url)
 
 
-def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
+def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCancelledFn | None = None) -> None:
     """Poll /pay page like the plugin's tick() — every 5s check state and act.
 
     The /pay SPA may auto-redirect (HAR shows ~140ms) or require manual
@@ -124,7 +132,12 @@ def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
     """
     logged = False
     for i in range(24):
-        cur = page.url
+        checkpoint(check_cancelled)
+        try:
+            cur = page.url
+        except Exception:
+            time.sleep(2)
+            continue
         if "/checkoutweb/signup" in cur:
             emit(log, "paypal_http: browser on signup page")
             time.sleep(2)
@@ -135,16 +148,16 @@ def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
         if "chatgpt.com" in cur or "pay.openai.com" in cur:
             emit(log, f"paypal_http: browser already returned to Stripe: {cur[:80]}")
             return
-        if "/pay" in cur and "paypal.com" in cur:
+        if ("/pay" in cur or "/agreements/approve" in cur) and "paypal.com" in cur:
             if not logged:
-                emit(log, "paypal_http: browser on /pay page, starting poll loop")
+                emit(log, f"paypal_http: browser on {cur.split('?')[0].split('/')[-1]} page, starting poll loop")
                 logged = True
-            _pay_page_tick(page, log)
-        if "/agreements/approve" in cur and "paypal.com" in cur:
-            if not logged:
-                emit(log, "paypal_http: browser on approve page, starting poll loop")
-                logged = True
-            _pay_page_tick(page, log)
+            try:
+                _pay_page_tick(page, log)
+            except Exception as exc:
+                emit(log, f"paypal_http: /pay tick exception (page navigating?): {str(exc)[:80]}")
+                time.sleep(2)
+                continue
         time.sleep(5)
     raise PayPalHttpError(f"browser: 等待 signup 页超时 (120s), url={page.url[:120]}")
 
@@ -597,11 +610,13 @@ def _submit_and_handle_otp(
     paypal_cfg: dict[str, Any],
     smsurl: str,
     log: LogFn | None,
+    check_cancelled: CheckCancelledFn | None = None,
 ) -> None:
     emit(log, "paypal_http: browser submitting signup form")
     _click_submit(page)
 
     for attempt in range(3):
+        checkpoint(check_cancelled)
         result = _wait_post_submit(page, timeout=15000)
         emit(log, f"paypal_http: browser post-submit state={result}")
         if result == "otp":
@@ -618,6 +633,7 @@ def _submit_and_handle_otp(
         if attempt < 2:
             _click_submit(page)
 
+    checkpoint(check_cancelled)
     emit(log, "paypal_http: browser waiting for OTP inputs")
     input_count = _wait_for_otp_inputs(page, timeout=20)
     expected_length = input_count if input_count > 1 else 6
@@ -629,11 +645,13 @@ def _submit_and_handle_otp(
         otp = paypal_number_pool.fetch_otp(
             number_id, expected_length=expected_length,
             timeout=int(paypal_cfg.get("otp_timeout") or 90),
+            check_cancelled=check_cancelled,
         )
     else:
         otp = _fetch_otp_with_length_check(
             paypal_cfg, smsurl, expected_length,
             timeout=int(paypal_cfg.get("otp_timeout") or 90), log=log,
+            check_cancelled=check_cancelled,
         )
 
     emit(log, "paypal_http: browser filling OTP")
@@ -752,6 +770,7 @@ def _fetch_otp_with_length_check(
     expected_length: int,
     timeout: int,
     log: LogFn | None,
+    check_cancelled: CheckCancelledFn | None = None,
 ) -> str:
     """Poll smsurl for OTP, only accept tokens matching expectedLength."""
     import json
@@ -760,6 +779,7 @@ def _fetch_otp_with_length_check(
     deadline = time.time() + timeout
     attempts = 0
     while time.time() < deadline:
+        checkpoint(check_cancelled)
         attempts += 1
         try:
             resp = std_requests.get(smsurl, timeout=15)
@@ -875,11 +895,12 @@ def _find_otp_submit(page: Any) -> Any:
     return None
 
 
-def _wait_for_stripe_return(page: Any, log: LogFn | None) -> str:
+def _wait_for_stripe_return(page: Any, log: LogFn | None, check_cancelled: CheckCancelledFn | None = None) -> str:
     """Wait for hermes review → click Continue → wait for Stripe return URL."""
     emit(log, "paypal_http: browser waiting for hermes review / stripe return")
 
     for _ in range(120):
+        checkpoint(check_cancelled)
         cur = page.url
         if "pay.openai.com" in cur or "chatgpt.com" in cur or "checkout.stripe.com" in cur:
             emit(log, f"paypal_http: browser reached stripe return: {cur[:100]}")
