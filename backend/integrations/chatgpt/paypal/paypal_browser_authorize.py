@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import shutil
 import tempfile
@@ -18,6 +19,42 @@ from .runtime import (
     gen_paypal_password,
     query_value,
 )
+
+
+def _human_delay(lo: float = 0.5, hi: float = 1.5) -> None:
+    time.sleep(lo + random.random() * (hi - lo))
+
+
+def _type_delay() -> int:
+    """Per-character delay in ms for element.type()."""
+    return random.randint(60, 160)
+
+
+def _human_click(page: Any, el: Any) -> None:
+    """Click with mouse move — Playwright moves to element center, then clicks."""
+    try:
+        el.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    _human_delay(0.2, 0.5)
+    el.click()
+    _human_delay(0.3, 0.8)
+
+
+def _human_type(page: Any, el: Any, value: str) -> None:
+    """Click field, clear, type char-by-char with random delays."""
+    try:
+        el.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    _human_delay(0.2, 0.4)
+    el.click()
+    _human_delay(0.1, 0.3)
+    el.press("Control+a")
+    el.press("Backspace")
+    _human_delay(0.1, 0.2)
+    el.type(value, delay=_type_delay())
+    _human_delay(0.2, 0.5)
 
 
 def browser_paypal_checkout(
@@ -233,49 +270,41 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> None:
     }""")
 
     if state == "click_continue":
-        page.evaluate("""() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const btn = buttons.find(b => {
-                const text = (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim();
-                const intent = b.getAttribute('data-atomic-wait-intent') || '';
-                if (/cancel|back|log in|login/i.test(text)) return false;
-                return /submit_email/i.test(intent) ||
-                    (b.type === 'submit' && /keep paying|continue to payment|continue/i.test(text));
-            }) || document.querySelector('button.actionContinue[type="submit"]');
-            if (btn) { btn.scrollIntoView({block:'center'}); btn.focus(); btn.click(); }
-        }""")
-        emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
+        for sel in ['button[data-atomic-wait-intent*="submit_email" i]', 'button.actionContinue[type="submit"]']:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                _human_click(page, el)
+                emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
+                return
+        for text in ["Keep paying", "Continue to payment", "Continue", "Next"]:
+            el = page.query_selector(f'button[type="submit"]:has-text("{text}")')
+            if el and el.is_visible():
+                _human_click(page, el)
+                emit(log, f"paypal_http: /pay tick: clicked '{text}'")
+                return
     elif state == "fill_email":
         email = _rand_email()
-        page.evaluate("""(email) => {
-            const sels = ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]'];
-            for (const sel of sels) {
-                const el = document.querySelector(sel);
-                if (el && !el.disabled && el.getBoundingClientRect().width > 0) {
-                    el.scrollIntoView({block:'center'});
-                    el.focus();
-                    const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-                    if (desc && desc.set) desc.set.call(el, email);
-                    else el.value = email;
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    el.dispatchEvent(new Event('blur', {bubbles: true}));
-                    return;
-                }
-            }
-        }""", email)
-        emit(log, f"paypal_http: /pay tick: filled email={email}")
+        for sel in ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]']:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                _human_type(page, el, email)
+                emit(log, f"paypal_http: /pay tick: filled email={email}")
+                return
     elif state == "create_account":
-        page.evaluate("""() => {
-            const btn = document.querySelector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
-                || Array.from(document.querySelectorAll('button')).find(b =>
-                    /create an account|create account/i.test((b.innerText||'').trim()));
-            if (btn) { btn.scrollIntoView({block:'center'}); btn.focus(); btn.click(); }
-        }""")
-        emit(log, "paypal_http: /pay tick: clicked Create an Account")
+        el = page.query_selector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
+        if not el or not el.is_visible():
+            for text in ["Create an Account", "Create account"]:
+                el = page.query_selector(f'button:has-text("{text}")')
+                if el and el.is_visible():
+                    break
+        if el and el.is_visible():
+            _human_click(page, el)
+            emit(log, "paypal_http: /pay tick: clicked Create an Account")
     elif state == "start_onboarding":
-        page.evaluate("() => { const b = document.querySelector('#startOnboardingFlow'); if (b) { b.scrollIntoView({block:'center'}); b.click(); } }")
-        emit(log, "paypal_http: /pay tick: clicked #startOnboardingFlow")
+        el = page.query_selector('#startOnboardingFlow')
+        if el:
+            _human_click(page, el)
+            emit(log, "paypal_http: /pay tick: clicked #startOnboardingFlow")
     else:
         emit(log, "paypal_http: /pay tick: waiting...")
 
@@ -429,90 +458,47 @@ def _wait_for_any_field(page: Any, timeout: int = 10) -> bool:
     return False
 
 
-def _fill_field_safe(page: Any, name: str, value: str, log: LogFn | None) -> None:
-    """Find field using plugin's multi-strategy search, then fill with React-safe setter."""
-    if not value:
-        return
+def _find_field(page: Any, name: str) -> Any:
+    """Find a field using multi-strategy search matching plugin's findField."""
     cfg = _FIELD_SELECTORS.get(name)
     if not cfg:
-        return
-    selectors = cfg.get("selectors", [])
-    names = cfg.get("names", [])
-    placeholders = cfg.get("placeholders", [])
-    labels = cfg.get("labels", [])
-    tag = cfg.get("tag", "input")
+        return None
+    for sel in cfg.get("selectors", []):
+        el = page.query_selector(sel)
+        if el and el.is_visible() and el.is_enabled():
+            return el
+    for n in cfg.get("names", []):
+        tag = cfg.get("tag", "input")
+        el = page.query_selector(f'{tag}[name="{n}"]')
+        if el and el.is_visible() and el.is_enabled():
+            return el
+        el = page.query_selector(f'#{n}')
+        if el and el.is_visible() and el.is_enabled():
+            return el
+    for p in cfg.get("placeholders", []):
+        el = page.query_selector(f'{cfg.get("tag", "input")}[placeholder*="{p}" i]')
+        if el and el.is_visible() and el.is_enabled():
+            return el
+    for label_text in cfg.get("labels", []):
+        el = page.query_selector(f'label:has-text("{label_text}") + input, label:has-text("{label_text}") input')
+        if el and el.is_visible() and el.is_enabled():
+            return el
+    return None
 
+
+def _fill_field_safe(page: Any, name: str, value: str, log: LogFn | None) -> None:
+    """Find field, type value with human-like keystrokes."""
+    if not value:
+        return
     deadline = time.time() + 5
     while time.time() < deadline:
-        found = page.evaluate("""([tag, selectors, names, placeholders, labels, value]) => {
-            function isFillable(el) {
-                if (!el || el.tagName.toLowerCase() !== tag || el.disabled || el.readOnly) return false;
-                if (tag === 'input') {
-                    const type = (el.getAttribute('type') || 'text').toLowerCase();
-                    if (['hidden','submit','button','checkbox','radio'].includes(type)) return false;
-                }
-                const rect = el.getBoundingClientRect();
-                const style = getComputedStyle(el);
-                return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-            }
-            function tryFill(el) {
-                el.scrollIntoView({block:'center'});
-                el.focus();
-                const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-                const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-                if (desc && desc.set) desc.set.call(el, '');
-                el.dispatchEvent(new Event('input', {bubbles:true}));
-                if (desc && desc.set) desc.set.call(el, value);
-                else el.value = value;
-                el.dispatchEvent(new Event('input', {bubbles:true}));
-                el.dispatchEvent(new Event('change', {bubbles:true}));
-                el.dispatchEvent(new Event('blur', {bubbles:true}));
-                return true;
-            }
-            // 1. CSS selectors
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (isFillable(el)) return tryFill(el);
-            }
-            // 2. name attribute
-            for (const n of names) {
-                const el = document.querySelector(tag + '[name="' + n + '"]');
-                if (isFillable(el)) return tryFill(el);
-                const byId = document.getElementById(n);
-                if (isFillable(byId)) return tryFill(byId);
-            }
-            // 3. placeholder
-            const all = Array.from(document.querySelectorAll(tag)).filter(isFillable);
-            for (const p of placeholders) {
-                const target = p.toLowerCase();
-                const el = all.find(e => (e.placeholder || '').toLowerCase().includes(target));
-                if (el) return tryFill(el);
-            }
-            // 4. aria-label
-            for (const p of placeholders.concat(labels)) {
-                const target = p.toLowerCase();
-                const el = all.find(e => (e.getAttribute('aria-label') || '').toLowerCase().includes(target));
-                if (el) return tryFill(el);
-            }
-            // 5. label text
-            for (const text of labels) {
-                const target = text.toLowerCase();
-                const label = Array.from(document.querySelectorAll('label'))
-                    .find(l => l.textContent.trim().toLowerCase().includes(target));
-                if (label) {
-                    const forId = label.getAttribute('for');
-                    if (forId) { const el = document.getElementById(forId); if (isFillable(el)) return tryFill(el); }
-                    const inner = label.querySelector(tag);
-                    if (isFillable(inner)) return tryFill(inner);
-                }
-            }
-            return false;
-        }""", [tag, selectors, names, placeholders, labels, value])
-        if found:
-            time.sleep(0.3)
+        el = _find_field(page, name)
+        if el:
+            _human_type(page, el, value)
+            _human_delay(0.3, 0.8)
             return
         time.sleep(0.5)
-    emit(log, f"paypal_http: browser WARNING field '{name}' not found after 30s", level="warning")
+    emit(log, f"paypal_http: browser WARNING field '{name}' not found", level="warning")
 
 
 def _verify_fields(page: Any, fields: list[tuple[str, str]], log: LogFn | None) -> list[str]:
@@ -692,9 +678,7 @@ def _click_submit(page: Any) -> None:
         try:
             el = page.query_selector(sel)
             if el and el.is_visible():
-                el.scroll_into_view_if_needed()
-                el.click()
-                time.sleep(2)
+                _human_click(page, el)
                 return
         except Exception:
             continue
@@ -702,9 +686,7 @@ def _click_submit(page: Any) -> None:
         try:
             btn = page.query_selector(f'button:has-text("{text}")')
             if btn and btn.is_visible():
-                btn.scroll_into_view_if_needed()
-                btn.click()
-                time.sleep(2)
+                _human_click(page, btn)
                 return
         except Exception:
             continue
