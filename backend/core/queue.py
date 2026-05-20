@@ -106,6 +106,7 @@ def enqueue_job(
 def recover_orphan_jobs() -> int:
     """Flip lingering 'running' jobs/pipelines to 'interrupted' on boot."""
     fixed = 0
+    stale_job_ids: list[int] = []
     with session_scope() as s:
         stale_jobs = list(s.exec(sa_select(Job).where(Job.status == JOB_STATUS_RUNNING)).scalars())
         for job in stale_jobs:
@@ -121,6 +122,7 @@ def recover_orphan_jobs() -> int:
                 event_type="status",
                 message="job marked interrupted on boot (process restarted while running)",
             ))
+            stale_job_ids.append(int(job.id or 0))
             fixed += 1
         stale_pipelines = list(
             s.exec(sa_select(Pipeline).where(Pipeline.status == JOB_STATUS_RUNNING)).scalars()
@@ -131,7 +133,29 @@ def recover_orphan_jobs() -> int:
             pipeline.updated_at = utcnow()
             pipeline.finished_at = utcnow()
             s.add(pipeline)
+    _release_orphan_resources(stale_job_ids)
     return fixed
+
+
+def _release_orphan_resources(job_ids: list[int]) -> None:
+    if not job_ids:
+        return
+    from backend.models.payment_card import CARD_STATUS_AVAILABLE, PaymentCard
+    from backend.models.paypal_number import PAYPAL_NUMBER_STATUS_COOLING, PayPalNumber
+
+    now = utcnow()
+    with session_scope() as s:
+        for row in s.exec(sa_select(PayPalNumber).where(PayPalNumber.bound_job_id.in_(job_ids))).scalars():
+            row.status = PAYPAL_NUMBER_STATUS_COOLING
+            row.last_used_at = now
+            row.bound_job_id = None
+            row.updated_at = now
+            s.add(row)
+        for row in s.exec(sa_select(PaymentCard).where(PaymentCard.bound_job_id.in_(job_ids))).scalars():
+            row.status = CARD_STATUS_AVAILABLE
+            row.bound_job_id = None
+            row.updated_at = now
+            s.add(row)
 
 
 # ---- worker pool -------------------------------------------------------------

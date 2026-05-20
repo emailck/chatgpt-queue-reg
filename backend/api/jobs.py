@@ -317,7 +317,28 @@ def force_stop_job(job_id: int):
                 pipeline.updated_at = utcnow()
                 s.add(pipeline)
 
+    _release_bound_resources(job_id)
     return {"ok": True, "job_id": job_id}
+
+
+def _release_bound_resources(job_id: int) -> None:
+    """Release pool resources still bound to this job."""
+    from backend.models.payment_card import PaymentCard, CARD_STATUS_AVAILABLE
+    from backend.models.paypal_number import PayPalNumber, PAYPAL_NUMBER_STATUS_COOLING
+
+    now = utcnow()
+    with session_scope() as s:
+        for row in s.exec(sa_select(PayPalNumber).where(PayPalNumber.bound_job_id == job_id)).scalars():
+            row.status = PAYPAL_NUMBER_STATUS_COOLING
+            row.last_used_at = now
+            row.bound_job_id = None
+            row.updated_at = now
+            s.add(row)
+        for row in s.exec(sa_select(PaymentCard).where(PaymentCard.bound_job_id == job_id)).scalars():
+            row.status = CARD_STATUS_AVAILABLE
+            row.bound_job_id = None
+            row.updated_at = now
+            s.add(row)
 
 
 @router.post("/api/jobs/{job_id}/retry", tags=["jobs"])
