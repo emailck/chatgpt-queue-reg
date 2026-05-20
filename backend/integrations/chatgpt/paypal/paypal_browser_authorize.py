@@ -68,10 +68,11 @@ def browser_paypal_checkout(
                 fill_ok = _fill_signup_form(page, phone, password, address, log)
                 if fill_ok:
                     break
-                emit(log, f"paypal_http: browser form fill failed (attempt {fill_attempt + 1}/3), refreshing page")
+                emit(log, f"paypal_http: browser form fill incomplete (attempt {fill_attempt + 1}/3), refreshing page")
                 page.reload(wait_until="domcontentloaded", timeout=60000)
-                time.sleep(3)
-                _wait_for_signup_page(page, log)
+                time.sleep(5)
+                if "/checkoutweb/signup" not in page.url:
+                    _wait_for_signup_page(page, log)
             else:
                 raise PayPalHttpError("browser: signup 表单填写 3 次均失败")
 
@@ -306,6 +307,10 @@ def _fill_signup_form(
     last_name = address.get("last_name") or "Jacobs"
     phone_norm = _normalize_phone(phone)
 
+    if not _wait_for_any_field(page, timeout=10):
+        emit(log, "paypal_http: browser signup fields not rendered after 10s", level="warning")
+        return False
+
     fields = [
         ("email", email),
         ("phone", phone_norm),
@@ -368,6 +373,27 @@ def _remove_captcha_elements(page: Any) -> None:
         }""")
     except Exception:
         pass
+
+
+def _wait_for_any_field(page: Any, timeout: int = 10) -> bool:
+    """Wait up to timeout seconds for signup form fields to render."""
+    for _ in range(timeout * 2):
+        count = page.evaluate("""() => {
+            const all = document.querySelectorAll('input');
+            let visible = 0;
+            for (const el of all) {
+                if (el.disabled) continue;
+                const type = (el.getAttribute('type') || 'text').toLowerCase();
+                if (['hidden','submit','button','checkbox','radio'].includes(type)) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) visible++;
+            }
+            return visible;
+        }""")
+        if count >= 5:
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def _fill_field_safe(page: Any, name: str, value: str, log: LogFn | None) -> None:
