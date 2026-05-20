@@ -118,12 +118,21 @@ def paypal_guest_signup_authorize(
     signup_payload = _signup_payload(ec_token, paypal_cfg, phone_number, phone_country_code_value, country, signup_email)
     signup_data = graphql_checkoutweb(http, signup_payload, referer=signup_url, ec_token=ec_token, country=country, label="paypal SignUpNewMemberMutation")
     access_token = _extract_buyer_access_token(signup_data)
+    cookie_count = 0
+    try:
+        cookie_count = len(list(http.cookies))
+    except Exception:
+        pass
+    emit(log, f"paypal_http: signup access_token={'present' if access_token else 'EMPTY'} cookies={cookie_count}")
     if access_token:
-        # Same token PayPal stores in the randomised AV894Kt2*-style auth cookie;
-        # graphql_authorize and downstream /webapps/hermes calls expect it on this header.
         http.headers.update({"x-paypal-internal-euat": access_token})
+    else:
+        emit(log, "paypal_http: WARNING signup returned no accessToken — authorize may fail as ANONYMOUS", level="warning")
 
-    drop_resp = http.get("https://www.paypal.com/checkoutweb/drop", headers={"Referer": signup_url}, allow_redirects=True, timeout=30)
+    drop_headers = {"Referer": signup_url, "X-Requested-With": "fetch"}
+    if access_token:
+        drop_headers["x-paypal-internal-euat"] = access_token
+    drop_resp = http.get("https://www.paypal.com/checkoutweb/drop", headers=drop_headers, allow_redirects=True, timeout=30)
     hermes_url = str(drop_resp.url)
     if "/webapps/hermes" not in hermes_url:
         hermes_url = _hermes_url(signup_url, ba_token, ec_token)
