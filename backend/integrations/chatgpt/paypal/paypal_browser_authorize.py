@@ -147,7 +147,7 @@ def _browser_checkout_once(
     try:
         with Camoufox(
             headless=False,  # TODO: revert to `not has_display` after captcha debugging
-            humanize=False,
+            humanize=True,
             persistent_context=True,
             user_data_dir=tmp_profile,
             os="windows",
@@ -155,6 +155,9 @@ def _browser_checkout_once(
             proxy=cf_proxy,
             geoip=True,
             locale="en-US",
+            i_know_what_im_doing=True,
+            disable_coop=True,
+            config={"showcursor": False},
         ) as ctx:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
