@@ -174,8 +174,9 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
     The /pay SPA may auto-redirect (HAR shows ~140ms) or require manual
     interaction (#startOnboardingFlow → Create Account → email → Continue).
     """
-    logged = False
-    for i in range(24):
+    loaded = False
+    deadline = time.time() + 120
+    while time.time() < deadline:
         checkpoint(check_cancelled)
         try:
             cur = page.url
@@ -193,28 +194,30 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
             emit(log, f"paypal_http: browser already returned to Stripe: {cur[:80]}")
             return
         if ("/pay" in cur or "/agreements/approve" in cur) and "paypal.com" in cur:
-            if not logged:
-                emit(log, f"paypal_http: browser on {cur.split('?')[0].split('/')[-1]} page, waiting for load...")
-                logged = True
+            if not loaded:
+                emit(log, "paypal_http: browser on /pay page, waiting for load...")
                 try:
                     page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
-                time.sleep(3)
-                emit(log, "paypal_http: browser /pay page loaded, starting poll loop")
+                time.sleep(2)
+                loaded = True
+                emit(log, "paypal_http: browser /pay page loaded")
                 continue
             try:
-                _pay_page_tick(page, log)
+                acted = _pay_page_tick(page, log)
+                if acted:
+                    continue
             except Exception as exc:
-                emit(log, f"paypal_http: /pay tick exception (page navigating?): {str(exc)[:80]}")
+                emit(log, f"paypal_http: /pay tick exception: {str(exc)[:80]}")
                 time.sleep(2)
                 continue
-        time.sleep(5)
+        time.sleep(2)
     raise PayPalHttpError(f"browser: 等待 signup 页超时 (120s), url={page.url[:120]}")
 
 
-def _pay_page_tick(page: Any, log: LogFn | None) -> None:
-    """Single tick — detect state, do ONE action, return. Next tick handles next step.
+def _pay_page_tick(page: Any, log: LogFn | None) -> bool:
+    """Single tick — detect state, do ONE action, return True if acted.
 
     Mirrors plugin's tick(): each call does at most one click/fill, then returns.
     The 5-second interval between ticks gives PayPal's SPA time to react.
@@ -268,7 +271,44 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> None:
         return 'waiting';
     }""")
 
-    if state == "click_continue":
+    if state == "create_account":
+        el = page.query_selector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
+        if not el or not el.is_visible():
+            for text in ["Create an Account", "Create account"]:
+                el = page.query_selector(f'button:has-text("{text}")')
+                if el and el.is_visible():
+                    break
+        if el and el.is_visible():
+            before_url = page.url
+            _human_click(page, el)
+            emit(log, "paypal_http: /pay tick: clicked Create an Account")
+            for _ in range(4):
+                time.sleep(0.5)
+                try:
+                    if page.url != before_url:
+                        return True
+                    btn = page.query_selector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
+                    if not btn or not btn.is_visible():
+                        return True
+                except Exception:
+                    return True
+            emit(log, "paypal_http: /pay tick: Create an Account not confirmed, retrying")
+            return True
+    elif state == "start_onboarding":
+        el = page.query_selector('#startOnboardingFlow')
+        if el:
+            _human_click(page, el)
+            emit(log, "paypal_http: /pay tick: clicked #startOnboardingFlow")
+            return True
+    elif state == "fill_email":
+        email = _rand_email()
+        for sel in ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]']:
+            el = page.query_selector(sel)
+            if el and el.is_visible():
+                _human_type(page, el, email)
+                emit(log, f"paypal_http: /pay tick: filled email={email}")
+                return True
+    elif state == "click_continue":
         btn = None
         for sel in ['button[data-atomic-wait-intent*="submit_email" i]', 'button.actionContinue[type="submit"]']:
             el = page.query_selector(sel)
@@ -285,55 +325,16 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> None:
             before_url = page.url
             _human_click(page, btn)
             emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
-            for _ in range(8):
+            for _ in range(4):
                 time.sleep(0.5)
                 try:
                     if page.url != before_url:
-                        emit(log, "paypal_http: /pay tick: Continue click confirmed (URL changed)")
-                        return
+                        return True
                 except Exception:
-                    return
-            emit(log, "paypal_http: /pay tick: Continue click may not have registered, will retry")
-    elif state == "fill_email":
-        email = _rand_email()
-        for sel in ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]']:
-            el = page.query_selector(sel)
-            if el and el.is_visible():
-                _human_type(page, el, email)
-                emit(log, f"paypal_http: /pay tick: filled email={email}")
-                return
-    elif state == "create_account":
-        el = page.query_selector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
-        if not el or not el.is_visible():
-            for text in ["Create an Account", "Create account"]:
-                el = page.query_selector(f'button:has-text("{text}")')
-                if el and el.is_visible():
-                    break
-        if el and el.is_visible():
-            before_url = page.url
-            _human_click(page, el)
-            emit(log, "paypal_http: /pay tick: clicked Create an Account")
-            for _ in range(8):
-                time.sleep(0.5)
-                try:
-                    now_url = page.url
-                    if now_url != before_url:
-                        emit(log, "paypal_http: /pay tick: Create an Account click confirmed (URL changed)")
-                        return
-                    still_there = page.query_selector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
-                    if not still_there or not still_there.is_visible():
-                        emit(log, "paypal_http: /pay tick: Create an Account click confirmed (button gone)")
-                        return
-                except Exception:
-                    return
-            emit(log, "paypal_http: /pay tick: Create an Account click may not have registered, will retry next tick")
-    elif state == "start_onboarding":
-        el = page.query_selector('#startOnboardingFlow')
-        if el:
-            _human_click(page, el)
-            emit(log, "paypal_http: /pay tick: clicked #startOnboardingFlow")
-    else:
-        emit(log, "paypal_http: /pay tick: waiting...")
+                    return True
+            emit(log, "paypal_http: /pay tick: Continue not confirmed, retrying")
+            return True
+    return False
 
 
 def _rand_email() -> str:
