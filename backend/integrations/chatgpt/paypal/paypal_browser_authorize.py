@@ -162,7 +162,7 @@ def _browser_checkout_once(
             page.goto(approve_url, wait_until="domcontentloaded", timeout=60000)
             checkpoint(check_cancelled)
 
-            _wait_for_signup_page(page, log, check_cancelled)
+            _wait_for_signup_page(page, log, check_cancelled, approve_url=approve_url)
             checkpoint(check_cancelled)
 
             _fill_signup_form(page, phone, password, address, log)
@@ -209,7 +209,12 @@ def _build_camoufox_proxy(proxy_url: str) -> dict[str, str] | None:
     return build_playwright_proxy_config(proxy_url)
 
 
-def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCancelledFn | None = None) -> None:
+def _wait_for_signup_page(
+    page: Any,
+    log: LogFn | None,
+    check_cancelled: CheckCancelledFn | None = None,
+    approve_url: str = "",
+) -> None:
     """Poll /pay page like the plugin's tick() — every 5s check state and act.
 
     The /pay SPA may auto-redirect (HAR shows ~140ms) or require manual
@@ -255,12 +260,8 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
                     continue
             except _PayContinueStuck:
                 emit(log, "paypal_http: /pay Continue stuck — refreshing and restarting flow")
-                try:
-                    page.reload(wait_until="domcontentloaded", timeout=30000)
-                    time.sleep(3)
-                    loaded = False
-                except Exception as reload_exc:
-                    emit(log, f"paypal_http: /pay reload failed: {str(reload_exc)[:80]}")
+                _hard_reload(page, approve_url, log)
+                loaded = False
                 continue
             except Exception as exc:
                 msg = str(exc)
@@ -268,18 +269,31 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
                     raise PayPalHttpError(f"browser tab crashed: {msg[:120]}")
                 if "Timeout" in msg and "click" in msg.lower():
                     emit(log, "paypal_http: /pay tick: click timed out, refreshing page")
-                    try:
-                        page.reload(wait_until="domcontentloaded", timeout=30000)
-                        time.sleep(3)
-                        loaded = False
-                    except Exception as reload_exc:
-                        emit(log, f"paypal_http: /pay reload failed: {str(reload_exc)[:80]}")
+                    _hard_reload(page, approve_url, log)
+                    loaded = False
                     continue
                 emit(log, f"paypal_http: /pay tick exception: {msg[:80]}")
                 time.sleep(2)
                 continue
         time.sleep(2)
     raise PayPalHttpError(f"browser: 等待 signup 页超时 (120s), url={page.url[:120]}")
+
+
+def _hard_reload(page: Any, approve_url: str, log: LogFn | None) -> None:
+    """Robust reload: try goto(approve_url) → reload() → wait, swallow timeouts."""
+    if approve_url:
+        try:
+            page.goto(approve_url, wait_until="commit", timeout=15000)
+            time.sleep(5)
+            return
+        except Exception as exc:
+            emit(log, f"paypal_http: /pay goto failed: {str(exc)[:80]}")
+    try:
+        page.reload(wait_until="commit", timeout=15000)
+        time.sleep(5)
+    except Exception as exc:
+        emit(log, f"paypal_http: /pay reload failed: {str(exc)[:80]}")
+        time.sleep(3)
 
 
 def _check_rsc_redirect(page: Any, log: LogFn | None) -> bool:
