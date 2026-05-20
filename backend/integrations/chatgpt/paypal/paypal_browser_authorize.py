@@ -69,13 +69,40 @@ def browser_paypal_checkout(
     address: dict[str, str],
     log: LogFn | None,
     check_cancelled: CheckCancelledFn | None = None,
+    max_retries: int = 3,
 ) -> dict[str, Any]:
-    """Drive the entire PayPal side in Camoufox: approve → signup → OTP → hermes Continue.
+    """Drive the entire PayPal side in Camoufox. Retries with fresh browser on crash."""
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        if attempt > 0:
+            emit(log, f"paypal_http: browser retry {attempt + 1}/{max_retries}")
+        checkpoint(check_cancelled)
+        try:
+            return _browser_checkout_once(
+                approve_url, ba_token, proxy_url, paypal_cfg, address, log, check_cancelled,
+            )
+        except PayPalHttpError as exc:
+            last_error = exc
+            if "crashed" in str(exc) or "closed" in str(exc) or "超时" in str(exc):
+                emit(log, f"paypal_http: browser attempt {attempt + 1} failed (will retry): {str(exc)[:100]}")
+                continue
+            raise
+        except Exception as exc:
+            last_error = exc
+            emit(log, f"paypal_http: browser attempt {attempt + 1} failed: {str(exc)[:100]}")
+            continue
+    raise PayPalHttpError(f"browser checkout {max_retries} 次均失败: {last_error}")
 
-    HTTP handles the Stripe side (init through confirm) and provides the
-    approve_url. This function opens a browser, fills the signup form,
-    handles OTP, and waits for hermes review → Continue → Stripe return.
-    """
+
+def _browser_checkout_once(
+    approve_url: str,
+    ba_token: str,
+    proxy_url: str,
+    paypal_cfg: dict[str, Any],
+    address: dict[str, str],
+    log: LogFn | None,
+    check_cancelled: CheckCancelledFn | None = None,
+) -> dict[str, Any]:
     from camoufox.sync_api import Camoufox
     from browserforge.fingerprints import Screen
 
@@ -110,25 +137,7 @@ def browser_paypal_checkout(
             _wait_for_signup_page(page, log, check_cancelled)
             checkpoint(check_cancelled)
 
-            for fill_attempt in range(3):
-                fill_ok = _fill_signup_form(page, phone, password, address, log)
-                if fill_ok:
-                    break
-                emit(log, f"paypal_http: browser form fill incomplete (attempt {fill_attempt + 1}/3), refreshing page")
-                try:
-                    cur_url = page.url
-                    page.goto(cur_url, wait_until="domcontentloaded", timeout=30000)
-                except Exception:
-                    try:
-                        page.reload(timeout=30000)
-                    except Exception:
-                        pass
-                time.sleep(5)
-                checkpoint(check_cancelled)
-                if "/checkoutweb/signup" not in page.url:
-                    _wait_for_signup_page(page, log, check_cancelled)
-            else:
-                raise PayPalHttpError("browser: signup 表单填写 3 次均失败")
+            _fill_signup_form(page, phone, password, address, log)
 
             checkpoint(check_cancelled)
             _submit_and_handle_otp(page, paypal_cfg, smsurl, log, check_cancelled)
@@ -184,7 +193,9 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
         checkpoint(check_cancelled)
         try:
             cur = page.url
-        except Exception:
+        except Exception as exc:
+            if "has been closed" in str(exc) or "crashed" in str(exc) or "Target closed" in str(exc):
+                raise PayPalHttpError(f"browser tab crashed: {str(exc)[:120]}")
             time.sleep(2)
             continue
         if "/checkoutweb/signup" in cur:
@@ -215,7 +226,10 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
                 if acted:
                     continue
             except Exception as exc:
-                emit(log, f"paypal_http: /pay tick exception: {str(exc)[:80]}")
+                msg = str(exc)
+                if "has been closed" in msg or "crashed" in msg or "Target closed" in msg:
+                    raise PayPalHttpError(f"browser tab crashed: {msg[:120]}")
+                emit(log, f"paypal_http: /pay tick exception: {msg[:80]}")
                 time.sleep(2)
                 continue
         time.sleep(2)
@@ -1025,7 +1039,9 @@ def _wait_for_stripe_return(page: Any, log: LogFn | None, check_cancelled: Check
         checkpoint(check_cancelled)
         try:
             cur = page.url
-        except Exception:
+        except Exception as exc:
+            if "has been closed" in str(exc) or "crashed" in str(exc) or "Target closed" in str(exc):
+                raise PayPalHttpError(f"browser tab crashed: {str(exc)[:120]}")
             time.sleep(2)
             continue
         if "pay.openai.com" in cur or "chatgpt.com" in cur or "checkout.stripe.com" in cur:
