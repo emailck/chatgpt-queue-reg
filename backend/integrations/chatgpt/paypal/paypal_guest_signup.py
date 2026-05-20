@@ -151,13 +151,7 @@ def paypal_guest_signup_authorize(
     if "/webapps/hermes" not in hermes_url:
         hermes_url = _hermes_url(signup_url, ba_token, ec_token)
 
-    try:
-        return authorize_from_hermes_fn(http, hermes_url, ba_token, log)
-    except PayPalHttpError as exc:
-        if "ANONYMOUS" not in str(exc):
-            raise
-        emit(log, "paypal_http: HTTP authorize failed (ANONYMOUS) — falling back to browser", level="warning")
-
+    emit(log, "paypal_http: skipping HTTP authorize (non-browser sessions always ANONYMOUS), using browser")
     proxy_url = str(paypal_cfg.get("_proxy_url") or "")
     from .paypal_browser_authorize import browser_authorize_from_hermes
 
