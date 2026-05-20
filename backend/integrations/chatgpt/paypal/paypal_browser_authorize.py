@@ -470,7 +470,9 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> bool:
                                  or "pay.openai.com" in url
                                  or "chatgpt.com" in url
                                  or "/agreements/approve" in url
-                                 or "/auth/validatecaptcha" in url),
+                                 or "/auth/validatecaptcha" in url
+                                 or "Continue_To_Payment" in url
+                                 or "Pay_With_Card" in url),
                     timeout=15000,
                 )
                 try:
