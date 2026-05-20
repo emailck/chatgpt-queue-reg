@@ -64,6 +64,28 @@ def _import_models() -> None:
 def init_db() -> None:
     _import_models()
     SQLModel.metadata.create_all(engine)
+    _migrate_paypal_number_statuses()
+
+
+def _migrate_paypal_number_statuses() -> None:
+    from sqlmodel import select
+
+    from backend.models.paypal_number import (
+        PAYPAL_NUMBER_LEGACY_TO_COOLING,
+        PAYPAL_NUMBER_STATUS_COOLING,
+        PayPalNumber,
+    )
+
+    with Session(engine) as s:
+        rows = list(s.exec(
+            select(PayPalNumber).where(PayPalNumber.status.in_(PAYPAL_NUMBER_LEGACY_TO_COOLING))
+        ).all())
+        if not rows:
+            return
+        for row in rows:
+            row.status = PAYPAL_NUMBER_STATUS_COOLING
+            s.add(row)
+        s.commit()
 
 
 @contextmanager

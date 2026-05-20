@@ -52,9 +52,11 @@ export interface PayPalNumberPoolStats {
   total?: number
   available?: number
   in_use?: number
-  used?: number
-  failed?: number
+  cooling?: number
   banned?: number
+  cooldown_seconds?: number
+  cooling_active?: number
+  cooling_ready?: number
 }
 
 export interface ProxyPoolStats {

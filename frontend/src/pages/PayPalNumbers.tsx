@@ -10,18 +10,23 @@ import { apiFetch, formatDateTime } from '@/lib/api'
 const { Text, Paragraph } = Typography
 
 const STATUS_OPTIONS = [
-  { value: 'available', label: 'available' },
-  { value: 'in_use', label: 'in_use' },
-  { value: 'used', label: 'used' },
-  { value: 'failed', label: 'failed' },
-  { value: 'banned', label: 'banned' },
+  { value: 'available', label: '可用' },
+  { value: 'in_use', label: '使用中' },
+  { value: 'cooling', label: '冷却中' },
+  { value: 'banned', label: '禁用' },
 ]
+
+const STATUS_LABEL: Record<string, string> = {
+  available: '可用',
+  in_use: '使用中',
+  cooling: '冷却中',
+  banned: '禁用',
+}
 
 const STATUS_COLOR: Record<string, string> = {
   available: 'green',
   in_use: 'processing',
-  used: 'default',
-  failed: 'red',
+  cooling: 'orange',
   banned: 'volcano',
 }
 
@@ -69,22 +74,11 @@ function normalizeRows(data: unknown): PayPalNumber[] {
   return []
 }
 
-const DEFAULT_COOLDOWN_SECONDS = 300
-
-function formatRemaining(seconds: number): string {
-  const total = Math.max(0, Math.floor(seconds))
-  if (total < 60) return `${total}s`
-  const m = Math.floor(total / 60)
-  const s = total % 60
-  return s ? `${m}m${s}s` : `${m}m`
-}
-
 export default function PayPalNumbers() {
   const [rows, setRows] = useState<PayPalNumber[]>([])
   const [loading, setLoading] = useState(false)
   const [statusFilter, setStatusFilter] = useState<string | undefined>()
-  const [cooldownSeconds, setCooldownSeconds] = useState<number>(DEFAULT_COOLDOWN_SECONDS)
-  const [nowTick, setNowTick] = useState<number>(() => Date.now())
+  const [cooldownSeconds, setCooldownSeconds] = useState<number>(300)
   const [createOpen, setCreateOpen] = useState(false)
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkLoading, setBulkLoading] = useState(false)
@@ -118,40 +112,13 @@ export default function PayPalNumbers() {
     return () => clearTimeout(initial)
   }, [reload])
 
-  useEffect(() => {
-    const id = setInterval(() => setNowTick(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [])
-
-  const cooldownInfo = useCallback((row: PayPalNumber): { state: 'cooling' | 'ready' | 'none'; remaining: number } => {
-    if (row.status !== 'failed') return { state: 'none', remaining: 0 }
-    if (!row.last_used_at || cooldownSeconds <= 0) return { state: 'ready', remaining: 0 }
-    const ts = Date.parse(row.last_used_at)
-    if (!Number.isFinite(ts)) return { state: 'ready', remaining: 0 }
-    const elapsed = (nowTick - ts) / 1000
-    const remaining = cooldownSeconds - elapsed
-    return remaining > 0 ? { state: 'cooling', remaining } : { state: 'ready', remaining: 0 }
-  }, [cooldownSeconds, nowTick])
-
-  const summary = useMemo(() => {
-    let cooling = 0
-    let failedReady = 0
-    for (const row of rows) {
-      const info = cooldownInfo(row)
-      if (info.state === 'cooling') cooling += 1
-      else if (info.state === 'ready') failedReady += 1
-    }
-    return {
-      total: rows.length,
-      available: rows.filter((row) => row.status === 'available').length,
-      inUse: rows.filter((row) => row.status === 'in_use').length,
-      used: rows.filter((row) => row.status === 'used').length,
-      failed: rows.filter((row) => row.status === 'failed').length,
-      banned: rows.filter((row) => row.status === 'banned').length,
-      cooling,
-      failedReady,
-    }
-  }, [cooldownInfo, rows])
+  const summary = useMemo(() => ({
+    total: rows.length,
+    available: rows.filter((row) => row.status === 'available').length,
+    inUse: rows.filter((row) => row.status === 'in_use').length,
+    cooling: rows.filter((row) => row.status === 'cooling').length,
+    banned: rows.filter((row) => row.status === 'banned').length,
+  }), [rows])
 
   const submitCreate = async () => {
     const values = await form.validateFields()
@@ -230,6 +197,20 @@ export default function PayPalNumbers() {
     }
   }
 
+  const toggleBan = async (row: PayPalNumber) => {
+    const nextStatus = row.status === 'banned' ? 'available' : 'banned'
+    try {
+      await apiFetch(`/paypal-numbers/${row.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: nextStatus }),
+      })
+      message.success(nextStatus === 'banned' ? '已禁用' : '已启用')
+      reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '操作失败')
+    }
+  }
+
   const batchDelete = async () => {
     if (!selected.length) return
     try {
@@ -254,17 +235,8 @@ export default function PayPalNumbers() {
     {
       title: '状态',
       dataIndex: 'status',
-      width: 160,
-      render: (value: string, row) => {
-        const info = cooldownInfo(row)
-        return (
-          <Space direction="vertical" size={2}>
-            <Tag color={STATUS_COLOR[value] || 'default'}>{value || '-'}</Tag>
-            {info.state === 'cooling' && <Text type="warning" style={{ fontSize: 12 }}>冷却 {formatRemaining(info.remaining)}</Text>}
-            {info.state === 'ready' && <Text type="secondary" style={{ fontSize: 12 }}>已可复用</Text>}
-          </Space>
-        )
-      },
+      width: 120,
+      render: (value: string) => <Tag color={STATUS_COLOR[value] || 'default'}>{STATUS_LABEL[value] || value || '-'}</Tag>,
     },
     {
       title: 'SMS URL',
@@ -311,10 +283,17 @@ export default function PayPalNumbers() {
       title: '操作',
       key: 'actions',
       fixed: 'right',
-      width: 150,
+      width: 230,
       render: (_, row) => (
-        <Space size={6}>
+        <Space size={6} wrap>
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>编辑</Button>
+          {row.status === 'banned' ? (
+            <Button size="small" onClick={() => toggleBan(row)}>启用</Button>
+          ) : (
+            <Popconfirm title="禁用该号码后不会再被领取" onConfirm={() => toggleBan(row)}>
+              <Button size="small">禁用</Button>
+            </Popconfirm>
+          )}
           <Popconfirm title="删除该 PayPal 号码?" onConfirm={() => deleteOne(row)}>
             <Button size="small" danger>删除</Button>
           </Popconfirm>
@@ -326,17 +305,16 @@ export default function PayPalNumbers() {
   return (
     <PageScaffold
       title="PayPal 号码池"
-      description="PayPal 手机号和短信 URL 是 payment WorkPool 的一次性资源；支付阶段会从 paypal_number_pool 领取可用号码。"
+      description="PayPal 手机号是可复用资源：领取后写入冷却，冷却到期后自动恢复为可用；禁用后不再被领取。"
       actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
     >
       <SummaryGrid>
-        <StatCard label="total" value={summary.total} tone="primary" />
-        <StatCard label="available" value={summary.available} tone="success" />
-        <StatCard label="in_use" value={summary.inUse} tone="info" />
-        <StatCard label="used" value={summary.used} />
-        <StatCard label="failed" value={summary.failed} hint={summary.cooling ? `${summary.cooling} 冷却中 / ${summary.failedReady} 可复用` : undefined} tone={summary.failed ? 'warning' : 'default'} />
-        <StatCard label="banned" value={summary.banned} tone={summary.banned ? 'danger' : 'default'} />
-        <StatCard label="cooldown" value={`${cooldownSeconds}s`} hint="失败后冷却时长" />
+        <StatCard label="总数" value={summary.total} tone="primary" />
+        <StatCard label="可用" value={summary.available} tone="success" />
+        <StatCard label="使用中" value={summary.inUse} tone="info" />
+        <StatCard label="冷却中" value={summary.cooling} tone={summary.cooling ? 'warning' : 'default'} />
+        <StatCard label="禁用" value={summary.banned} tone={summary.banned ? 'danger' : 'default'} />
+        <StatCard label="冷却时长" value={`${cooldownSeconds}s`} hint="使用后冷却到可复用" />
       </SummaryGrid>
 
       <ActionCard

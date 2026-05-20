@@ -37,26 +37,36 @@ def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value
 
 
+def sweep_expired_cooling() -> int:
+    cooldown = get_cooldown_seconds()
+    threshold = utcnow() - timedelta(seconds=cooldown)
+    count = 0
+    with session_scope() as s:
+        rows = list(s.exec(
+            select(PayPalNumber)
+            .where(PayPalNumber.status == PAYPAL_NUMBER_STATUS_COOLING)
+        ).all())
+        now = utcnow()
+        for row in rows:
+            last = _as_utc(row.last_used_at)
+            if last is None or last <= threshold:
+                row.status = PAYPAL_NUMBER_STATUS_AVAILABLE
+                row.updated_at = now
+                s.add(row)
+                count += 1
+    return count
+
+
 class PayPalNumberPool:
     name = "paypal_number_pool"
     _lock = threading.Lock()
 
     def acquire(self, *, stage, job_id, project=None, hint=None) -> Optional[Resource]:
-        cooldown = get_cooldown_seconds()
-        cooldown_threshold = utcnow() - timedelta(seconds=cooldown)
+        sweep_expired_cooling()
         with self._lock, session_scope() as s:
             row = s.exec(
                 select(PayPalNumber)
-                .where(
-                    or_(
-                        PayPalNumber.status == PAYPAL_NUMBER_STATUS_AVAILABLE,
-                        (PayPalNumber.status == PAYPAL_NUMBER_STATUS_COOLING)
-                        & (
-                            (PayPalNumber.last_used_at == None)  # noqa: E711
-                            | (PayPalNumber.last_used_at <= cooldown_threshold)
-                        ),
-                    )
-                )
+                .where(PayPalNumber.status == PAYPAL_NUMBER_STATUS_AVAILABLE)
                 .order_by(PayPalNumber.id)
                 .limit(1)
             ).first()
@@ -148,8 +158,8 @@ class PayPalNumberPool:
         raise RuntimeError(f"OTP 获取超时 ({timeout}s) number_id={number_id} expected_length={expected_length}")
 
     def stats(self) -> dict[str, Any]:
+        sweep_expired_cooling()
         cooldown = get_cooldown_seconds()
-        threshold = utcnow() - timedelta(seconds=cooldown)
         with Session(engine) as s:
             rows = list(s.exec(select(PayPalNumber)).all())
         out: dict[str, Any] = {
@@ -163,15 +173,6 @@ class PayPalNumberPool:
             PAYPAL_NUMBER_STATUS_BANNED,
         ):
             out[status] = sum(1 for row in rows if row.status == status)
-        cooling_active = 0
-        for row in rows:
-            if row.status != PAYPAL_NUMBER_STATUS_COOLING:
-                continue
-            last = _as_utc(row.last_used_at)
-            if last is not None and last > threshold:
-                cooling_active += 1
-        out["cooling_active"] = cooling_active
-        out["cooling_ready"] = max(0, out[PAYPAL_NUMBER_STATUS_COOLING] - cooling_active)
         return out
 
 

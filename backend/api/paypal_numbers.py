@@ -8,6 +8,7 @@ from sqlalchemy import select as sa_select
 from sqlmodel import Session
 
 from backend.core.db import engine, session_scope
+from backend.core.pools.paypal_number_pool import sweep_expired_cooling
 from backend.core.time_utils import utcnow
 from backend.models.paypal_number import PAYPAL_NUMBER_STATUS_AVAILABLE, PayPalNumber
 
@@ -38,6 +39,7 @@ class IdsRequest(BaseModel):
 
 @router.get("/api/paypal-numbers", tags=["paypal_numbers"])
 def list_paypal_numbers(status: Optional[str] = None, limit: int = Query(500, ge=1, le=2000)):
+    sweep_expired_cooling()
     with Session(engine) as s:
         stmt = sa_select(PayPalNumber)
         if status:

@@ -10,9 +10,19 @@ from backend.core.time_utils import utcnow
 
 PAYPAL_NUMBER_STATUS_AVAILABLE = "available"
 PAYPAL_NUMBER_STATUS_IN_USE = "in_use"
-PAYPAL_NUMBER_STATUS_USED = "used"
-PAYPAL_NUMBER_STATUS_FAILED = "failed"
+PAYPAL_NUMBER_STATUS_COOLING = "cooling"
 PAYPAL_NUMBER_STATUS_BANNED = "banned"
+
+PAYPAL_NUMBER_STATUSES = (
+    PAYPAL_NUMBER_STATUS_AVAILABLE,
+    PAYPAL_NUMBER_STATUS_IN_USE,
+    PAYPAL_NUMBER_STATUS_COOLING,
+    PAYPAL_NUMBER_STATUS_BANNED,
+)
+
+# Legacy values migrated to `cooling` on startup; kept here purely for the
+# migration sweep in backend.core.db.init_db.
+PAYPAL_NUMBER_LEGACY_TO_COOLING = ("used", "failed")
 
 
 class PayPalNumber(SQLModel, table=True):
