@@ -255,9 +255,9 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> bool:
                 const text = (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim();
                 const intent = b.getAttribute('data-atomic-wait-intent') || '';
                 if (/cancel|back|log in|login/i.test(text)) return false;
-                return /submit_email/i.test(intent) ||
-                    (b.type === 'submit' && /keep paying|continue to payment|continue/i.test(text));
-            }) || document.querySelector('button.actionContinue[type="submit"]');
+                return /submit_email|continue_to_payment/i.test(intent) ||
+                    /keep paying|continue to payment|continue/i.test(text);
+            }) || document.querySelector('button[data-testid="continueButton"]');
         }
         if (emailEl && emailEl.value && emailEl.value.includes('@') && canClick(findKeepPaying())) return 'click_continue';
 
@@ -310,14 +310,19 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> bool:
                 return True
     elif state == "click_continue":
         btn = None
-        for sel in ['button[data-atomic-wait-intent*="submit_email" i]', 'button.actionContinue[type="submit"]']:
+        for sel in [
+            'button[data-testid="continueButton"]',
+            'button[data-atomic-wait-intent*="Continue_To_Payment" i]',
+            'button[data-atomic-wait-intent*="submit_email" i]',
+            'button.actionContinue',
+        ]:
             el = page.query_selector(sel)
             if el and el.is_visible():
                 btn = el
                 break
         if not btn:
-            for text in ["Keep paying", "Continue to payment", "Continue", "Next"]:
-                el = page.query_selector(f'button[type="submit"]:has-text("{text}")')
+            for text in ["Continue to Payment", "Keep paying", "Continue", "Next"]:
+                el = page.query_selector(f'button:has-text("{text}")')
                 if el and el.is_visible():
                     btn = el
                     break
