@@ -19,6 +19,7 @@ from .runtime import (
     json_response,
     short_body,
     stripe_headers,
+    stripe_headers_js,
 )
 
 
@@ -53,7 +54,7 @@ def fetch_allowed_origins(session: Any, pk: str, session_id: str) -> dict[str, A
     resp = session.get(
         f"{STRIPE_API}/v1/payment_pages/allowed_origins",
         params={"key": pk, "session_id": session_id},
-        headers=stripe_headers(),
+        headers=stripe_headers_js(),
         timeout=30,
     )
     return json_response(resp, "stripe allowed_origins")
@@ -92,7 +93,7 @@ def fetch_elements_session(
         "type": "deferred_intent",
         "checkout_session_id": session_id,
     }
-    resp = session.get(url, params=params, headers=stripe_headers(), timeout=30)
+    resp = session.get(url, params=params, headers=stripe_headers_js(), timeout=30)
     return json_response(resp, "stripe elements session")
 
 

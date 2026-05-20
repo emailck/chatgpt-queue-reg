@@ -78,6 +78,28 @@ def stripe_headers(referer: str = PAY_OPENAI_REFERER) -> dict[str, str]:
     }
 
 
+def stripe_headers_js() -> dict[str, str]:
+    """Headers for endpoints that Stripe only accepts from its own js.stripe.com iframe.
+
+    Used by /v1/payment_pages/allowed_origins and /v1/elements/sessions — these
+    return 403 if Origin is pay.openai.com.
+    """
+    return {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://js.stripe.com",
+        "Referer": "https://js.stripe.com/",
+        "sec-ch-ua": '"Chromium";v="146", "Google Chrome";v="146", "Not=A?Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+
+
 def extract_session_id(checkout_session_id: str, checkout_url: str) -> str:
     """Pull a clean `cs_(live|test)_<alnum>` out of either field.
 
