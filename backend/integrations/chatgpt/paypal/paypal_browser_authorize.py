@@ -426,30 +426,29 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> bool:
                     btn = el
                     break
         if btn:
-            before_url = page.url
             _human_click(page, btn)
             emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
-            last_logged_url = before_url
-            for i in range(20):
-                time.sleep(0.5)
-                try:
-                    cur_url = page.url
-                    if cur_url != last_logged_url:
-                        emit(log, f"paypal_http: /pay Continue: URL changed to {cur_url[:120]}")
-                        last_logged_url = cur_url
-                    if cur_url != before_url:
-                        if "/checkoutweb/signup" in cur_url or "/webapps/hermes" in cur_url or "pay.openai.com" in cur_url:
-                            return True
-                        if "/pay" not in cur_url:
-                            return True
-                except Exception as exc:
-                    emit(log, f"paypal_http: /pay Continue: page.url exception (likely navigating): {str(exc)[:60]}")
-                    return True
             try:
-                final_url = page.url
+                page.wait_for_url(
+                    lambda url: ("/checkoutweb/signup" in url
+                                 or "/webapps/hermes" in url
+                                 or "pay.openai.com" in url
+                                 or "chatgpt.com" in url
+                                 or "/agreements/approve" in url
+                                 or "/auth/validatecaptcha" in url),
+                    timeout=15000,
+                )
+                try:
+                    emit(log, f"paypal_http: /pay Continue: navigated to {page.url[:120]}")
+                except Exception:
+                    pass
+                return True
             except Exception:
-                final_url = "?"
-            raise _PayContinueStuck(f"Continue clicked but no navigation in 10s, url={final_url[:120]}")
+                try:
+                    final_url = page.url
+                except Exception:
+                    final_url = "?"
+                raise _PayContinueStuck(f"Continue clicked but no navigation in 15s, url={final_url[:120]}")
     return False
 
 
