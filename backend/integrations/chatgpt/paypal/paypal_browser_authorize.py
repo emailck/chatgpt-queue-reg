@@ -411,10 +411,18 @@ def _submit_and_handle_otp(
     expected_length = input_count if input_count > 1 else 6
     emit(log, f"paypal_http: browser OTP detected inputs={input_count} expectedLength={expected_length}")
 
-    otp = _fetch_otp_with_length_check(
-        paypal_cfg, smsurl, expected_length,
-        timeout=int(paypal_cfg.get("otp_timeout") or 90), log=log,
-    )
+    number_id = int(paypal_cfg.get("_number_id") or 0)
+    if number_id:
+        from backend.core.pools.paypal_number_pool import paypal_number_pool
+        otp = paypal_number_pool.fetch_otp(
+            number_id, expected_length=expected_length,
+            timeout=int(paypal_cfg.get("otp_timeout") or 90),
+        )
+    else:
+        otp = _fetch_otp_with_length_check(
+            paypal_cfg, smsurl, expected_length,
+            timeout=int(paypal_cfg.get("otp_timeout") or 90), log=log,
+        )
 
     emit(log, "paypal_http: browser filling OTP")
     _fill_otp_cells(page, otp, log)
