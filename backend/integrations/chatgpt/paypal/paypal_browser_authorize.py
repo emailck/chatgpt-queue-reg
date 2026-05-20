@@ -116,7 +116,12 @@ def _build_camoufox_proxy(proxy_url: str) -> dict[str, str] | None:
 
 
 def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
-    pay_page_handled = False
+    """Wait for SPA auto-navigation from /pay → /checkoutweb/signup.
+
+    HAR shows /pay auto-redirects to signup in ~140ms with zero clicks.
+    Only attempt manual click-through as a last resort after 30s timeout.
+    """
+    pay_logged = False
     for i in range(90):
         cur = page.url
         if "/checkoutweb/signup" in cur:
@@ -124,14 +129,15 @@ def _wait_for_signup_page(page: Any, log: LogFn | None) -> None:
             time.sleep(2)
             return
         if "/webapps/hermes" in cur:
-            emit(log, "paypal_http: browser landed on hermes directly (already authed?)")
+            emit(log, "paypal_http: browser landed on hermes directly")
             return
-        if "/pay" in cur and "paypal.com" in cur and not pay_page_handled:
-            emit(log, "paypal_http: browser on /pay page, clicking through to signup")
-            time.sleep(3)
-            _click_through_pay_page(page, log)
-            pay_page_handled = True
-            emit(log, "paypal_http: browser waiting for /pay SPA to navigate...")
+        if "/pay" in cur and "paypal.com" in cur:
+            if not pay_logged:
+                emit(log, "paypal_http: browser on /pay page, waiting for SPA auto-redirect...")
+                pay_logged = True
+            if i == 30:
+                emit(log, "paypal_http: browser /pay auto-redirect not firing after 30s, trying manual click-through")
+                _click_through_pay_page(page, log)
         time.sleep(1)
     raise PayPalHttpError(f"browser: 等待 signup 页超时, url={page.url[:120]}")
 
