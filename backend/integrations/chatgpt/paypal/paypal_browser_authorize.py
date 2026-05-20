@@ -227,6 +227,25 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> None:
             const r = btn.getBoundingClientRect();
             return r.width > 0 && r.height > 0;
         }
+
+        // Priority 1: Create an Account (ALWAYS first — must click before filling email)
+        const onboardForm = document.querySelector('form[data-testid="xo-onboarding-form"] button[type="submit"]');
+        if (canClick(onboardForm)) return 'create_account';
+        const createBtn = Array.from(document.querySelectorAll('button'))
+            .find(b => /create an account|create account/i.test((b.innerText||'').trim()));
+        if (canClick(createBtn)) return 'create_account';
+
+        // Priority 2: #startOnboardingFlow
+        const start = document.querySelector('#startOnboardingFlow');
+        if (canClick(start)) return 'start_onboarding';
+
+        // Priority 3: Email filled + Continue visible → click Continue
+        const emailSels = ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]'];
+        let emailEl = null;
+        for (const sel of emailSels) {
+            const el = document.querySelector(sel);
+            if (el && !el.disabled && el.getBoundingClientRect().width > 0) { emailEl = el; break; }
+        }
         function findKeepPaying() {
             const buttons = Array.from(document.querySelectorAll('button'));
             return buttons.find(b => {
@@ -237,34 +256,14 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> None:
                     (b.type === 'submit' && /keep paying|continue to payment|continue/i.test(text));
             }) || document.querySelector('button.actionContinue[type="submit"]');
         }
+        if (emailEl && emailEl.value && emailEl.value.includes('@') && canClick(findKeepPaying())) return 'click_continue';
 
-        // Priority 1: Continue/Keep Paying button (email already filled from previous tick)
-        const keepPaying = findKeepPaying();
-        const emailSels = ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]'];
-        let emailEl = null;
-        for (const sel of emailSels) {
-            const el = document.querySelector(sel);
-            if (el && !el.disabled && el.getBoundingClientRect().width > 0) { emailEl = el; break; }
-        }
-        if (emailEl && emailEl.value && emailEl.value.includes('@') && canClick(keepPaying)) return 'click_continue';
-
-        // Priority 2: Email input visible but empty
+        // Priority 4: Email input visible but empty → fill it
         if (emailEl) return 'fill_email';
 
-        // Priority 3: "Open a PayPal account" / "Already have an account" text visible
+        // Priority 5: "Open a PayPal account" text → fill email
         const bodyText = (document.body && document.body.innerText || '');
         if (bodyText.includes('Open a PayPal account') || bodyText.includes('Already have an account')) return 'fill_email';
-
-        // Priority 4: Create an Account
-        const onboardForm = document.querySelector('form[data-testid="xo-onboarding-form"] button[type="submit"]');
-        if (canClick(onboardForm)) return 'create_account';
-        const createBtn = Array.from(document.querySelectorAll('button'))
-            .find(b => /create an account|create account/i.test((b.innerText||'').trim()));
-        if (canClick(createBtn)) return 'create_account';
-
-        // Priority 5: #startOnboardingFlow
-        const start = document.querySelector('#startOnboardingFlow');
-        if (canClick(start)) return 'start_onboarding';
 
         return 'waiting';
     }""")
