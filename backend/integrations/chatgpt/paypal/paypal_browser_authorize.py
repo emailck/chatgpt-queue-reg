@@ -415,14 +415,14 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> bool:
             before_url = page.url
             _human_click(page, btn)
             emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
-            for _ in range(10):
+            for _ in range(20):
                 time.sleep(0.5)
                 try:
                     if page.url != before_url:
                         return True
                 except Exception:
                     return True
-            raise _PayContinueStuck("Continue clicked but no navigation in 5s")
+            raise _PayContinueStuck("Continue clicked but no navigation in 10s")
     return False
 
 
