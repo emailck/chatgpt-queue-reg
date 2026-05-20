@@ -356,7 +356,7 @@ _SIGNUP_QUERY = (
     "$password: String, $phone: PhoneInput!, $placeOfBirth: CountryCodes, "
     "$secondaryIdentityDocument: IdentityDocumentInput, $selectedInstallmentOption: InstallmentsInput, "
     "$shareAddressWithDonatee: Boolean, $shippingAddress: AddressInput, "
-    "$supportedThreeDsExperiences: [ThreeDSPaymentExperience], $token: String!, "
+    "$token: String!, "
     "$residentialAddress: AddressInput, $isSignupIncentiveOptIn: Boolean, "
     "$isSignupIncentiveOptInStretch: Boolean, $legalAgreements: LegalAgreementsInput, "
     "$collectedConsents: [CollectedConsent]) { "
@@ -371,19 +371,13 @@ _SIGNUP_QUERY = (
     "shareAddressWithDonatee: $shareAddressWithDonatee shippingAddress: $shippingAddress token: $token "
     "residentialAddress: $residentialAddress isSignupIncentiveOptIn: $isSignupIncentiveOptIn "
     "isSignupIncentiveOptInStretch: $isSignupIncentiveOptInStretch legalAgreements: $legalAgreements "
-    "collectedConsents: $collectedConsents supportedThreeDsExperiences: $supportedThreeDsExperiences) "
-    "{ ...buyer flags { is3DSecureRequired __typename } ...fundingOptions "
-    "paymentContingencies { ...threeDomainSecure ...threeDSContingencyData __typename } __typename } } "
+    "collectedConsents: $collectedConsents) "
+    "{ ...buyer flags { is3DSecureRequired __typename } ...fundingOptions __typename } } "
     "fragment buyer on CheckoutSession { buyer { auth { accessToken __typename } userId __typename } __typename } "
     "fragment fundingOptions on CheckoutSession { fundingOptions { allPlans { fundingSources { fundingInstrument "
     "{ id __typename } amount { currencyCode currencyValue __typename } __typename } fundingContingencies "
     "{ ... on OpenBankingContingency { encryptedId contingencyReasons contingencyType __typename } __typename } "
-    "__typename } fundingInstrument { id lastDigits name nameDescription type __typename } __typename } __typename } "
-    "fragment threeDomainSecure on PaymentContingencies { threeDomainSecure(experiences: $supportedThreeDsExperiences) "
-    "{ status redirectUrl { href __typename } method parameter experience requestParams { key value __typename } "
-    "__typename } __typename } "
-    "fragment threeDSContingencyData on PaymentContingencies { threeDSContingencyData { name causeName __typename } "
-    "__typename }"
+    "__typename } fundingInstrument { id lastDigits name nameDescription type __typename } __typename } __typename }"
 )
 
 
@@ -409,7 +403,6 @@ def _signup_payload(
             "firstName": first_name,
             "lastName": last_name,
             "phone": {"countryCode": phone_country_code_value, "number": phone_number, "type": "MOBILE"},
-            "supportedThreeDsExperiences": ["IFRAME"],
             "token": ec_token,
             "billingAddress": address,
             "shippingAddress": {
