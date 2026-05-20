@@ -176,7 +176,6 @@ def run(ctx: JobContext) -> None:
             auto_outcome_on_failure=AcquireOutcome.FAILED.value,
         )
         paypal_cfg["phone"] = str((paypal_number.payload or {}).get("phone") or "")
-        paypal_cfg["smsurl"] = str((paypal_number.payload or {}).get("smsurl") or "")
         paypal_cfg["_number_id"] = int((paypal_number.payload or {}).get("id") or 0)
 
     if fresh_plan_cfg:
