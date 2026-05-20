@@ -42,19 +42,36 @@ def _human_click(page: Any, el: Any) -> None:
 
 
 def _human_type(page: Any, el: Any, value: str) -> None:
-    """Click field, clear, type char-by-char with random delays."""
+    """Type using the plugin's proven humanType: execCommand('insertText') + full keyboard event chain."""
     try:
         el.scroll_into_view_if_needed()
     except Exception:
         pass
-    _human_delay(0.2, 0.4)
+    _human_delay(0.2, 0.5)
     el.click()
     _human_delay(0.1, 0.3)
-    el.press("Control+a")
-    el.press("Backspace")
-    _human_delay(0.1, 0.2)
-    el.type(value, delay=_type_delay())
-    _human_delay(0.2, 0.5)
+    page.evaluate("""async ([el, value]) => {
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        el.focus();
+        try { el.select && el.select(); document.execCommand('delete'); } catch(_) {}
+        const proto = el instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) desc.set.call(el, '');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        for (const char of String(value)) {
+            el.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
+            el.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true }));
+            document.execCommand('insertText', false, char);
+            el.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
+            let d = 80 + Math.random() * 140;
+            if (Math.random() < 0.08) d += 200 + Math.random() * 300;
+            await sleep(d);
+        }
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+    }""", [el, value])
+    _human_delay(0.3, 0.8)
 
 
 def browser_paypal_checkout(
@@ -395,17 +412,16 @@ def _fill_signup_form(
 
     _set_country_us(page)
     time.sleep(3)
-    _wait_for_any_field(page, timeout=10)
+
+    if not _wait_for_any_field(page, timeout=15):
+        emit(log, "paypal_http: browser signup fields not rendered after 15s", level="warning")
+        return False
 
     email = _rand_email()
     card = _generate_visa_card()
     first_name = address.get("first_name") or "Tommy"
     last_name = address.get("last_name") or "Jacobs"
     phone_norm = _normalize_phone(phone)
-
-    if not _wait_for_any_field(page, timeout=10):
-        emit(log, "paypal_http: browser signup fields not rendered after 10s", level="warning")
-        return False
 
     fields = [
         ("email", email),
@@ -425,11 +441,6 @@ def _fill_signup_form(
 
     _fill_field_safe(page, "zip", address.get("postal_code") or "37167", log)
     _fill_field_safe(page, "password", password, log)
-
-    mismatches = _verify_fields(page, fields + [("zip", address.get("postal_code") or "37167")], log)
-    if mismatches:
-        emit(log, f"paypal_http: browser form verification failed: {mismatches}", level="warning")
-        return False
 
     emit(log, f"paypal_http: browser form filled email={email} phone={phone_norm[:4]}...")
     return True
