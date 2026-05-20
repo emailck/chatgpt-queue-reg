@@ -275,7 +275,13 @@ def _wait_for_signup_page(
                 continue
             except Exception as exc:
                 msg = str(exc)
-                if "has been closed" in msg or "crashed" in msg or "Target closed" in msg:
+                if "crashed" in msg or "browser has been closed" in msg:
+                    raise PayPalHttpError(f"browser tab crashed: {msg[:120]}")
+                if "Target closed" in msg or "has been closed" in msg or "Element is not attached" in msg:
+                    if _browser_still_alive(page):
+                        emit(log, f"paypal_http: /pay tick element stale (page navigating): {msg[:80]}")
+                        time.sleep(1)
+                        continue
                     raise PayPalHttpError(f"browser tab crashed: {msg[:120]}")
                 if "Timeout" in msg and "click" in msg.lower():
                     emit(log, "paypal_http: /pay tick: click timed out, refreshing page")
@@ -287,6 +293,19 @@ def _wait_for_signup_page(
                 continue
         time.sleep(2)
     raise PayPalHttpError(f"browser: 等待 signup 页超时 (120s), url={page.url[:120]}")
+
+
+def _browser_still_alive(page: Any) -> bool:
+    """Distinguish a genuinely closed browser from a navigating page with stale refs."""
+    for attempt in range(5):
+        try:
+            url = page.url
+            if url:
+                return True
+        except Exception:
+            time.sleep(0.5)
+            continue
+    return False
 
 
 def _check_paypal_error_page(page: Any, log: LogFn | None) -> bool:
