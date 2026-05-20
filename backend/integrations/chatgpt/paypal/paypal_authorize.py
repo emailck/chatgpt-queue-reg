@@ -42,10 +42,10 @@ def authorize_paypal_http(
     password = str(paypal_cfg.get("password") or "").strip()
 
     phone = str(paypal_cfg.get("phone") or paypal_cfg.get("phone_number") or "").strip()
-    smsurl = str(paypal_cfg.get("smsurl") or paypal_cfg.get("sms_url") or "").strip()
+    number_id = int(paypal_cfg.get("_number_id") or 0)
 
-    if not cookies and not (email and password) and not (phone and smsurl):
-        raise PayPalHttpError("PayPal HTTP 授权需要 paypal.phone/smsurl 或 paypal.cookies 或 paypal.email/password")
+    if not cookies and not (email and password) and not (phone and number_id):
+        raise PayPalHttpError("PayPal HTTP 授权需要 paypal.phone/_number_id 或 paypal.cookies 或 paypal.email/password")
 
     http = new_http_session(proxy_url)
     http.headers.update({
@@ -77,7 +77,7 @@ def authorize_paypal_http(
     ctx_id = first_match([r'"ctxId"\s*:\s*"([^"]+)"'], html)
     flow_id = first_match([r'"flowId"\s*:\s*"([^"]+)"'], html) or ctx_id
 
-    if phone and smsurl and not cookies and "/webapps/hermes" not in str(resp.url):
+    if phone and number_id and not cookies and "/webapps/hermes" not in str(resp.url):
         from .paypal_browser_authorize import browser_paypal_checkout
         address = {
             "first_name": str(paypal_cfg.get("first_name") or ""),
