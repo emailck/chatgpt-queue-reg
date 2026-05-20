@@ -253,6 +253,15 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
                 acted = _pay_page_tick(page, log)
                 if acted:
                     continue
+            except _PayContinueStuck:
+                emit(log, "paypal_http: /pay Continue stuck — refreshing and restarting flow")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                    time.sleep(3)
+                    loaded = False
+                except Exception as reload_exc:
+                    emit(log, f"paypal_http: /pay reload failed: {str(reload_exc)[:80]}")
+                continue
             except Exception as exc:
                 msg = str(exc)
                 if "has been closed" in msg or "crashed" in msg or "Target closed" in msg:
@@ -406,16 +415,20 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> bool:
             before_url = page.url
             _human_click(page, btn)
             emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
-            for _ in range(4):
+            for _ in range(10):
                 time.sleep(0.5)
                 try:
                     if page.url != before_url:
                         return True
                 except Exception:
                     return True
-            emit(log, "paypal_http: /pay tick: Continue not confirmed, retrying")
-            return True
+            raise _PayContinueStuck("Continue clicked but no navigation in 5s")
     return False
+
+
+class _PayContinueStuck(Exception):
+    """Signals that the /pay Continue button click didn't trigger navigation."""
+    pass
 
 
 def _rand_email() -> str:
