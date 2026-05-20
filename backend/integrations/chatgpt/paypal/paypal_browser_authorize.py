@@ -163,15 +163,12 @@ def _wait_for_signup_page(page: Any, log: LogFn | None, check_cancelled: CheckCa
 
 
 def _pay_page_tick(page: Any, log: LogFn | None) -> None:
-    """Single tick of the /pay page poll loop — mirrors plugin's middle.js tick().
+    """Single tick — detect state, do ONE action, return. Next tick handles next step.
 
-    Priority order:
-    1. "Create an Account" button visible → click → fill email → click Continue
-    2. Email input visible → fill email → click Continue
-    3. Page shows "Open a PayPal account" text → fill email → click Continue
-    4. #startOnboardingFlow visible → click it (next tick will see the result)
+    Mirrors plugin's tick(): each call does at most one click/fill, then returns.
+    The 5-second interval between ticks gives PayPal's SPA time to react.
     """
-    result = page.evaluate("""() => {
+    state = page.evaluate("""() => {
         function canClick(btn) {
             if (!btn || btn.disabled) return false;
             const s = getComputedStyle(btn);
@@ -179,85 +176,94 @@ def _pay_page_tick(page: Any, log: LogFn | None) -> None:
             const r = btn.getBoundingClientRect();
             return r.width > 0 && r.height > 0;
         }
-
-        // 1. Create an Account
-        const onboardForm = document.querySelector('form[data-testid="xo-onboarding-form"] button[type="submit"]');
-        if (canClick(onboardForm)) return 'create_account';
-        const createBtns = Array.from(document.querySelectorAll('button'));
-        const createBtn = createBtns.find(b => /create an account|create account/i.test((b.innerText||'').trim()));
-        if (canClick(createBtn)) return 'create_account';
-
-        // 2. Email input
-        const emailSels = ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]'];
-        for (const sel of emailSels) {
-            const el = document.querySelector(sel);
-            if (el && !el.disabled && el.getBoundingClientRect().width > 0) return 'email_visible';
+        function findKeepPaying() {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            return buttons.find(b => {
+                const text = (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim();
+                const intent = b.getAttribute('data-atomic-wait-intent') || '';
+                if (/cancel|back|log in|login/i.test(text)) return false;
+                return /submit_email/i.test(intent) ||
+                    (b.type === 'submit' && /keep paying|continue to payment|continue/i.test(text));
+            }) || document.querySelector('button.actionContinue[type="submit"]');
         }
 
-        // 3. Stop texts
-        const bodyText = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ');
-        if (bodyText.includes('Open a PayPal account') || bodyText.includes('Already have an account')) return 'email_visible';
+        // Priority 1: Continue/Keep Paying button (email already filled from previous tick)
+        const keepPaying = findKeepPaying();
+        const emailSels = ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]'];
+        let emailEl = null;
+        for (const sel of emailSels) {
+            const el = document.querySelector(sel);
+            if (el && !el.disabled && el.getBoundingClientRect().width > 0) { emailEl = el; break; }
+        }
+        if (emailEl && emailEl.value && emailEl.value.includes('@') && canClick(keepPaying)) return 'click_continue';
 
-        // 4. #startOnboardingFlow
+        // Priority 2: Email input visible but empty
+        if (emailEl) return 'fill_email';
+
+        // Priority 3: "Open a PayPal account" / "Already have an account" text visible
+        const bodyText = (document.body && document.body.innerText || '');
+        if (bodyText.includes('Open a PayPal account') || bodyText.includes('Already have an account')) return 'fill_email';
+
+        // Priority 4: Create an Account
+        const onboardForm = document.querySelector('form[data-testid="xo-onboarding-form"] button[type="submit"]');
+        if (canClick(onboardForm)) return 'create_account';
+        const createBtn = Array.from(document.querySelectorAll('button'))
+            .find(b => /create an account|create account/i.test((b.innerText||'').trim()));
+        if (canClick(createBtn)) return 'create_account';
+
+        // Priority 5: #startOnboardingFlow
         const start = document.querySelector('#startOnboardingFlow');
         if (canClick(start)) return 'start_onboarding';
 
         return 'waiting';
     }""")
 
-    if result == "create_account":
+    if state == "click_continue":
+        page.evaluate("""() => {
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const btn = buttons.find(b => {
+                const text = (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim();
+                const intent = b.getAttribute('data-atomic-wait-intent') || '';
+                if (/cancel|back|log in|login/i.test(text)) return false;
+                return /submit_email/i.test(intent) ||
+                    (b.type === 'submit' && /keep paying|continue to payment|continue/i.test(text));
+            }) || document.querySelector('button.actionContinue[type="submit"]');
+            if (btn) { btn.scrollIntoView({block:'center'}); btn.focus(); btn.click(); }
+        }""")
+        emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
+    elif state == "fill_email":
+        email = _rand_email()
+        page.evaluate("""(email) => {
+            const sels = ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]'];
+            for (const sel of sels) {
+                const el = document.querySelector(sel);
+                if (el && !el.disabled && el.getBoundingClientRect().width > 0) {
+                    el.scrollIntoView({block:'center'});
+                    el.focus();
+                    const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+                    if (desc && desc.set) desc.set.call(el, email);
+                    else el.value = email;
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    el.dispatchEvent(new Event('blur', {bubbles: true}));
+                    return;
+                }
+            }
+        }""", email)
+        emit(log, f"paypal_http: /pay tick: filled email={email}")
+    elif state == "create_account":
         page.evaluate("""() => {
             const btn = document.querySelector('form[data-testid="xo-onboarding-form"] button[type="submit"]')
-                || Array.from(document.querySelectorAll('button')).find(b => /create an account|create account/i.test((b.innerText||'').trim()));
-            if (btn) { btn.scrollIntoView({block:'center'}); btn.click(); }
+                || Array.from(document.querySelectorAll('button')).find(b =>
+                    /create an account|create account/i.test((b.innerText||'').trim()));
+            if (btn) { btn.scrollIntoView({block:'center'}); btn.focus(); btn.click(); }
         }""")
         emit(log, "paypal_http: /pay tick: clicked Create an Account")
-        time.sleep(2)
-        _fill_pay_email_and_continue(page, log)
-    elif result == "email_visible":
-        _fill_pay_email_and_continue(page, log)
-    elif result == "start_onboarding":
-        page.evaluate("() => { const b = document.querySelector('#startOnboardingFlow'); if (b) b.click(); }")
+    elif state == "start_onboarding":
+        page.evaluate("() => { const b = document.querySelector('#startOnboardingFlow'); if (b) { b.scrollIntoView({block:'center'}); b.click(); } }")
         emit(log, "paypal_http: /pay tick: clicked #startOnboardingFlow")
     else:
-        emit(log, "paypal_http: /pay tick: waiting for elements...")
-
-
-def _fill_pay_email_and_continue(page: Any, log: LogFn | None) -> None:
-    """Fill email on /pay page and click Continue/Keep Paying."""
-    email = _rand_email()
-    filled = page.evaluate("""(email) => {
-        const sels = ['#onboardingFlowEmail', '#email', 'input[name="login_email"]', 'input[type="email"]'];
-        for (const sel of sels) {
-            const el = document.querySelector(sel);
-            if (el && !el.disabled && el.getBoundingClientRect().width > 0) {
-                const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-                if (desc && desc.set) desc.set.call(el, email);
-                else el.value = email;
-                el.dispatchEvent(new Event('input', {bubbles: true}));
-                el.dispatchEvent(new Event('change', {bubbles: true}));
-                el.dispatchEvent(new Event('blur', {bubbles: true}));
-                return true;
-            }
-        }
-        return false;
-    }""", email)
-    if filled:
-        emit(log, f"paypal_http: /pay tick: filled email={email}")
-    time.sleep(1)
-
-    page.evaluate("""() => {
-        const buttons = Array.from(document.querySelectorAll('button'));
-        const btn = buttons.find(b => {
-            const text = (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim();
-            const intent = b.getAttribute('data-atomic-wait-intent') || '';
-            if (/cancel|back|log in|login/i.test(text)) return false;
-            return /submit_email/i.test(intent) ||
-                (b.type === 'submit' && /keep paying|continue to payment|continue|next/i.test(text));
-        }) || document.querySelector('button.actionContinue[type="submit"]');
-        if (btn && !btn.disabled) { btn.scrollIntoView({block:'center'}); btn.click(); }
-    }""")
-    emit(log, "paypal_http: /pay tick: clicked Continue/Keep Paying")
+        emit(log, "paypal_http: /pay tick: waiting...")
 
 
 def _rand_email() -> str:
