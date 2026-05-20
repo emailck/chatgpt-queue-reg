@@ -989,24 +989,27 @@ def _wait_for_stripe_return(page: Any, log: LogFn | None, check_cancelled: Check
     """Wait for hermes review → click Continue → wait for Stripe return URL."""
     emit(log, "paypal_http: browser waiting for hermes review / stripe return")
 
-    for _ in range(120):
+    for _ in range(180):
         checkpoint(check_cancelled)
-        cur = page.url
+        try:
+            cur = page.url
+        except Exception:
+            time.sleep(2)
+            continue
         if "pay.openai.com" in cur or "chatgpt.com" in cur or "checkout.stripe.com" in cur:
             emit(log, f"paypal_http: browser reached stripe return: {cur[:100]}")
             return cur
-        if "/webapps/hermes" in cur:
-            try:
-                for text in ["Continue", "Agree & Continue", "Agree and Continue"]:
-                    btn = page.query_selector(f'button:has-text("{text}")')
-                    if btn and btn.is_visible():
-                        btn.scroll_into_view_if_needed()
-                        btn.click()
-                        emit(log, f"paypal_http: browser clicked hermes '{text}'")
-                        time.sleep(2)
-                        break
-            except Exception:
-                pass
+        try:
+            _check_rsc_redirect(page, log)
+            for text in ["Agree and Continue", "Agree & Continue", "Agree", "Continue", "Confirm"]:
+                btn = page.query_selector(f'button:has-text("{text}")')
+                if btn and btn.is_visible():
+                    _human_click(page, btn)
+                    emit(log, f"paypal_http: browser clicked '{text}' on {cur.split('?')[0].split('/')[-1]}")
+                    time.sleep(2)
+                    break
+        except Exception:
+            pass
         time.sleep(1)
 
     raise PayPalHttpError(f"browser: 等待 Stripe return URL 超时, url={page.url[:120]}")
