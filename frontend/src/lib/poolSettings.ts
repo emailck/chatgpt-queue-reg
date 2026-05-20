@@ -124,9 +124,10 @@ export const RESOURCEPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
   paypal_number_pool: {
     id: 'resource.paypal_number_pool',
     title: 'ResourcePool: paypal_number_pool 配置',
-    description: 'PayPal 手机号和短信 URL 是支付池消费的一次性资源，资源数据在 PayPal 号码页维护。',
-    fields: [],
-    emptyText: '暂无全局配置项；phone、smsurl、状态和失败原因在 PayPal 号码资源列表维护。',
+    description: 'PayPal 手机号可复用：失败号码冷却到期后会自动重新进入候选。',
+    fields: [
+      { key: 'paypal_number_cooldown_seconds', label: '失败冷却秒数', type: 'number', placeholder: '默认 300（5 分钟）' },
+    ],
   },
   proxy_pool: {
     id: 'resource.proxy_pool',

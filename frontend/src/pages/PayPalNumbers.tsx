@@ -69,10 +69,22 @@ function normalizeRows(data: unknown): PayPalNumber[] {
   return []
 }
 
+const DEFAULT_COOLDOWN_SECONDS = 300
+
+function formatRemaining(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  if (total < 60) return `${total}s`
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return s ? `${m}m${s}s` : `${m}m`
+}
+
 export default function PayPalNumbers() {
   const [rows, setRows] = useState<PayPalNumber[]>([])
   const [loading, setLoading] = useState(false)
   const [statusFilter, setStatusFilter] = useState<string | undefined>()
+  const [cooldownSeconds, setCooldownSeconds] = useState<number>(DEFAULT_COOLDOWN_SECONDS)
+  const [nowTick, setNowTick] = useState<number>(() => Date.now())
   const [createOpen, setCreateOpen] = useState(false)
   const [bulkOpen, setBulkOpen] = useState(false)
   const [bulkLoading, setBulkLoading] = useState(false)
@@ -87,8 +99,13 @@ export default function PayPalNumbers() {
     setLoading(true)
     try {
       const query = statusFilter ? `?status=${encodeURIComponent(statusFilter)}` : ''
-      const data = await apiFetch<unknown>(`/paypal-numbers${query}`)
+      const [data, pools] = await Promise.all([
+        apiFetch<unknown>(`/paypal-numbers${query}`),
+        apiFetch<Record<string, { cooldown_seconds?: number }>>('/pools').catch(() => ({})),
+      ])
       setRows(normalizeRows(data))
+      const value = Number(pools?.paypal_number_pool?.cooldown_seconds)
+      if (Number.isFinite(value) && value >= 0) setCooldownSeconds(value)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载失败')
     } finally {
@@ -101,14 +118,40 @@ export default function PayPalNumbers() {
     return () => clearTimeout(initial)
   }, [reload])
 
-  const summary = useMemo(() => ({
-    total: rows.length,
-    available: rows.filter((row) => row.status === 'available').length,
-    inUse: rows.filter((row) => row.status === 'in_use').length,
-    used: rows.filter((row) => row.status === 'used').length,
-    failed: rows.filter((row) => row.status === 'failed').length,
-    banned: rows.filter((row) => row.status === 'banned').length,
-  }), [rows])
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const cooldownInfo = useCallback((row: PayPalNumber): { state: 'cooling' | 'ready' | 'none'; remaining: number } => {
+    if (row.status !== 'failed') return { state: 'none', remaining: 0 }
+    if (!row.last_used_at || cooldownSeconds <= 0) return { state: 'ready', remaining: 0 }
+    const ts = Date.parse(row.last_used_at)
+    if (!Number.isFinite(ts)) return { state: 'ready', remaining: 0 }
+    const elapsed = (nowTick - ts) / 1000
+    const remaining = cooldownSeconds - elapsed
+    return remaining > 0 ? { state: 'cooling', remaining } : { state: 'ready', remaining: 0 }
+  }, [cooldownSeconds, nowTick])
+
+  const summary = useMemo(() => {
+    let cooling = 0
+    let failedReady = 0
+    for (const row of rows) {
+      const info = cooldownInfo(row)
+      if (info.state === 'cooling') cooling += 1
+      else if (info.state === 'ready') failedReady += 1
+    }
+    return {
+      total: rows.length,
+      available: rows.filter((row) => row.status === 'available').length,
+      inUse: rows.filter((row) => row.status === 'in_use').length,
+      used: rows.filter((row) => row.status === 'used').length,
+      failed: rows.filter((row) => row.status === 'failed').length,
+      banned: rows.filter((row) => row.status === 'banned').length,
+      cooling,
+      failedReady,
+    }
+  }, [cooldownInfo, rows])
 
   const submitCreate = async () => {
     const values = await form.validateFields()
@@ -211,8 +254,17 @@ export default function PayPalNumbers() {
     {
       title: '状态',
       dataIndex: 'status',
-      width: 120,
-      render: (value: string) => <Tag color={STATUS_COLOR[value] || 'default'}>{value || '-'}</Tag>,
+      width: 160,
+      render: (value: string, row) => {
+        const info = cooldownInfo(row)
+        return (
+          <Space direction="vertical" size={2}>
+            <Tag color={STATUS_COLOR[value] || 'default'}>{value || '-'}</Tag>
+            {info.state === 'cooling' && <Text type="warning" style={{ fontSize: 12 }}>冷却 {formatRemaining(info.remaining)}</Text>}
+            {info.state === 'ready' && <Text type="secondary" style={{ fontSize: 12 }}>已可复用</Text>}
+          </Space>
+        )
+      },
     },
     {
       title: 'SMS URL',
@@ -282,8 +334,9 @@ export default function PayPalNumbers() {
         <StatCard label="available" value={summary.available} tone="success" />
         <StatCard label="in_use" value={summary.inUse} tone="info" />
         <StatCard label="used" value={summary.used} />
-        <StatCard label="failed" value={summary.failed} tone={summary.failed ? 'danger' : 'default'} />
+        <StatCard label="failed" value={summary.failed} hint={summary.cooling ? `${summary.cooling} 冷却中 / ${summary.failedReady} 可复用` : undefined} tone={summary.failed ? 'warning' : 'default'} />
         <StatCard label="banned" value={summary.banned} tone={summary.banned ? 'danger' : 'default'} />
+        <StatCard label="cooldown" value={`${cooldownSeconds}s`} hint="失败后冷却时长" />
       </SummaryGrid>
 
       <ActionCard
