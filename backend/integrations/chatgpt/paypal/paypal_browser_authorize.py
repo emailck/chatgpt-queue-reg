@@ -50,7 +50,7 @@ def browser_paypal_checkout(
 
     try:
         with Camoufox(
-            headless=not has_display,
+            headless=False,  # TODO: revert to `not has_display` after captcha debugging
             humanize=False,
             persistent_context=True,
             user_data_dir=tmp_profile,
