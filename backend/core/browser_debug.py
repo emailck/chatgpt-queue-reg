@@ -134,6 +134,9 @@ def open_debug_session(
 
     account_state = _resolve_account_state(account_id)
     payment_state = _resolve_payment_link(payment_link_id)
+    if account_id is None and payment_state.get("account_id"):
+        account_id = int(payment_state.get("account_id") or 0) or None
+        account_state = _resolve_account_state(account_id)
     if not target_url:
         target_url = payment_state.get("checkout_url") or "https://chatgpt.com/"
 
@@ -187,6 +190,7 @@ def open_debug_session(
             user_agent=str(user_agent or ""),
             cookies=cookies,
             local_storage=local_storage,
+            fingerprint=fingerprint or {},
             har_path=har_path,
             omit_har_content=omit_har_content,
             log=log_fn,
@@ -286,6 +290,49 @@ def list_open_sessions() -> list[dict[str, Any]]:
 
 # ---- launcher -----------------------------------------------------------------
 
+def _context_options_from_fingerprint(fingerprint: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(fingerprint, dict):
+        return {}
+    out: dict[str, Any] = {}
+    direct_keys = {
+        "locale",
+        "timezone_id",
+        "device_scale_factor",
+        "is_mobile",
+        "has_touch",
+        "color_scheme",
+    }
+    aliases = {
+        "timezone": "timezone_id",
+        "timezoneId": "timezone_id",
+        "deviceScaleFactor": "device_scale_factor",
+        "isMobile": "is_mobile",
+        "hasTouch": "has_touch",
+        "colorScheme": "color_scheme",
+    }
+    for key in direct_keys:
+        value = fingerprint.get(key)
+        if value not in (None, ""):
+            out[key] = value
+    for source, target in aliases.items():
+        value = fingerprint.get(source)
+        if value not in (None, "") and target not in out:
+            out[target] = value
+    viewport = fingerprint.get("viewport") or fingerprint.get("screen")
+    if isinstance(viewport, dict):
+        width = int(viewport.get("width") or viewport.get("w") or 0)
+        height = int(viewport.get("height") or viewport.get("h") or 0)
+        if width > 0 and height > 0:
+            out["viewport"] = {"width": width, "height": height}
+    screen = fingerprint.get("screen")
+    if isinstance(screen, dict):
+        width = int(screen.get("width") or screen.get("w") or 0)
+        height = int(screen.get("height") or screen.get("h") or 0)
+        if width > 0 and height > 0:
+            out["screen"] = {"width": width, "height": height}
+    return out
+
+
 def _launch(
     *,
     target_url: str,
@@ -294,6 +341,7 @@ def _launch(
     user_agent: str,
     cookies: list[dict[str, Any]],
     local_storage: dict[str, str],
+    fingerprint: dict[str, Any],
     har_path: str,
     omit_har_content: bool,
     log: Callable[[str], None],
@@ -315,6 +363,7 @@ def _launch(
                 user_agent=user_agent,
                 cookies=cookies,
                 local_storage=local_storage,
+                fingerprint=fingerprint,
                 har_path=har_path,
                 omit_har_content=omit_har_content,
                 log=log,
@@ -334,6 +383,7 @@ def _launch(
         browser = playwright.chromium.launch(**launch_kwargs)
 
     context_kwargs: dict[str, Any] = {"locale": "en-US"}
+    context_kwargs.update(_context_options_from_fingerprint(fingerprint))
     if user_agent:
         context_kwargs["user_agent"] = user_agent
     if har_path:

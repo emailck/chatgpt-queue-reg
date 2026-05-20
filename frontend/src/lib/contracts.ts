@@ -48,6 +48,15 @@ export interface CardPoolStats {
   banned?: number
 }
 
+export interface PayPalNumberPoolStats {
+  total?: number
+  available?: number
+  in_use?: number
+  used?: number
+  failed?: number
+  banned?: number
+}
+
 export interface ProxyPoolStats {
   total?: number
   enabled?: number
@@ -67,7 +76,7 @@ export interface SmsPoolStats {
   enabled?: number
 }
 
-export type PoolStats = EmailPoolStats | CardPoolStats | ProxyPoolStats | SmsPoolStats | Record<string, unknown>
+export type PoolStats = EmailPoolStats | CardPoolStats | PayPalNumberPoolStats | ProxyPoolStats | SmsPoolStats | Record<string, unknown>
 
 export type PoolsResponse = Record<string, PoolStats>
 

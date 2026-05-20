@@ -1,29 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
-import {
-  Button,
-  Card,
-  Drawer,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Radio,
-  Select,
-  Space,
-  Switch,
-  Table,
-  Tag,
-  Typography,
-  message,
-} from 'antd'
-import {
-  DeleteOutlined,
-  DownloadOutlined,
-  ReloadOutlined,
-} from '@ant-design/icons'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Button, Form, Input, Popconfirm, Radio, Select, Space, Switch, Tag, Typography, message } from 'antd'
+import { DeleteOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
 
-import { CopyButton } from '@/components/CopyButton'
 import { API_BASE, apiFetch, formatDateTime } from '@/lib/api'
+import { ActionCard, CardToolbar, EntityCard, EntityGrid, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
+import { CopyableText, ErrorCallout, LinkedIdBadges, SelectionSummary, Sub2ApiBadge, TokenBadges } from '@/components/ui/DomainBits'
 
 const { Text, Paragraph } = Typography
 
@@ -73,20 +54,6 @@ const TXT_FIELD_OPTIONS = [
   'user_agent',
 ] as const
 
-const SUB2API_STATUS_COLORS: Record<string, string> = {
-  uploaded: 'blue',
-  active: 'green',
-  alive: 'green',
-  ok: 'green',
-  pending_upload: 'orange',
-  upload_failed: 'red',
-  sync_failed: 'red',
-  dead: 'red',
-  disabled: 'default',
-  invalid: 'red',
-  expired: 'red',
-}
-
 export default function AccessTokens() {
   const [rows, setRows] = useState<AccessTokenAccount[]>([])
   const [loading, setLoading] = useState(false)
@@ -96,6 +63,7 @@ export default function AccessTokens() {
   const [exportOpen, setExportOpen] = useState(false)
   const [detail, setDetail] = useState<AccessTokenAccount | null>(null)
   const [fetchingRtId, setFetchingRtId] = useState<number | null>(null)
+  const [page, setPage] = useState(1)
   const [exportForm] = Form.useForm()
 
   const reload = useCallback(async () => {
@@ -115,11 +83,18 @@ export default function AccessTokens() {
     return () => clearTimeout(initial)
   }, [reload])
 
+  const summary = useMemo(() => ({
+    total: rows.length,
+    at: rows.filter((row) => row.has_access_token).length,
+    rt: rows.filter((row) => row.has_refresh_token || row.codex_token_has_refresh_token).length,
+    sub2api: rows.filter((row) => ['active', 'alive', 'ok', 'uploaded'].includes(String(row.sub2api_status || '').toLowerCase())).length,
+    invalid: rows.filter((row) => row.codex_token_id && !row.codex_token_alive).length,
+    errors: rows.filter((row) => row.codex_token_last_error).length,
+  }), [rows])
+
   const openDetail = useCallback(async (row: AccessTokenAccount) => {
     try {
-      const full = await apiFetch<AccessTokenAccount>(
-        `/access-tokens/${row.id}?include_secrets=true`,
-      )
+      const full = await apiFetch<AccessTokenAccount>(`/access-tokens/${row.id}?include_secrets=true`)
       setDetail(full)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载详情失败')
@@ -139,11 +114,7 @@ export default function AccessTokens() {
   const fetchRefreshToken = async (row: AccessTokenAccount) => {
     setFetchingRtId(row.id)
     try {
-      const resp = await apiFetch<{
-        job_id: number | null
-        already_has_refresh_token: boolean
-        already_running: boolean
-      }>(`/access-tokens/${row.id}/refresh-token`, { method: 'POST' })
+      const resp = await apiFetch<{ job_id: number | null; already_has_refresh_token: boolean; already_running: boolean }>(`/access-tokens/${row.id}/refresh-token`, { method: 'POST' })
       if (resp.already_has_refresh_token) {
         message.success('该账号已有 RT')
       } else if (resp.already_running) {
@@ -191,206 +162,137 @@ export default function AccessTokens() {
     setExportOpen(false)
   }
 
-  const columns = [
-    { title: 'ID', dataIndex: 'id', width: 60 },
-    {
-      title: '邮箱',
-      dataIndex: 'email',
-      render: (value: string) => (
-        <Space size={2}>
-          <Text>{value}</Text>
-          <CopyButton value={value} />
-        </Space>
-      ),
-    },
-    {
-      title: 'access_token',
-      dataIndex: 'access_token',
-      render: (value: string) => (
-        <Space size={2}>
-          <Text code style={{ fontSize: 11 }}>{value || '-'}</Text>
-          {value && <CopyButton value={value} />}
-        </Space>
-      ),
-    },
-    {
-      title: 'Codex RT',
-      render: (_v: unknown, row: AccessTokenAccount) => (
-        <Space direction="vertical" size={2}>
-          <Space size={2}>
-            <Text code style={{ fontSize: 11 }}>{row.refresh_token || '-'}</Text>
-            {row.refresh_token && <CopyButton value={row.refresh_token} />}
-          </Space>
-          {row.codex_token_id && (
-            <Space size={4} wrap>
-              <Text type="secondary">#{row.codex_token_id}</Text>
-              <Tag color={SUB2API_STATUS_COLORS[row.sub2api_status] || 'default'}>{row.sub2api_status || 'unknown'}</Tag>
-              {!row.codex_token_alive && <Tag color="red">失效</Tag>}
-            </Space>
-          )}
-        </Space>
-      ),
-    },
-    { title: '代理', dataIndex: 'proxy_url', ellipsis: true, width: 180 },
-    { title: 'pipeline', dataIndex: 'pipeline_id', width: 90, render: (v: number | null) => (v ? `#${v}` : '-') },
-    { title: '创建时间', width: 170, render: (_v: unknown, row: AccessTokenAccount) => formatDateTime(row.created_at) },
-    {
-      title: '操作',
-      width: 200,
-      render: (_v: unknown, row: AccessTokenAccount) => (
-        <Space size={4}>
-          <Button size="small" onClick={() => openDetail(row)}>详情</Button>
-          {pool === 'at' && !row.codex_token_has_refresh_token && (
-            <Button
-              size="small"
-              type="primary"
-              loading={fetchingRtId === row.id}
-              onClick={() => fetchRefreshToken(row)}
-            >
-              获取 RT
-            </Button>
-          )}
-          <Popconfirm title="删除该 AT?" onConfirm={() => deleteOne(row)}>
-            <Button size="small" danger>删除</Button>
-          </Popconfirm>
-        </Space>
-      ),
-    },
-  ]
+  const toggleSelected = (id: number, checked: boolean) => {
+    setSelected((prev) => checked ? [...prev, id] : prev.filter((item) => Number(item) !== id))
+  }
+
+  const secretValue = (value: string, label: string) => showSecrets ? <CopyableText value={value} label={label} code /> : <Tag>{value ? 'present' : 'missing'}</Tag>
 
   return (
-    <>
-      <Card>
-        <Space style={{ marginBottom: 12 }} wrap>
-          <Radio.Group
-            value={pool}
-            onChange={(e) => { setPool(e.target.value); setSelected([]) }}
-            optionType="button"
-            buttonStyle="solid"
-            options={[
-              { value: 'at', label: 'Free AT 池' },
-              { value: 'rt', label: 'Free RT 池' },
-            ]}
-          />
-          <Button icon={<ReloadOutlined />} onClick={reload}>刷新</Button>
-          <Button icon={<DownloadOutlined />} type="primary" onClick={() => setExportOpen(true)}>
-            导出{selected.length ? `（${selected.length}）` : '全部'}
-          </Button>
-          <Popconfirm
-            title={`确认删除选中的 ${selected.length} 条?`}
-            onConfirm={batchDelete}
-            disabled={!selected.length}
-          >
-            <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>
-              批量删除（{selected.length}）
-            </Button>
-          </Popconfirm>
-          <Space size={6}>
-            <Switch checked={showSecrets} onChange={setShowSecrets} />
-            <Text>显示完整 token</Text>
-          </Space>
-          <Tag>共 {rows.length} 条</Tag>
-        </Space>
-        <Table
-          rowKey="id"
-          dataSource={rows}
-          columns={columns as never}
-          loading={loading}
-          pagination={{ pageSize: 20 }}
-          rowSelection={{
-            selectedRowKeys: selected,
-            onChange: setSelected,
-          }}
-        />
-      </Card>
+    <PageScaffold
+      title="Free 号池"
+      description="AT/RT 池按账号卡片展示，敏感 token 默认只显示状态；详情弹出卡片会按需拉取完整 secrets。"
+      actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
+    >
+      <SummaryGrid>
+        <StatCard label="当前池" value={pool === 'rt' ? 'RT' : 'AT'} hint={`${summary.total} 条`} tone="primary" />
+        <StatCard label="AT present" value={summary.at} tone="success" />
+        <StatCard label="RT present" value={summary.rt} tone="info" />
+        <StatCard label="sub2api active" value={summary.sub2api} tone="success" />
+        <StatCard label="invalid/dead" value={summary.invalid} tone={summary.invalid ? 'danger' : 'default'} />
+        <StatCard label="errors" value={summary.errors} tone={summary.errors ? 'danger' : 'default'} />
+      </SummaryGrid>
 
-      <Modal
-        open={exportOpen}
-        title={`导出 ${pool === 'rt' ? 'Free RT 池' : 'Free AT 池'}`}
-        onCancel={() => setExportOpen(false)}
-        onOk={submitExport}
-        okText="下载"
-        width={560}
-      >
-        <Paragraph type="secondary">
-          {selected.length
-            ? `当前选中 ${selected.length} 条，仅导出选中。`
-            : '未选中任何条目，将导出全部。'}
-        </Paragraph>
-        <Form
-          form={exportForm}
-          layout="vertical"
-          initialValues={{
-            fmt: 'txt',
-            separator: '----',
-            fields: ['email', 'password', 'access_token', 'refresh_token', 'session_token'],
-          }}
-        >
-          <Form.Item label="格式" name="fmt">
-            <Select
-              options={[
-                { value: 'txt', label: 'TXT（行式，可指定字段顺序与分隔符）' },
-                { value: 'csv', label: 'CSV' },
-                { value: 'json', label: 'JSON（含完整 cookies / fingerprint）' },
-              ]}
+      <ActionCard
+        title="Token 池操作"
+        description="切换池子、导出、补 RT 和删除都保留原接口；完整 token 只在显式开关或详情弹出卡片中展示。"
+        actions={(
+          <CardToolbar>
+            <Radio.Group
+              value={pool}
+              onChange={(e) => { setPool(e.target.value); setSelected([]); setPage(1) }}
+              optionType="button"
+              buttonStyle="solid"
+              options={[{ value: 'at', label: 'Free AT 池' }, { value: 'rt', label: 'Free RT 池' }]}
             />
-          </Form.Item>
-          <Form.Item
-            noStyle
-            shouldUpdate={(prev, curr) => prev.fmt !== curr.fmt}
+            <SelectionSummary count={selected.length} />
+            <Space size={6}><Switch checked={showSecrets} onChange={setShowSecrets} /><Text>显示完整 token</Text></Space>
+            <Button icon={<DownloadOutlined />} type="primary" onClick={() => setExportOpen(true)}>导出{selected.length ? `（${selected.length}）` : '全部'}</Button>
+            <Popconfirm title={`确认删除选中的 ${selected.length} 条?`} onConfirm={batchDelete} disabled={!selected.length}>
+              <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>批量删除</Button>
+            </Popconfirm>
+          </CardToolbar>
+        )}
+      />
+
+      <EntityGrid
+        items={rows}
+        page={page}
+        pageSize={18}
+        onPageChange={setPage}
+        renderItem={(row) => (
+          <EntityCard
+            key={row.id}
+            title={<CopyableText value={row.email} label="邮箱" />}
+            subtitle={`Token #${row.id}`}
+            status={<Tag color={pool === 'rt' ? 'blue' : 'green'}>{pool.toUpperCase()} pool</Tag>}
+            tone={row.codex_token_id && !row.codex_token_alive ? 'danger' : row.codex_token_has_refresh_token ? 'success' : 'default'}
+            selected={selected.includes(row.id)}
+            onSelect={(checked) => toggleSelected(row.id, checked)}
+            badges={(
+              <Space size={4} wrap>
+                <TokenBadges accessToken={row.has_access_token ? 'yes' : ''} refreshToken={row.has_refresh_token ? 'yes' : ''} codexRt={row.codex_token_has_refresh_token ? 'yes' : ''} />
+                <LinkedIdBadges pipelineId={row.pipeline_id} accountId={row.chatgpt_account_id} />
+                {row.sub2api_status && <Sub2ApiBadge status={row.sub2api_status} />}
+              </Space>
+            )}
+            footer={formatDateTime(row.created_at)}
+            actions={(
+              <>
+                <Button size="small" onClick={() => openDetail(row)}>详情</Button>
+                {pool === 'at' && !row.codex_token_has_refresh_token && <Button size="small" type="primary" loading={fetchingRtId === row.id} onClick={() => fetchRefreshToken(row)}>获取 RT</Button>}
+                <Popconfirm title="删除该 token?" onConfirm={() => deleteOne(row)}>
+                  <Button size="small" danger>删除</Button>
+                </Popconfirm>
+              </>
+            )}
           >
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <KeyValueGrid>
+                <KeyValue label="access_token" value={secretValue(row.access_token, 'access_token')} />
+                <KeyValue label="refresh_token" value={secretValue(row.refresh_token, 'refresh_token')} />
+                <KeyValue label="session_token" value={secretValue(row.session_token, 'session_token')} />
+                <KeyValue label="workspace" value={<CopyableText value={row.workspace_id} label="workspace" code />} />
+                <KeyValue label="代理" value={<CopyableText value={row.proxy_url} label="代理" />} />
+                <KeyValue label="sub2api external" value={<CopyableText value={row.sub2api_external_id} label="sub2api external" code />} />
+              </KeyValueGrid>
+              <ErrorCallout error={row.codex_token_last_error} />
+            </Space>
+          </EntityCard>
+        )}
+      />
+
+      <PopupCard open={exportOpen} title={`导出 ${pool === 'rt' ? 'Free RT 池' : 'Free AT 池'}`} onCancel={() => setExportOpen(false)} onOk={submitExport} okText="下载" width={620}>
+        <Paragraph type="secondary">{selected.length ? `当前选中 ${selected.length} 条，仅导出选中。` : '未选中任何条目，将导出全部。'}</Paragraph>
+        <Form form={exportForm} layout="vertical" initialValues={{ fmt: 'txt', separator: '----', fields: ['email', 'password', 'access_token', 'refresh_token', 'session_token'] }}>
+          <Form.Item label="格式" name="fmt">
+            <Select options={[{ value: 'txt', label: 'TXT（行式，可指定字段顺序与分隔符）' }, { value: 'csv', label: 'CSV' }, { value: 'json', label: 'JSON（含完整 cookies / fingerprint）' }]} />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, curr) => prev.fmt !== curr.fmt}>
             {({ getFieldValue }) => (getFieldValue('fmt') === 'txt' ? (
               <>
-                <Form.Item label="分隔符" name="separator">
-                  <Input />
-                </Form.Item>
-                <Form.Item label="字段顺序" name="fields">
-                  <Select
-                    mode="multiple"
-                    options={TXT_FIELD_OPTIONS.map((f) => ({ value: f, label: f }))}
-                    placeholder="按需勾选并拖动排序"
-                  />
-                </Form.Item>
+                <Form.Item label="分隔符" name="separator"><Input /></Form.Item>
+                <Form.Item label="字段顺序" name="fields"><Select mode="multiple" options={TXT_FIELD_OPTIONS.map((f) => ({ value: f, label: f }))} placeholder="按需勾选并拖动排序" /></Form.Item>
               </>
             ) : null)}
           </Form.Item>
         </Form>
-      </Modal>
+      </PopupCard>
 
-      <Drawer
-        open={!!detail}
-        onClose={() => setDetail(null)}
-        width={720}
-        title={detail ? `AT #${detail.id} — ${detail.email}` : ''}
-      >
+      <PopupCard open={!!detail} onCancel={() => setDetail(null)} width={880} title={detail ? `Token #${detail.id} — ${detail.email}` : ''} footer={null}>
         {detail && (
-          <Space direction="vertical" style={{ width: '100%' }} size={12}>
-            {[
-              ['email', detail.email],
-              ['password', detail.password],
-              ['account_id', detail.account_id],
-              ['workspace_id', detail.workspace_id],
-              ['access_token', detail.access_token],
-              ['codex_refresh_token', detail.refresh_token],
-              ['sub2api_status', detail.sub2api_status],
-              ['sub2api_external_id', detail.sub2api_external_id],
-              ['codex_token_last_error', detail.codex_token_last_error],
-              ['id_token', detail.id_token],
-              ['session_token', detail.session_token],
-              ['user_agent', detail.user_agent],
-              ['proxy_url', detail.proxy_url],
-            ].map(([label, value]) => (
-              <div key={label}>
-                <Text type="secondary" style={{ fontSize: 12 }}>{label}</Text>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Text code style={{ wordBreak: 'break-all', flex: 1 }}>{value || '-'}</Text>
-                  {value && <CopyButton value={String(value)} />}
-                </div>
-              </div>
-            ))}
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <ActionCard title="完整凭据" description="详情弹出卡片按需请求 include_secrets=true，关闭后不在列表里继续展开 secrets。" />
+            <KeyValueGrid>
+              {[
+                ['email', detail.email],
+                ['password', detail.password],
+                ['account_id', detail.account_id],
+                ['workspace_id', detail.workspace_id],
+                ['access_token', detail.access_token],
+                ['codex_refresh_token', detail.refresh_token],
+                ['sub2api_status', detail.sub2api_status],
+                ['sub2api_external_id', detail.sub2api_external_id],
+                ['id_token', detail.id_token],
+                ['session_token', detail.session_token],
+                ['user_agent', detail.user_agent],
+                ['proxy_url', detail.proxy_url],
+              ].map(([label, value]) => <KeyValue key={label} label={label} value={<CopyableText value={value} label={label} code />} />)}
+            </KeyValueGrid>
+            <ErrorCallout error={detail.codex_token_last_error} />
           </Space>
         )}
-      </Drawer>
-    </>
+      </PopupCard>
+    </PageScaffold>
   )
 }

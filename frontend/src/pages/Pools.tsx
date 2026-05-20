@@ -1,17 +1,29 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Button, Card, Col, Descriptions, Drawer, Progress, Row, Space, Table, Tag, Typography, message } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { Button, Col, Empty, Form, Input, InputNumber, Progress, Row, Select, Space, Switch, Tag, Typography, message } from 'antd'
+import { ReloadOutlined, SaveOutlined, SettingOutlined } from '@ant-design/icons'
 
 import { JobLogPanel } from '@/components/JobLogPanel'
 import { StatusTag } from '@/components/StatusTag'
+import { ActionCard, CardToolbar, CodeSurface, EntityCard, EntityGrid, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
+import { CopyableText, LinkedIdBadges } from '@/components/ui/DomainBits'
 import { apiFetch, formatDateTime, formatDuration } from '@/lib/api'
-import type { CardPoolStats, EmailPoolStats, Job, PoolsResponse, ProxyPoolStats, QueueStats, SmsPoolStats, StageMap, StageMeta } from '@/lib/contracts'
+import type { CardPoolStats, EmailPoolStats, Job, PayPalNumberPoolStats, PoolsResponse, ProxyPoolStats, QueueStats, SmsPoolStats, StageMap, StageMeta } from '@/lib/contracts'
 import { stageLabel } from '@/lib/contracts'
+import type { PoolSettingGroup, SettingField } from '@/lib/poolSettings'
+import { RESOURCEPOOL_SETTING_GROUPS, WORKPOOL_SETTING_GROUPS, toFormValues, toSettingsValues } from '@/lib/poolSettings'
 
 const { Text } = Typography
 
 const EMPTY_QUEUE: QueueStats = { concurrency: {}, inflight: {}, counts: {} }
 const JOB_STATUS_KEYS = ['queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted']
+
+function renderSettingControl(field: SettingField) {
+  if (field.type === 'switch') return <Switch checkedChildren="开" unCheckedChildren="关" />
+  if (field.type === 'number') return <InputNumber style={{ width: '100%' }} placeholder={field.placeholder || ''} />
+  if (field.type === 'select') return <Select options={field.options || []} placeholder={field.placeholder || ''} allowClear />
+  if (field.type === 'password') return <Input.Password placeholder={field.placeholder || ''} autoComplete="new-password" />
+  return <Input placeholder={field.placeholder || ''} />
+}
 
 function num(value: unknown): number {
   const n = Number(value || 0)
@@ -31,13 +43,8 @@ function resourceTags(items: string[]) {
   )
 }
 
-function stageView(stage: string) {
-  return (
-    <Space direction="vertical" size={0}>
-      <Text strong>{stageLabel(stage)}</Text>
-      <Text type="secondary" code>{stage}</Text>
-    </Space>
-  )
+function stageTone(stage: StageMeta): 'success' | 'warning' {
+  return stage.implemented ? 'success' : 'warning'
 }
 
 export default function Pools() {
@@ -45,22 +52,29 @@ export default function Pools() {
   const [pools, setPools] = useState<PoolsResponse>({})
   const [queue, setQueue] = useState<QueueStats>(EMPTY_QUEUE)
   const [jobs, setJobs] = useState<Job[]>([])
+  const [settings, setSettings] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(false)
+  const [savingSettings, setSavingSettings] = useState(false)
   const [logJobId, setLogJobId] = useState<number | null>(null)
+  const [configGroup, setConfigGroup] = useState<PoolSettingGroup | null>(null)
+  const [jobsPage, setJobsPage] = useState(1)
+  const [configForm] = Form.useForm()
 
   const reload = useCallback(async () => {
     setLoading(true)
     try {
-      const [stageData, poolData, queueData, jobData] = await Promise.all([
+      const [stageData, poolData, queueData, jobData, settingsData] = await Promise.all([
         apiFetch<StageMap>('/stages'),
         apiFetch<PoolsResponse>('/pools'),
         apiFetch<QueueStats>('/queue/stats'),
         apiFetch<Job[]>('/jobs?limit=300'),
+        apiFetch<Record<string, string>>('/settings'),
       ])
       setStages(stageData)
       setPools(poolData)
       setQueue(queueData)
       setJobs(jobData)
+      setSettings(settingsData)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载池子失败')
     } finally {
@@ -93,208 +107,210 @@ export default function Pools() {
     return out
   }, [jobs])
 
+  const openConfig = useCallback((group: PoolSettingGroup | undefined) => {
+    if (!group) {
+      message.info('该池子暂无配置项')
+      return
+    }
+    setConfigGroup(group)
+    configForm.setFieldsValue(toFormValues(group.fields, settings))
+  }, [configForm, settings])
+
+  const saveConfig = useCallback(async () => {
+    if (!configGroup) return
+    setSavingSettings(true)
+    try {
+      const values = configForm.getFieldsValue()
+      const data = toSettingsValues(configGroup.fields, values)
+      await apiFetch('/settings', { method: 'PUT', body: JSON.stringify({ data }) })
+      setSettings((prev) => ({ ...prev, ...data }))
+      message.success('已保存')
+      setConfigGroup(null)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setSavingSettings(false)
+    }
+  }, [configForm, configGroup])
+
   const stageRows = useMemo(() => Object.values(stages), [stages])
   const emailPool = pools.email_pool as EmailPoolStats | undefined
   const cardPool = pools.card_pool as CardPoolStats | undefined
+  const paypalNumberPool = pools.paypal_number_pool as PayPalNumberPoolStats | undefined
   const proxyPool = pools.proxy_pool as ProxyPoolStats | undefined
   const smsPool = pools.sms_pool as SmsPoolStats | undefined
-  const knownPools = new Set(['email_pool', 'card_pool', 'proxy_pool', 'sms_pool'])
+  const knownPools = new Set(['email_pool', 'card_pool', 'paypal_number_pool', 'proxy_pool', 'sms_pool'])
   const extraPools = Object.entries(pools).filter(([name]) => !knownPools.has(name))
 
-  const stageColumns = [
-    {
-      title: 'WorkPool',
-      dataIndex: 'name',
-      width: 190,
-      render: (value: string) => stageView(value),
-    },
-    {
-      title: '运行状态',
-      width: 110,
-      render: (_v: unknown, row: StageMeta) => (
-        <Tag color={row.implemented ? 'green' : 'default'}>{row.implemented ? 'implemented' : 'stub'}</Tag>
-      ),
-    },
-    {
-      title: '容量',
-      width: 180,
-      render: (_v: unknown, row: StageMeta) => {
-        const concurrency = num(queue.concurrency?.[row.name] ?? row.default_concurrency)
-        const inflight = num(queue.inflight?.[row.name])
-        const percent = concurrency ? Math.min(100, Math.round((inflight / concurrency) * 100)) : 0
-        return (
-          <Space direction="vertical" size={2} style={{ width: '100%' }}>
-            <Text>{inflight}/{concurrency}</Text>
-            <Progress percent={percent} size="small" showInfo={false} status={inflight >= concurrency && concurrency ? 'exception' : 'active'} />
-          </Space>
-        )
-      },
-    },
-    {
-      title: '最近队列',
-      width: 180,
-      render: (_v: unknown, row: StageMeta) => {
-        const counts = jobCountsByStage[row.name] || {}
-        return (
-          <Space size={4} wrap>
-            <Tag>queued {counts.queued || 0}</Tag>
-            <Tag color="processing">running {counts.running || 0}</Tag>
-            <Tag color="red">failed {counts.failed || 0}</Tag>
-          </Space>
-        )
-      },
-    },
-    { title: '必需资源', width: 180, render: (_v: unknown, row: StageMeta) => resourceTags(row.requires_resources || []) },
-    { title: '可选资源', width: 180, render: (_v: unknown, row: StageMeta) => resourceTags(row.optional_resources || []) },
-    {
-      title: 'Schema',
-      width: 180,
-      render: (_v: unknown, row: StageMeta) => (
-        <Space direction="vertical" size={0}>
-          <Text code>{row.input_schema || '-'}</Text>
-          <Text code>{row.output_schema || '-'}</Text>
-        </Space>
-      ),
-    },
-    { title: '说明', dataIndex: 'description', ellipsis: true },
-  ]
-
-  const jobColumns = [
-    { title: 'Job', dataIndex: 'id', width: 70, render: (value: number) => <Text code>#{value}</Text> },
-    { title: 'Stage', dataIndex: 'type', width: 170, render: (value: string) => stageView(value) },
-    { title: '状态', dataIndex: 'status', width: 120, render: (value: string) => <StatusTag status={value} /> },
-    { title: 'Pipeline', dataIndex: 'pipeline_id', width: 90, render: (value: number | null) => value ? <Tag>#{value}</Tag> : '-' },
-    { title: 'Account', dataIndex: 'account_id', width: 90, render: (value: number | null) => value ? <Tag color="cyan">#{value}</Tag> : '-' },
-    { title: 'PaymentLink', dataIndex: 'payment_link_id', width: 110, render: (value: number | null) => value ? <Tag color="purple">#{value}</Tag> : '-' },
-    { title: '邮箱', dataIndex: 'email_address', ellipsis: true, render: (value: string) => value || '-' },
-    { title: '代理', dataIndex: 'proxy_url', ellipsis: true, render: (value: string) => value || '-' },
-    { title: '创建', width: 170, render: (_v: unknown, row: Job) => formatDateTime(row.created_at) },
-    { title: '耗时', width: 90, render: (_v: unknown, row: Job) => formatDuration(row.started_at, row.finished_at) },
-    {
-      title: '操作',
-      width: 110,
-      render: (_v: unknown, row: Job) => <Button size="small" onClick={() => setLogJobId(row.id)}>原始日志</Button>,
-    },
-  ]
-
   return (
-    <Space direction="vertical" style={{ width: '100%' }} size="middle">
-      <Row gutter={[12, 12]}>
-        <Col xs={24} sm={12} lg={6}>
-          <Card size="small">
-            <Descriptions column={1} size="small">
-              <Descriptions.Item label="总并发">{totals.totalConcurrency}</Descriptions.Item>
-              <Descriptions.Item label="运行中">{totals.totalInflight}</Descriptions.Item>
-            </Descriptions>
-          </Card>
-        </Col>
+    <PageScaffold
+      title="池子控制台"
+      description="每个 WorkPool 和 ResourcePool 都是独立卡片：看容量、看资源、进配置；不再用大表格堆所有字段。"
+      actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
+    >
+      <SummaryGrid>
+        <StatCard label="总并发" value={totals.totalConcurrency} hint="所有 WorkPool capacity" tone="primary" />
+        <StatCard label="运行中" value={totals.totalInflight} hint="当前 inflight jobs" tone={totals.totalInflight ? 'warning' : 'default'} />
         {JOB_STATUS_KEYS.map((key) => (
-          <Col xs={12} sm={8} lg={3} key={key}>
-            <Card size="small">
-              <Space direction="vertical" size={0}>
-                <Text type="secondary">{key}</Text>
-                <Text strong style={{ fontSize: 22 }}>{num(queue.counts?.[key])}</Text>
+          <StatCard key={key} label={key} value={num(queue.counts?.[key])} tone={key === 'failed' ? 'danger' : key === 'running' ? 'info' : 'default'} />
+        ))}
+      </SummaryGrid>
+
+      <ActionCard
+        title="WorkPool stages"
+        description="每个 stage 对应一个独立 worker pool；配置入口跟随卡片，不放到全局 settings。"
+        actions={<CardToolbar><Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新状态</Button></CardToolbar>}
+      />
+
+      <div className="entity-grid">
+        {stageRows.map((stage) => {
+          const concurrency = num(queue.concurrency?.[stage.name] ?? stage.default_concurrency)
+          const inflight = num(queue.inflight?.[stage.name])
+          const percent = concurrency ? Math.min(100, Math.round((inflight / concurrency) * 100)) : 0
+          const counts = jobCountsByStage[stage.name] || {}
+          return (
+            <EntityCard
+              key={stage.name}
+              tone={stageTone(stage)}
+              title={stageLabel(stage.name)}
+              subtitle={<Text code>{stage.name}</Text>}
+              status={<Tag color={stage.implemented ? 'green' : 'default'}>{stage.implemented ? 'implemented' : 'stub'}</Tag>}
+              badges={(
+                <Space size={4} wrap>
+                  <Tag>queued {counts.queued || 0}</Tag>
+                  <Tag color="processing">running {counts.running || 0}</Tag>
+                  <Tag color="red">failed {counts.failed || 0}</Tag>
+                </Space>
+              )}
+              actions={<Button size="small" icon={<SettingOutlined />} onClick={() => openConfig(WORKPOOL_SETTING_GROUPS[stage.name])}>配置</Button>}
+              footer={stage.description || 'stage worker pool'}
+            >
+              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                <KeyValueGrid>
+                  <KeyValue label="容量" value={`${inflight}/${concurrency}`} />
+                  <KeyValue label="Schema" value={<Space direction="vertical" size={0}><Text code>{stage.input_schema || '-'}</Text><Text code>{stage.output_schema || '-'}</Text></Space>} />
+                  <KeyValue label="必需资源" value={resourceTags(stage.requires_resources || [])} />
+                  <KeyValue label="可选资源" value={resourceTags(stage.optional_resources || [])} />
+                </KeyValueGrid>
+                <Progress percent={percent} size="small" showInfo={false} status={inflight >= concurrency && concurrency ? 'exception' : 'active'} />
               </Space>
-            </Card>
-          </Col>
-        ))}
-      </Row>
+            </EntityCard>
+          )
+        })}
+      </div>
 
-      <Card
-        title="Stage WorkPools"
-        extra={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
-      >
-        <Table rowKey="name" dataSource={stageRows} columns={stageColumns as never} loading={loading} pagination={false} />
-      </Card>
+      <ActionCard title="ResourcePools" description="资源池卡片展示资源余量与状态；资源数据仍在邮箱、代理、卡、PayPal 号码、短信项目等资源页面管理。" />
 
-      <Row gutter={[12, 12]}>
-        <Col xs={24} lg={12} xl={6}>
-          <ResourceCard
-            title="email_pool"
-            values={{
-              total: poolValue(emailPool, 'total'),
-              available: poolValue(emailPool, 'available'),
-              claimed: poolValue(emailPool, 'claimed'),
-              consumed: poolValue(emailPool, 'consumed'),
-              blacklist: poolValue(emailPool, 'blacklist'),
-            }}
-          />
-        </Col>
-        <Col xs={24} lg={12} xl={6}>
-          <ResourceCard
-            title="card_pool"
-            values={{
-              total: poolValue(cardPool, 'total'),
-              available: poolValue(cardPool, 'available'),
-              in_use: poolValue(cardPool, 'in_use'),
-              used: poolValue(cardPool, 'used'),
-              failed: poolValue(cardPool, 'failed'),
-              banned: poolValue(cardPool, 'banned'),
-            }}
-          />
-        </Col>
-        <Col xs={24} lg={12} xl={6}>
-          <ResourceCard
-            title="proxy_pool"
-            values={{
-              total: poolValue(proxyPool, 'total'),
-              enabled: poolValue(proxyPool, 'enabled'),
-              disabled: poolValue(proxyPool, 'disabled'),
-            }}
-          />
-        </Col>
-        <Col xs={24} lg={12} xl={6}>
-          <Card size="small" title="sms_pool">
-            <Descriptions column={1} size="small">
-              <Descriptions.Item label="total">{poolValue(smsPool, 'total')}</Descriptions.Item>
-              <Descriptions.Item label="enabled">{poolValue(smsPool, 'enabled')}</Descriptions.Item>
-            </Descriptions>
-            <Table
-              size="small"
-              rowKey="id"
-              dataSource={smsPool?.projects || []}
-              pagination={false}
-              columns={[
-                { title: '项目', dataIndex: 'name' },
-                { title: 'provider', dataIndex: 'provider', width: 100 },
-                { title: '状态', dataIndex: 'enabled', width: 80, render: (v: boolean) => <Tag color={v ? 'green' : 'default'}>{v ? 'on' : 'off'}</Tag> },
-              ] as never}
-            />
-          </Card>
-        </Col>
+      <div className="entity-grid">
+        <ResourceCard title="email_pool" tone="info" values={{ total: poolValue(emailPool, 'total'), available: poolValue(emailPool, 'available'), claimed: poolValue(emailPool, 'claimed'), consumed: poolValue(emailPool, 'consumed'), blacklist: poolValue(emailPool, 'blacklist') }} onConfig={() => openConfig(RESOURCEPOOL_SETTING_GROUPS.email_pool)} />
+        <ResourceCard title="card_pool" tone="warning" values={{ total: poolValue(cardPool, 'total'), available: poolValue(cardPool, 'available'), in_use: poolValue(cardPool, 'in_use'), used: poolValue(cardPool, 'used'), failed: poolValue(cardPool, 'failed'), banned: poolValue(cardPool, 'banned') }} onConfig={() => openConfig(RESOURCEPOOL_SETTING_GROUPS.card_pool)} />
+        <ResourceCard title="paypal_number_pool" tone="primary" values={{ total: poolValue(paypalNumberPool, 'total'), available: poolValue(paypalNumberPool, 'available'), in_use: poolValue(paypalNumberPool, 'in_use'), used: poolValue(paypalNumberPool, 'used'), failed: poolValue(paypalNumberPool, 'failed'), banned: poolValue(paypalNumberPool, 'banned') }} onConfig={() => openConfig(RESOURCEPOOL_SETTING_GROUPS.paypal_number_pool)} />
+        <ResourceCard title="proxy_pool" tone="success" values={{ total: poolValue(proxyPool, 'total'), enabled: poolValue(proxyPool, 'enabled'), disabled: poolValue(proxyPool, 'disabled') }} onConfig={() => openConfig(RESOURCEPOOL_SETTING_GROUPS.proxy_pool)} />
+        <EntityCard
+          title="sms_pool"
+          subtitle="multi-project sms provider routing"
+          tone="primary"
+          actions={<Button size="small" icon={<SettingOutlined />} onClick={() => openConfig(RESOURCEPOOL_SETTING_GROUPS.sms_pool)}>配置</Button>}
+          footer={`${smsPool?.projects?.length || 0} projects`}
+        >
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <KeyValueGrid>
+              <KeyValue label="total" value={poolValue(smsPool, 'total')} />
+              <KeyValue label="enabled" value={poolValue(smsPool, 'enabled')} />
+            </KeyValueGrid>
+            <div className="entity-list">
+              {(smsPool?.projects || []).map((project) => (
+                <div className="kv-row" key={project.id}>
+                  <Space align="center" style={{ width: '100%', justifyContent: 'space-between' }}>
+                    <Text strong>{project.name}</Text>
+                    <Tag color={project.enabled ? 'green' : 'default'}>{project.enabled ? 'on' : 'off'}</Tag>
+                  </Space>
+                  <Text type="secondary">{project.provider}</Text>
+                </div>
+              ))}
+              {!(smsPool?.projects || []).length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无短信项目" />}
+            </div>
+          </Space>
+        </EntityCard>
         {extraPools.map(([name, value]) => (
-          <Col xs={24} lg={12} key={name}>
-            <Card size="small" title={name}>
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{JSON.stringify(value, null, 2)}</pre>
-            </Card>
-          </Col>
+          <EntityCard key={name} title={name} subtitle="extra resource pool" tone="default">
+            <CodeSurface>{JSON.stringify(value, null, 2)}</CodeSurface>
+          </EntityCard>
         ))}
-      </Row>
+      </div>
 
-      <Card title="Recent Jobs">
-        <Table rowKey="id" dataSource={jobs} columns={jobColumns as never} loading={loading} pagination={{ pageSize: 20 }} />
-      </Card>
+      <ActionCard title="Recent Jobs" description="最近 job 以卡片展示，日志使用居中弹出卡片显示原始 transcript。" />
+      <EntityGrid
+        items={jobs}
+        page={jobsPage}
+        pageSize={12}
+        onPageChange={setJobsPage}
+        renderItem={(job) => (
+          <EntityCard
+            key={job.id}
+            title={`Job #${job.id}`}
+            subtitle={stageLabel(job.type)}
+            status={<StatusTag status={job.status} />}
+            badges={<LinkedIdBadges pipelineId={job.pipeline_id} accountId={job.account_id} paymentLinkId={job.payment_link_id} />}
+            actions={<Button size="small" onClick={() => setLogJobId(job.id)}>原始日志</Button>}
+            footer={formatDateTime(job.created_at)}
+          >
+            <KeyValueGrid>
+              <KeyValue label="邮箱" value={<CopyableText value={job.email_address || ''} label="邮箱" />} />
+              <KeyValue label="代理" value={<CopyableText value={job.proxy_url || ''} label="代理" />} />
+              <KeyValue label="耗时" value={formatDuration(job.started_at, job.finished_at)} />
+              <KeyValue label="Stage" value={<Text code>{job.type}</Text>} />
+            </KeyValueGrid>
+          </EntityCard>
+        )}
+      />
 
-      <Drawer
-        open={logJobId !== null}
-        onClose={() => setLogJobId(null)}
+      <PopupCard
+        open={!!configGroup}
+        onCancel={() => setConfigGroup(null)}
         width={760}
-        title={logJobId ? `Job #${logJobId} 原始日志` : ''}
+        title={configGroup?.title || ''}
+        footer={configGroup && configGroup.fields.length > 0 ? (
+          <Button type="primary" icon={<SaveOutlined />} loading={savingSettings} onClick={saveConfig}>保存</Button>
+        ) : null}
       >
+        {configGroup && (
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <ActionCard title="配置边界" description={configGroup.description} />
+            {configGroup.fields.length ? (
+              <Form form={configForm} layout="vertical">
+                <Row gutter={16}>
+                  {configGroup.fields.map((field) => (
+                    <Col key={field.key} xs={24} md={12}>
+                      <Form.Item label={field.label} name={field.key} valuePropName={field.type === 'switch' ? 'checked' : undefined}>
+                        {renderSettingControl(field)}
+                      </Form.Item>
+                    </Col>
+                  ))}
+                </Row>
+              </Form>
+            ) : (
+              <Empty description={configGroup.emptyText || '暂无配置项'} />
+            )}
+          </Space>
+        )}
+      </PopupCard>
+
+      <PopupCard open={logJobId !== null} onCancel={() => setLogJobId(null)} width={900} title={logJobId ? `Job #${logJobId} 原始日志` : ''} footer={null}>
         {logJobId !== null && <JobLogPanel jobId={logJobId} />}
-      </Drawer>
-    </Space>
+      </PopupCard>
+    </PageScaffold>
   )
 }
 
-function ResourceCard({ title, values }: { title: string; values: Record<string, number> }) {
+function ResourceCard({ title, values, onConfig, tone }: { title: string; values: Record<string, number>; onConfig?: () => void; tone?: 'default' | 'primary' | 'success' | 'warning' | 'danger' | 'info' }) {
   return (
-    <Card size="small" title={title}>
-      <Descriptions column={1} size="small">
+    <EntityCard title={title} subtitle="resource pool" tone={tone} actions={onConfig ? <Button size="small" icon={<SettingOutlined />} onClick={onConfig}>配置</Button> : null}>
+      <KeyValueGrid>
         {Object.entries(values).map(([key, value]) => (
-          <Descriptions.Item label={key} key={key}>{value}</Descriptions.Item>
+          <KeyValue label={key} value={value} key={key} />
         ))}
-      </Descriptions>
-    </Card>
+      </KeyValueGrid>
+    </EntityCard>
   )
 }

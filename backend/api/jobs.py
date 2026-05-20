@@ -13,7 +13,7 @@ import asyncio
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select as sa_select
 from sqlmodel import Session
 
@@ -30,6 +30,7 @@ from backend.core.constants import (
 from backend.core.db import engine, session_scope
 from backend.core.job_context import subscribe_job_events
 from backend.core.pipeline import (
+    DEFAULT_PRESET,
     PRESETS,
     cancel_pipeline,
     create_pipeline,
@@ -48,15 +49,12 @@ router = APIRouter()
 
 
 class CreatePipelineRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     preset: Optional[str] = None
     stages: Optional[list[str]] = None
     stop_after: Optional[str] = None
-    stage_inputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    resource_bindings: dict[str, dict[str, Any]] = Field(default_factory=dict)
     count: int = Field(default=1, ge=1, le=200)
-    proxy_id: Optional[int] = None
-    proxy_url: Optional[str] = None
-    concurrency: Optional[dict[str, int]] = None  # {stage_name: n} per-stage resize
 
 
 class JobEnqueueRequest(BaseModel):
@@ -94,36 +92,23 @@ def create_pipeline_endpoint(body: CreatePipelineRequest):
             detail=f"stop_after {body.stop_after!r} not in resolved stage list",
         )
 
-    if body.concurrency:
-        for stage_name, n in body.concurrency.items():
-            if stage_name not in STAGE_REGISTRY:
-                raise HTTPException(
-                    status_code=400, detail=f"unknown stage {stage_name!r}"
-                )
-            try:
-                get_pool().set_concurrency(stage_name, int(n))
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-
+    resolved_preset = body.preset or ("" if body.stages else DEFAULT_PRESET)
     pipeline_ids: list[int] = []
     for _ in range(body.count):
         pid = create_pipeline(
             stages=list(stages),
-            preset=body.preset or "",
+            preset=resolved_preset,
             stop_after=body.stop_after or "",
-            stage_inputs=dict(body.stage_inputs or {}),
-            resource_bindings=dict(body.resource_bindings or {}),
-            proxy_id=body.proxy_id,
-            proxy_url=body.proxy_url or "",
+            stage_inputs={},
+            resource_bindings={},
         )
         pipeline_ids.append(pid)
 
     return {
         "pipeline_ids": pipeline_ids,
         "stages": list(stages),
-        "preset": body.preset,
+        "preset": resolved_preset,
         "stop_after": body.stop_after or "",
-        "concurrency": get_pool().concurrency_map(),
     }
 
 

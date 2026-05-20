@@ -44,7 +44,11 @@ logger = logging.getLogger(__name__)
 
 # ---- presets ---------------------------------------------------------------
 
+FULL_CHAIN_STAGES: tuple[str, ...] = ("register", "payment_link", "payment", "oauth_codex", "rt_keepalive")
+DEFAULT_PRESET = "full_chain"
+
 PRESETS: dict[str, tuple[str, ...]] = {
+    DEFAULT_PRESET:               FULL_CHAIN_STAGES,
     "register_only":             ("register",),
     "register_with_codex_rt":    ("register", "oauth_codex"),
     "account_paid":              ("register", "payment_link", "payment"),
@@ -68,16 +72,15 @@ CARRY_OVER_KEYS: tuple[str, ...] = (
 # ---- creation --------------------------------------------------------------
 
 
-def resolve_stages(*, preset: str | None, stages: Iterable[str] | None) -> list[str]:
+def resolve_stages(*, preset: str | None = None, stages: Iterable[str] | None = None) -> list[str]:
     """Resolve `(preset, stages)` request inputs into a concrete stage list."""
     if stages is not None:
         result = [str(s).strip() for s in stages if str(s).strip()]
-    elif preset:
-        if preset not in PRESETS:
-            raise ValueError(f"unknown preset {preset!r}")
-        result = list(PRESETS[preset])
     else:
-        raise ValueError("either preset or stages must be provided")
+        preset_name = preset or DEFAULT_PRESET
+        if preset_name not in PRESETS:
+            raise ValueError(f"unknown preset {preset_name!r}")
+        result = list(PRESETS[preset_name])
 
     if not result:
         raise ValueError("stage list is empty")

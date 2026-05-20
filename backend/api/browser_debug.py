@@ -17,6 +17,8 @@ class OpenSessionRequest(BaseModel):
     target_url: str | None = None
     account_id: int | None = None
     payment_link_id: int | None = None
+    pipeline_id: int | None = None
+    job_id: int | None = None
     proxy_url: str | None = None
     browser_type: str = "camoufox"
     inject_cookies: bool = True
@@ -32,6 +34,8 @@ def open_session(body: OpenSessionRequest):
         target_url=body.target_url or "",
         account_id=body.account_id,
         payment_link_id=body.payment_link_id,
+        pipeline_id=body.pipeline_id,
+        job_id=body.job_id,
         proxy_url=body.proxy_url,
         browser_type=body.browser_type,
         inject_cookies=body.inject_cookies,

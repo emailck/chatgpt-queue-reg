@@ -48,7 +48,8 @@ def run(ctx: JobContext) -> None:
 
     payload = dict(ctx.input or {})
     extra_config = dict(payload.get("extra_config") or {})
-    merged_extra = {**settings.get_all(), **extra_config}
+    pool_config = _workpool_config("workpool.oauth_codex.")
+    merged_extra = {**settings.get_all(), **pool_config, **extra_config}
 
     with Session(engine) as s:
         account_row = s.get(ChatGPTAccount, account_id)
@@ -173,6 +174,14 @@ def run(ctx: JobContext) -> None:
 
 
 # ---- helpers ---------------------------------------------------------------
+
+
+def _workpool_config(prefix: str) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in settings.get_all().items():
+        if key.startswith(prefix):
+            out[key[len(prefix):]] = value
+    return out
 
 
 def _resolve_email_service(extra_config: dict[str, Any]):

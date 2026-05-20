@@ -45,7 +45,12 @@ def run(ctx: JobContext) -> None:
     requested_password = str(payload.get("password") or "").strip()
     proxy_url = ctx.proxy_url or str(payload.get("proxy_url") or "").strip()
     proxy_id = ctx.proxy_id or int(payload.get("proxy_id") or 0) or None
-    proxy_region = str(payload.get("proxy_region") or payload.get("region") or "").strip()
+    proxy_region = str(
+        payload.get("proxy_region")
+        or payload.get("region")
+        or settings.get("workpool.register.proxy_region", "")
+        or ""
+    ).strip()
     if not proxy_url:
         proxy_resource = ctx.acquire(
             "proxy_pool",
@@ -62,7 +67,12 @@ def run(ctx: JobContext) -> None:
         raise RuntimeError("register stage requires a bound proxy_id and proxy_url")
     ctx.attach_proxy(proxy_id=proxy_id, proxy_url=proxy_url)
     extra_config = dict(payload.get("extra_config") or {})
-    also_record_to_at_pool = bool(ctx.input.get("also_record_to_at_pool", False))
+    also_record_to_at_pool = bool(
+        ctx.input.get(
+            "also_record_to_at_pool",
+            settings.get_bool("workpool.register.also_record_to_at_pool", False),
+        )
+    )
 
     # Soft validation up front — the engine repeats it deeper, but failing
     # fast keeps the queue clean.

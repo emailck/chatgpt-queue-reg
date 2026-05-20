@@ -1,52 +1,76 @@
 import { theme } from 'antd'
 
-const darkTheme = {
-  token: {
-    colorPrimary: '#6366f1',
-    colorBgBase: '#1c1f2e',
-    colorTextBase: '#f1f5f9',
-    colorBgContainer: '#1c1f2e',
-    colorBgElevated: '#252836',
-    colorBorder: 'rgba(255,255,255,0.15)',
-    borderRadius: 8,
-    colorText: '#f1f5f9',
-    colorTextSecondary: '#b0bcd4',
-    colorTextTertiary: '#7a8ba3',
-    colorBgLayout: '#13151e',
-    colorBgSpotlight: 'rgba(99,102,241,0.2)',
-  },
-  components: {
-    Layout: {
-      siderBg: '#1c1f2e',
-      triggerBg: '#1c1f2e',
-      triggerColor: '#f1f5f9',
-    },
-  },
-  algorithm: theme.darkAlgorithm,
-}
-
 const lightTheme = {
   token: {
     colorPrimary: '#4f46e5',
-    colorBgBase: '#ffffff',
+    colorPrimaryHover: '#4338ca',
+    colorPrimaryActive: '#3730a3',
+    colorBgBase: '#f8fbff',
     colorTextBase: '#0f172a',
     colorBgContainer: '#ffffff',
     colorBgElevated: '#ffffff',
-    colorBorder: 'rgba(0,0,0,0.1)',
-    borderRadius: 8,
+    colorBorder: '#dbe5ef',
+    colorBorderSecondary: '#e8eef6',
+    borderRadius: 14,
     colorText: '#0f172a',
     colorTextSecondary: '#475569',
     colorTextTertiary: '#94a3b8',
-    colorBgLayout: '#f8fafc',
+    colorBgLayout: '#eef3f8',
+    colorFillAlter: '#f8fafc',
+    colorFillQuaternary: '#f8fafc',
+    boxShadowTertiary: '0 18px 45px rgba(15, 23, 42, 0.08)',
   },
   components: {
     Layout: {
+      bodyBg: '#eef3f8',
+      headerBg: '#ffffff',
       siderBg: '#ffffff',
       triggerBg: '#ffffff',
       triggerColor: '#0f172a',
+    },
+    Card: {
+      colorBgContainer: '#ffffff',
+      colorBorderSecondary: '#dbe5ef',
+      borderRadiusLG: 20,
+      boxShadowTertiary: '0 18px 45px rgba(15, 23, 42, 0.08)',
+      paddingLG: 24,
+    },
+    Table: {
+      headerBg: '#f8fafc',
+      headerColor: '#334155',
+      borderColor: '#dbe5ef',
+      rowHoverBg: '#f8fafc',
+      colorBgContainer: '#ffffff',
+    },
+    Menu: {
+      itemBg: 'transparent',
+      itemColor: '#334155',
+      itemHoverBg: '#f8fafc',
+      itemHoverColor: '#1e293b',
+      itemSelectedBg: '#eef2ff',
+      itemSelectedColor: '#4338ca',
+      itemBorderRadius: 12,
+    },
+    Button: {
+      borderRadius: 12,
+      controlHeight: 36,
+    },
+    Tag: {
+      borderRadiusSM: 999,
+    },
+    Modal: {
+      contentBg: '#ffffff',
+      headerBg: '#ffffff',
+      borderRadiusLG: 20,
+    },
+    Descriptions: {
+      labelBg: '#f8fafc',
+    },
+    Form: {
+      labelColor: '#334155',
     },
   },
   algorithm: theme.defaultAlgorithm,
 }
 
-export { darkTheme, lightTheme }
+export { lightTheme }

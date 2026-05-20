@@ -149,18 +149,20 @@ export function JobLogPanel({ jobId, onTerminal }: JobLogPanelProps) {
       </Button>
       <pre
         ref={viewportRef}
+        className="log-panel"
         style={{
           maxHeight: 560,
           overflowY: 'auto',
           margin: 0,
-          padding: 12,
-          borderRadius: 8,
-          background: 'rgba(0,0,0,0.35)',
-          border: '1px solid rgba(255,255,255,0.08)',
-          color: '#d6e4ff',
+          padding: 14,
+          borderRadius: 12,
+          background: '#f8fafc',
+          border: '1px solid #e2e8f0',
+          color: '#0f172a',
+          boxShadow: 'inset 0 1px 2px rgba(15, 23, 42, 0.04)',
           fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
           fontSize: 12,
-          lineHeight: 1.55,
+          lineHeight: 1.6,
           whiteSpace: 'pre-wrap',
           wordBreak: 'break-word',
         }}

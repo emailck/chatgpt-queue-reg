@@ -70,7 +70,7 @@ class PaymentLinkOutput(StageOutput):
 class PaymentInput(StageInput):
     account_id: Optional[int] = None
     payment_link_id: int
-    payment_proxy_region: str
+    payment_proxy_region: str = ""
     proxy_region: str = ""
     region: str = ""
     card_project: str = "default"

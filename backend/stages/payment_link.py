@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from sqlmodel import Session
 
+from backend.core.settings import settings
+
 from backend.core.constants import (
     ACCOUNT_STATUS_PAYMENT_LINK_READY,
     PAYMENT_LINK_STATUS_CREATED,
@@ -38,15 +40,15 @@ def run(ctx: JobContext) -> None:
         raise RuntimeError("payment_link stage requires account_id")
     ctx.attach_account(account_id)
 
-    plan = str(ctx.input.get("plan") or "team").strip().lower()
+    plan = str(ctx.input.get("plan") or settings.get("workpool.payment_link.plan", "plus") or "plus").strip().lower()
     if plan not in {"team", "plus"}:
         raise RuntimeError(f"unsupported plan: {plan}")
 
-    workspace_name = str(ctx.input.get("workspace_name") or "MyWorkspace")
-    price_interval = str(ctx.input.get("price_interval") or "month")
-    seat_quantity = int(ctx.input.get("seat_quantity") or 2)
-    country = str(ctx.input.get("country") or ("ID" if plan == "plus" else "US"))
-    currency_override = ctx.input.get("currency")
+    workspace_name = str(ctx.input.get("workspace_name") or settings.get("workpool.payment_link.workspace_name", "MyWorkspace") or "MyWorkspace")
+    price_interval = str(ctx.input.get("price_interval") or settings.get("workpool.payment_link.price_interval", "month") or "month")
+    seat_quantity = int(ctx.input.get("seat_quantity") or settings.get_int("workpool.payment_link.seat_quantity", 2) or 2)
+    country = str(ctx.input.get("country") or settings.get("workpool.payment_link.country", "") or ("ID" if plan == "plus" else "US"))
+    currency_override = ctx.input.get("currency") or settings.get("workpool.payment_link.currency", "") or None
 
     ctx.log(
         f"starting payment-link stage ({plan})",

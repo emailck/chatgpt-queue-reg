@@ -1,38 +1,50 @@
-import { useCallback, useEffect, useState } from 'react'
-import {
-  Button,
-  Card,
-  Checkbox,
-  Col,
-  Descriptions,
-  Drawer,
-  Form,
-  InputNumber,
-  Modal,
-  Popconfirm,
-  Progress,
-  Row,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Typography,
-  message,
-  Input,
-} from 'antd'
-import { PlusOutlined, ReloadOutlined, DeleteOutlined } from '@ant-design/icons'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { FormInstance } from 'antd'
+import { Button, Col, Form, InputNumber, Popconfirm, Progress, Row, Select, Space, Tag, Typography, message } from 'antd'
+import { BugOutlined, DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import { JobLogPanel } from '@/components/JobLogPanel'
 import { StatusTag } from '@/components/StatusTag'
+import { ActionCard, CardToolbar, EntityCard, EntityGrid, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
+import { CopyableText, ErrorCallout, LinkedIdBadges, ProgressLine, SelectionSummary } from '@/components/ui/DomainBits'
 import { apiFetch, formatDateTime, formatDuration } from '@/lib/api'
 import { stageLabel } from '@/lib/contracts'
 
 const { Text } = Typography
 
+const FULL_CHAIN_PRESET = 'full_chain'
+const PIPELINE_STATUS_KEYS = ['queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted']
+
+const STOP_OPTIONS = [
+  { value: '', label: '跑完整链路' },
+  { value: 'register', label: '注册后停止' },
+  { value: 'payment_link', label: '长链后停止' },
+  { value: 'payment', label: '付款模块后停止' },
+  { value: 'oauth_codex', label: 'OAuth Codex 后停止' },
+  { value: 'rt_keepalive', label: 'RT 保活后停止' },
+]
+
+function pipelinePresetLabel(preset: string): string {
+  return preset === FULL_CHAIN_PRESET ? '完整链路' : preset || '-'
+}
+
+function stopAfterLabel(stopAfter?: string | null): string {
+  return stopAfter ? stageLabel(stopAfter) : '跑完全部'
+}
+
+function statusTone(status: string): 'default' | 'primary' | 'success' | 'warning' | 'danger' | 'info' {
+  if (status === 'succeeded') return 'success'
+  if (status === 'failed' || status === 'interrupted') return 'danger'
+  if (status === 'running') return 'info'
+  if (status === 'queued') return 'warning'
+  return 'default'
+}
+
 interface Pipeline {
   id: number
   preset: string
   stages: string[]
+  stop_after: string
   status: string
   current_stage: string
   total_steps: number
@@ -75,21 +87,11 @@ export default function Pipelines() {
   const [detail, setDetail] = useState<PipelineDetail | null>(null)
   const [logJobId, setLogJobId] = useState<number | null>(null)
   const [selected, setSelected] = useState<React.Key[]>([])
+  const [page, setPage] = useState(1)
 
-  const openCreate = useCallback(async () => {
-    // Always wipe leftover values from previous opens.
+  const openCreate = useCallback(() => {
     form.resetFields()
     setCreateOpen(true)
-    // Prefill the concurrency field with the current worker_concurrency.
-    try {
-      const settings = await apiFetch<Record<string, string>>('/settings')
-      const current = Number(settings.worker_concurrency || 3)
-      if (Number.isFinite(current) && current >= 1) {
-        form.setFieldsValue({ concurrency: current })
-      }
-    } catch {
-      // ignore
-    }
   }, [form])
 
   const reload = useCallback(async () => {
@@ -112,6 +114,12 @@ export default function Pipelines() {
       clearInterval(t)
     }
   }, [reload])
+
+  const counts = useMemo(() => {
+    const out: Record<string, number> = {}
+    for (const row of pipelines) out[row.status] = (out[row.status] || 0) + 1
+    return out
+  }, [pipelines])
 
   const openDetail = useCallback(async (id: number) => {
     try {
@@ -164,58 +172,46 @@ export default function Pipelines() {
     }
   }, [reload, selected])
 
-  const submitCreate = async () => {
-    const values = await form.validateFields()
-    const mode = values.mode || 'free'
-    const registrationMode = values.registration_mode || 'access_token_only'
-    const concurrency = values.concurrency ? Number(values.concurrency) : undefined
-    const specifiedEmail = values.use_specified_email ? String(values.email || '').trim() : ''
-    const phoneExtraConfig = values.phone_verification_enabled
-      ? {
-          chatgpt_registration_mode: registrationMode,
-          phone_verification_enabled: '1',
-          phone_verification_provider: values.phone_verification_provider || 'smsbower',
-        }
-      : { chatgpt_registration_mode: registrationMode, phone_verification_enabled: '0' }
-    const plan = values.plan || 'plus'
-    const paymentProxyRegion = String(values.payment_proxy_region || '').trim()
-    const registerInput = {
-      email: specifiedEmail || undefined,
-      fixed_email: specifiedEmail || undefined,
-      password: values.password || undefined,
-      registration_mode: registrationMode,
-      also_record_to_at_pool: mode === 'free',
-      extra_config: phoneExtraConfig,
-    }
-    const body = {
-      count: Number(values.count || 1),
-      preset: mode === 'free'
-        ? (registrationMode === 'refresh_token' ? 'register_with_codex_rt' : 'register_only')
-        : (registrationMode === 'refresh_token' ? 'account_paid_with_codex_rt' : 'link_only'),
-      proxy_url: values.proxy_url || undefined,
-      concurrency: concurrency ? { register: concurrency } : undefined,
-      stage_inputs: {
-        register: registerInput,
-        payment_link: {
-          plan,
-          workspace_name: values.workspace_name || 'MyWorkspace',
-          price_interval: values.price_interval || 'month',
-          seat_quantity: Number(values.seat_quantity || 2),
-          country: values.country || (plan === 'plus' ? 'ID' : 'US'),
-          currency: values.currency || undefined,
-        },
-        payment: paymentProxyRegion ? { payment_proxy_region: paymentProxyRegion } : undefined,
-      },
+  const openPipelineDebug = useCallback(async (pipeline: Pipeline) => {
+    if (!pipeline.account_id && !pipeline.payment_link_id) {
+      message.warning('该 pipeline 还没有账号或长链，无法注入身份调试')
+      return
     }
     try {
-      console.info('create pipeline payload', { mode, registration_mode: registrationMode, body })
-      const resp = await apiFetch<{ pipeline_ids: number[]; concurrency?: Record<string, number> }>(
+      const resp = await apiFetch<{ session_id: number; har_path: string }>('/browser-debug/open', {
+        method: 'POST',
+        body: JSON.stringify({
+          account_id: pipeline.account_id,
+          payment_link_id: pipeline.payment_link_id,
+          pipeline_id: pipeline.id,
+          browser_type: 'camoufox',
+          inject_cookies: true,
+          inject_local_storage: true,
+          inject_fingerprint: true,
+          record_har: true,
+        }),
+      })
+      message.success(`Camoufox session #${resp.session_id} 已打开${resp.har_path ? `，HAR: ${resp.har_path}` : ''}`)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '调起 Camoufox 失败')
+    }
+  }, [])
+
+  const submitCreate = async () => {
+    const values = await form.validateFields()
+    const stopAfter = String(values.stop_after || '')
+    const body = {
+      count: Number(values.count || 1),
+      preset: FULL_CHAIN_PRESET,
+      stop_after: stopAfter || undefined,
+    }
+
+    try {
+      const resp = await apiFetch<{ pipeline_ids: number[] }>(
         '/pipelines',
         { method: 'POST', body: JSON.stringify(body) },
       )
-      message.success(
-        `已创建 ${resp.pipeline_ids.length} 条 pipeline${resp.concurrency?.register ? `，register 并发=${resp.concurrency.register}` : ''}`,
-      )
+      message.success(`已创建 ${resp.pipeline_ids.length} 条完整链路 pipeline`)
       setCreateOpen(false)
       form.resetFields()
       reload()
@@ -224,345 +220,185 @@ export default function Pipelines() {
     }
   }
 
-  const columns = [
-    { title: 'ID', dataIndex: 'id', width: 60 },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      width: 130,
-      render: (value: string) => <StatusTag status={value} />,
-    },
-    {
-      title: '当前 Stage',
-      dataIndex: 'current_stage',
-      width: 180,
-      render: (value: string, row: Pipeline) => (
-        <Space direction="vertical" size={2}>
-          <Text>{stageLabel(value)}</Text>
-          <Progress
-            percent={Math.round((row.completed_steps / Math.max(row.total_steps, 1)) * 100)}
-            size="small"
-            format={() => `${row.completed_steps}/${row.total_steps}`}
-            status={row.status === 'failed' ? 'exception' : row.status === 'succeeded' ? 'success' : 'active'}
-          />
-        </Space>
-      ),
-    },
-    {
-      title: '账号',
-      dataIndex: 'account_id',
-      width: 80,
-      render: (value: number | null) =>
-        value ? <Tag color="cyan">#{value}</Tag> : <Text type="secondary">-</Text>,
-    },
-    {
-      title: '长链',
-      dataIndex: 'payment_link_id',
-      width: 80,
-      render: (value: number | null) =>
-        value ? <Tag color="purple">#{value}</Tag> : <Text type="secondary">-</Text>,
-    },
-    { title: '代理', dataIndex: 'proxy_url', ellipsis: true },
-    {
-      title: '耗时',
-      width: 100,
-      render: (_v: unknown, row: Pipeline) =>
-        formatDuration(row.created_at, row.finished_at),
-    },
-    {
-      title: '错误',
-      dataIndex: 'error',
-      ellipsis: true,
-      render: (value: string) => (value ? <Text type="danger">{value}</Text> : <Text type="secondary">-</Text>),
-    },
-    {
-      title: '操作',
-      width: 260,
-      render: (_v: unknown, row: Pipeline) => (
-        <Space size={4}>
-          <Button size="small" onClick={() => openDetail(row.id)}>详情</Button>
-          {(row.status === 'queued' || row.status === 'running') && (
-            <Popconfirm title="取消该 pipeline?" onConfirm={() => cancelPipeline(row.id)}>
-              <Button size="small" danger>取消</Button>
-            </Popconfirm>
-          )}
-          {row.status !== 'queued' && row.status !== 'running' && (
-            <Popconfirm title="删除该 pipeline?" onConfirm={() => deletePipeline(row.id)}>
-              <Button size="small" danger>删除</Button>
-            </Popconfirm>
-          )}
-        </Space>
-      ),
-    },
-  ] as const
+  const toggleSelected = (id: number, checked: boolean) => {
+    setSelected((prev) => checked ? [...prev, id] : prev.filter((item) => Number(item) !== id))
+  }
 
   return (
-    <>
-      <Card>
-        <Row justify="space-between" style={{ marginBottom: 12 }}>
-          <Col>
-            <Space wrap>
-              <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-                新建账号 pipeline
-              </Button>
-              <Button icon={<ReloadOutlined />} onClick={reload}>刷新</Button>
-              <Popconfirm
-                title={`确认删除选中的 ${selected.length} 条?（运行/排队中将跳过）`}
-                onConfirm={batchDelete}
-                disabled={!selected.length}
-              >
-                <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>
-                  批量删除（{selected.length}）
-                </Button>
-              </Popconfirm>
+    <PageScaffold
+      title="任务队列"
+      description="默认创建完整链路 register → payment_link → payment → oauth_codex → rt_keepalive，也可以在任一模块边界停止。"
+      actions={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建完整链路</Button>}
+    >
+      <SummaryGrid>
+        <StatCard label="Pipeline" value={pipelines.length} hint="最近 200 条" tone="primary" />
+        {PIPELINE_STATUS_KEYS.map((key) => (
+          <StatCard key={key} label={key} value={counts[key] || 0} tone={key === 'failed' ? 'danger' : key === 'running' ? 'info' : key === 'succeeded' ? 'success' : 'default'} />
+        ))}
+        <StatCard label="已选择" value={selected.length} hint="批量删除会跳过运行中" tone={selected.length ? 'warning' : 'default'} />
+      </SummaryGrid>
+
+      <ActionCard
+        title="链路操作"
+        description="任务创建只表达数量、完整链路和停止点；代理、接码、支付等参数在各 WorkPool / ResourcePool 卡片配置。"
+        actions={(
+          <CardToolbar>
+            <SelectionSummary count={selected.length} />
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>
+            <Popconfirm title={`确认删除选中的 ${selected.length} 条?（运行/排队中将跳过）`} onConfirm={batchDelete} disabled={!selected.length}>
+              <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>批量删除</Button>
+            </Popconfirm>
+          </CardToolbar>
+        )}
+      />
+
+      <EntityGrid
+        items={pipelines}
+        page={page}
+        pageSize={18}
+        onPageChange={setPage}
+        renderItem={(pipeline) => (
+          <EntityCard
+            key={pipeline.id}
+            title={`Pipeline #${pipeline.id}`}
+            subtitle={`${pipelinePresetLabel(pipeline.preset)} / 停止点：${stopAfterLabel(pipeline.stop_after)}`}
+            status={<StatusTag status={pipeline.status} />}
+            tone={statusTone(pipeline.status)}
+            selected={selected.includes(pipeline.id)}
+            onSelect={(checked) => toggleSelected(pipeline.id, checked)}
+            badges={<LinkedIdBadges accountId={pipeline.account_id} paymentLinkId={pipeline.payment_link_id} />}
+            footer={formatDateTime(pipeline.created_at)}
+            actions={(
+              <>
+                <Button size="small" onClick={() => openDetail(pipeline.id)}>详情</Button>
+                <Button size="small" icon={<BugOutlined />} disabled={!pipeline.account_id && !pipeline.payment_link_id} onClick={() => openPipelineDebug(pipeline)}>抓 HAR</Button>
+                {(pipeline.status === 'queued' || pipeline.status === 'running') ? (
+                  <Popconfirm title="取消该 pipeline?" onConfirm={() => cancelPipeline(pipeline.id)}>
+                    <Button size="small" danger>取消</Button>
+                  </Popconfirm>
+                ) : (
+                  <Popconfirm title="删除该 pipeline?" onConfirm={() => deletePipeline(pipeline.id)}>
+                    <Button size="small" danger>删除</Button>
+                  </Popconfirm>
+                )}
+              </>
+            )}
+          >
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Progress
+                percent={Math.round((pipeline.completed_steps / Math.max(pipeline.total_steps, 1)) * 100)}
+                size="small"
+                format={() => `${pipeline.completed_steps}/${pipeline.total_steps}`}
+                status={pipeline.status === 'failed' ? 'exception' : pipeline.status === 'succeeded' ? 'success' : 'active'}
+              />
+              <KeyValueGrid>
+                <KeyValue label="当前 Stage" value={<Text>{stageLabel(pipeline.current_stage)}</Text>} />
+                <KeyValue label="耗时" value={formatDuration(pipeline.created_at, pipeline.finished_at)} />
+                <KeyValue label="代理" value={<CopyableText value={pipeline.proxy_url} label="代理" />} />
+                <KeyValue label="更新" value={formatDateTime(pipeline.updated_at)} />
+              </KeyValueGrid>
+              <ErrorCallout error={pipeline.error} />
             </Space>
-          </Col>
-        </Row>
-        <Table
-          rowKey="id"
-          dataSource={pipelines}
-          columns={columns as never}
-          loading={loading}
-          pagination={{ pageSize: 20 }}
-          rowSelection={{
-            selectedRowKeys: selected,
-            onChange: setSelected,
-          }}
-        />
-      </Card>
+          </EntityCard>
+        )}
+      />
 
-      <Modal
-        open={createOpen}
-        onCancel={() => setCreateOpen(false)}
-        title="创建 ChatGPT 账号 pipeline"
-        onOk={submitCreate}
-        okText="创建"
-      >
+      <PopupCard open={createOpen} onCancel={() => setCreateOpen(false)} title="创建完整链路 pipeline" onOk={submitCreate} okText="创建" width={560}>
         <CreateForm form={form} />
-      </Modal>
+      </PopupCard>
 
-      <Drawer
+      <PopupCard
         open={!!detail}
-        onClose={() => setDetail(null)}
-        width={760}
+        onCancel={() => setDetail(null)}
         title={detail ? `Pipeline #${detail.pipeline.id}` : ''}
+        width={980}
+        footer={null}
+        className="popup-card-wide"
       >
         {detail && (
-          <Space direction="vertical" style={{ width: '100%' }} size={16}>
-            <Descriptions column={2} size="small" bordered>
-              <Descriptions.Item label="状态"><StatusTag status={detail.pipeline.status} /></Descriptions.Item>
-              <Descriptions.Item label="当前 Stage">{stageLabel(detail.pipeline.current_stage)}</Descriptions.Item>
-              <Descriptions.Item label="Stage Chain" span={2}>
-                <Space size={4} wrap>
-                  {detail.pipeline.stages.map((stage) => (
-                    <Tag key={stage} color={stage === detail.pipeline.current_stage ? 'processing' : 'default'}>{stageLabel(stage)} <Text type="secondary">{stage}</Text></Tag>
-                  ))}
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="账号 ID">{detail.pipeline.account_id || '-'}</Descriptions.Item>
-              <Descriptions.Item label="长链 ID">{detail.pipeline.payment_link_id || '-'}</Descriptions.Item>
-              <Descriptions.Item label="创建时间">{formatDateTime(detail.pipeline.created_at)}</Descriptions.Item>
-              <Descriptions.Item label="完成时间">{formatDateTime(detail.pipeline.finished_at)}</Descriptions.Item>
-              <Descriptions.Item label="代理" span={2}>{detail.pipeline.proxy_url || '-'}</Descriptions.Item>
-              {detail.pipeline.error && (
-                <Descriptions.Item label="错误" span={2}>
-                  <Text type="danger">{detail.pipeline.error}</Text>
-                </Descriptions.Item>
-              )}
-            </Descriptions>
-            <Card size="small" title="子任务">
-              <Table
-                size="small"
-                rowKey="id"
-                dataSource={detail.jobs}
-                pagination={false}
-                columns={[
-                  { title: 'ID', dataIndex: 'id', width: 60 },
-                  { title: 'Stage', dataIndex: 'type', render: (value: string) => <Space direction="vertical" size={0}><Text>{stageLabel(value)}</Text><Text type="secondary" code>{value}</Text></Space> },
-                  { title: '状态', dataIndex: 'status', render: (s: string) => <StatusTag status={s} /> },
-                  { title: '尝试', render: (_v: unknown, row: Job) => `${row.attempt}/${row.max_attempts}` },
-                  { title: '耗时', render: (_v: unknown, row: Job) => formatDuration(row.started_at, row.finished_at) },
-                  {
-                    title: '操作',
-                    width: 100,
-                    render: (_v: unknown, row: Job) => (
-                      <Button size="small" onClick={() => setLogJobId(row.id)}>原始日志</Button>
-                    ),
-                  },
-                ] as never}
-              />
-            </Card>
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <ActionCard
+              title="Pipeline 详情"
+              description={detail.pipeline.status === 'succeeded' && detail.pipeline.stop_after ? `已停在 ${stageLabel(detail.pipeline.stop_after)} 模块边界` : stopAfterLabel(detail.pipeline.stop_after)}
+              actions={<Button size="small" icon={<BugOutlined />} disabled={!detail.pipeline.account_id && !detail.pipeline.payment_link_id} onClick={() => openPipelineDebug(detail.pipeline)}>Camoufox 抓 HAR</Button>}
+            />
+            <SummaryGrid>
+              <StatCard label="状态" value={<StatusTag status={detail.pipeline.status} />} tone={statusTone(detail.pipeline.status)} />
+              <StatCard label="当前 Stage" value={stageLabel(detail.pipeline.current_stage)} hint={detail.pipeline.current_stage} tone="info" />
+              <StatCard label="进度" value={`${detail.pipeline.completed_steps}/${detail.pipeline.total_steps}`} tone="primary" />
+              <StatCard label="耗时" value={formatDuration(detail.pipeline.created_at, detail.pipeline.finished_at)} />
+            </SummaryGrid>
+            <KeyValueGrid>
+              <KeyValue label="账号" value={detail.pipeline.account_id || '-'} />
+              <KeyValue label="长链" value={detail.pipeline.payment_link_id || '-'} />
+              <KeyValue label="代理" value={<CopyableText value={detail.pipeline.proxy_url} label="代理" />} />
+              <KeyValue label="完成时间" value={formatDateTime(detail.pipeline.finished_at)} />
+            </KeyValueGrid>
+            <Space size={4} wrap>
+              {detail.pipeline.stages.map((stage) => (
+                <Tag key={stage} color={stage === detail.pipeline.current_stage ? 'processing' : 'default'}>{stageLabel(stage)} <Text type="secondary">{stage}</Text></Tag>
+              ))}
+            </Space>
+            <ErrorCallout error={detail.pipeline.error} />
+            <div className="entity-grid">
+              {detail.jobs.map((job) => (
+                <EntityCard
+                  key={job.id}
+                  title={`Job #${job.id}`}
+                  subtitle={<Text code>{job.type}</Text>}
+                  status={<StatusTag status={job.status} />}
+                  tone={statusTone(job.status)}
+                  footer={formatDateTime(job.created_at)}
+                  actions={<Button size="small" onClick={() => setLogJobId(job.id)}>原始日志</Button>}
+                >
+                  <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                    <ProgressLine current={job.attempt} total={job.max_attempts} status={job.status === 'failed' ? 'exception' : job.status === 'succeeded' ? 'success' : 'active'} />
+                    <KeyValueGrid>
+                      <KeyValue label="Stage" value={stageLabel(job.type)} />
+                      <KeyValue label="耗时" value={formatDuration(job.started_at, job.finished_at)} />
+                    </KeyValueGrid>
+                    <ErrorCallout error={job.error} />
+                  </Space>
+                </EntityCard>
+              ))}
+            </div>
           </Space>
         )}
-      </Drawer>
+      </PopupCard>
 
-      <Drawer
-        open={logJobId !== null}
-        onClose={() => setLogJobId(null)}
-        width={760}
-        title={logJobId ? `Job #${logJobId} 原始日志` : ''}
-      >
+      <PopupCard open={logJobId !== null} onCancel={() => setLogJobId(null)} title={logJobId ? `Job #${logJobId} 原始日志` : ''} width={900} footer={null}>
         {logJobId !== null && <JobLogPanel jobId={logJobId} />}
-      </Drawer>
-    </>
+      </PopupCard>
+    </PageScaffold>
   )
 }
 
-
-import type { FormInstance } from 'antd'
-
 function CreateForm({ form }: { form: FormInstance }) {
-  const mode: string = (Form.useWatch('mode', form) as string) || 'free'
-  const plan: string = (Form.useWatch('plan', form) as string) || 'plus'
-  const useSpecifiedEmail = !!Form.useWatch('use_specified_email', form)
-  const phoneVerificationEnabled = !!Form.useWatch('phone_verification_enabled', form)
   return (
     <Form
       form={form}
       layout="vertical"
       initialValues={{
         count: 1,
-        concurrency: 3,
-        mode: 'free',
-        registration_mode: 'access_token_only',
-        phone_verification_enabled: false,
-        phone_verification_provider: 'smsbower',
-        plan: 'plus',
-        country: 'ID',
-        seat_quantity: 2,
-        price_interval: 'month',
-        workspace_name: 'MyWorkspace',
-        use_specified_email: false,
-        payment_proxy_region: 'US',
+        stop_after: '',
       }}
       autoComplete="off"
     >
-      <Row gutter={12}>
+      <Row gutter={16}>
         <Col span={12}>
           <Form.Item label="数量" name="count" rules={[{ required: true }]}>
             <InputNumber min={1} max={200} style={{ width: '100%' }} />
           </Form.Item>
         </Col>
         <Col span={12}>
-          <Form.Item
-            label="注册 WorkPool 并发"
-            name="concurrency"
-            tooltip="只调整 register stage 的并发；其他 WorkPool 状态在池子页面查看"
-          >
-            <InputNumber min={1} max={64} style={{ width: '100%' }} />
+          <Form.Item label="链路">
+            <Tag color="blue">完整链路</Tag>
           </Form.Item>
         </Col>
       </Row>
-      <Form.Item label="模式" name="mode">
-        <Select
-          options={[
-            { value: 'free', label: 'Free（单注册，落入 AT 号池）' },
-            { value: 'subscription', label: '订阅（注册 + 获取支付长链）' },
-          ]}
-        />
+      <Form.Item label="运行到哪一步停止" name="stop_after" tooltip="模块参数在各 WorkPool / ResourcePool 配置里维护">
+        <Select options={STOP_OPTIONS} />
       </Form.Item>
-
-      <Form.Item label="是否获取 RT" name="registration_mode">
-        <Select
-          options={[
-            { value: 'access_token_only', label: '不获取 RT（只拿 access_token / session_token）' },
-            { value: 'refresh_token', label: '获取 RT（注册后追加 OAuth refresh_token）' },
-          ]}
-        />
-      </Form.Item>
-
-      <Form.Item name="phone_verification_enabled" valuePropName="checked">
-        <Checkbox>开启 add-phone 手机接码（默认关闭，仅遇到手机验证时使用）</Checkbox>
-      </Form.Item>
-      {phoneVerificationEnabled && (
-        <Form.Item label="接码平台" name="phone_verification_provider">
-          <Select
-            options={[
-              { value: 'smsbower', label: 'SmsBower' },
-              { value: 'fivesim', label: '5SIM' },
-              { value: 'smsgiare', label: 'SmsGiaRe' },
-            ]}
-          />
-        </Form.Item>
-      )}
-
-      {mode === 'subscription' && (
-        <>
-          <Form.Item label="支付套餐" name="plan">
-            <Select
-              options={[
-                { value: 'plus', label: 'Plus Hosted（IDR / GoPay 通道）— 默认' },
-                { value: 'team', label: 'Team Hosted（promo: STRIPEATLASGPT4BIZ050126）' },
-              ]}
-              onChange={(next) => {
-                if (next === 'plus') form.setFieldsValue({ country: 'ID' })
-                else form.setFieldsValue({ country: 'US' })
-              }}
-            />
-          </Form.Item>
-          <Form.Item
-            label="支付代理 Region"
-            name="payment_proxy_region"
-            rules={[{ required: true, message: '请输入支付代理 region' }]}
-            tooltip="payment stage 会按该 region 从 proxy_pool 选择不同于账号注册代理的 proxy"
-          >
-            <Input placeholder="例如 US / ID" />
-          </Form.Item>
-        </>
-      )}
-
-      <Form.Item name="use_specified_email" valuePropName="checked">
-        <Checkbox>指定邮箱（不勾选则从微软池取）</Checkbox>
-      </Form.Item>
-      {useSpecifiedEmail && (
-        <>
-          <Form.Item label="指定邮箱" name="email">
-            <Input placeholder="example@outlook.com" autoComplete="new-email" />
-          </Form.Item>
-          <Form.Item label="指定密码" name="password">
-            <Input placeholder="可留空" autoComplete="new-password" />
-          </Form.Item>
-        </>
-      )}
-      <Form.Item label="代理 URL" name="proxy_url">
-        <Input placeholder="例如 http://user:pass@host:port；留空走代理池" />
-      </Form.Item>
-
-      {mode === 'subscription' && plan === 'team' && (
-        <>
-          <Form.Item label="Workspace 名称" name="workspace_name">
-            <Input />
-          </Form.Item>
-          <Form.Item label="付款周期" name="price_interval">
-            <Select
-              options={[
-                { value: 'month', label: '按月' },
-                { value: 'year', label: '按年' },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item label="座位数" name="seat_quantity">
-            <InputNumber min={1} max={99} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item label="国家" name="country">
-            <Input placeholder="例如 US" />
-          </Form.Item>
-          <Form.Item label="货币（留空按国家自动）" name="currency">
-            <Input placeholder="USD / SGD / HKD ..." />
-          </Form.Item>
-        </>
-      )}
-
-      {mode === 'subscription' && plan === 'plus' && (
-        <>
-          <Form.Item label="国家（默认 ID，对应 IDR 套餐）" name="country">
-            <Input placeholder="ID" />
-          </Form.Item>
-          <Form.Item label="货币（留空按国家自动，ID → IDR）" name="currency">
-            <Input placeholder="IDR" />
-          </Form.Item>
-        </>
-      )}
     </Form>
   )
 }

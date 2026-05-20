@@ -31,7 +31,7 @@ class IdsRequest(BaseModel):
 
 
 class TriggerPaymentRequest(BaseModel):
-    payment_proxy_region: str
+    pass
 
 
 @router.get("/api/payment-links", tags=["payment-links"])
@@ -66,12 +66,9 @@ def trigger_payment(payment_link_id: int, body: TriggerPaymentRequest):
         row = s.get(PaymentLink, payment_link_id)
         if row is None:
             raise HTTPException(status_code=404, detail="payment_link not found")
-    region = str(body.payment_proxy_region or "").strip()
-    if not region:
-        raise HTTPException(status_code=400, detail="payment_proxy_region 不能为空")
     job_id = enqueue_job(
         type="payment",
-        input={"payment_link_id": payment_link_id, "account_id": row.account_id, "payment_proxy_region": region},
+        input={"payment_link_id": payment_link_id, "account_id": row.account_id},
         payment_link_id=payment_link_id,
         account_id=row.account_id,
     )

@@ -13,7 +13,7 @@
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                         Pipeline 层                            │
-│  声明式 stage 链 + stop_after，可串可截，每条对应一个账号       │
+│  默认 full_chain 完整链路 + stop_after，可串可截，每条对应一个账号 │
 └────────────────────────────────────────────────────────────────┘
                               │ enqueue
                               ▼
@@ -33,9 +33,10 @@
 **核心不变量**：
 
 - **Stage = WorkPool**：5 个 stage、5 个池，名字唯一 = `Job.type`。
-- **Pipeline 不决定池**：池由 Job.type 决定；Pipeline 只声明一条接力顺序。
+- **Pipeline 只编排**：池由 Job.type 决定；Pipeline 只声明数量、链路和停止点，不携带模块/资源配置。
 - **资源池可被多 stage 复用**：sms 池被 `payment` 和 `oauth_codex` 共用，按 `project` 路由到不同 provider。
-- **任意池可截停**：Pipeline 上设 `stop_after=<stage>`，到位即视为成功。
+- **默认完整链路**：未显式指定时使用 `full_chain = register → payment_link → payment → oauth_codex → rt_keepalive`。
+- **任意池可截停**：Pipeline 上设 `stop_after=<stage>`，到位即视为成功，账号停在该 stage 边界。
 - **任意 Job 可独立入队**：不属于任何 pipeline 也能跑。
 - **🔑 身份一致性（identity binding）**：一个账号在所有账号绑定 stage 看到的 `proxy_id`、`proxy_url`、`user_agent`、`fingerprint`、`cookies/local_storage` 必须**始终一致**；`payment` 单独按 region 选择不同支付代理。详见 §4。
 
@@ -154,8 +155,8 @@ sms_projects (
 ```text
 stages_json             # JSON array: ["register", "payment_link", ...]
 stop_after              # "" = run all
-stage_inputs_json       # {"register": {...}, "payment": {...}}
-resource_bindings_json  # 预留资源路由配置
+stage_inputs_json       # 保留内部字段；创建 pipeline API 不接收模块配置
+resource_bindings_json  # 保留内部字段；创建 pipeline API 不接收资源配置
 input_json              # create_pipeline 可保存原始 payload；当前 POST /api/pipelines 未传时为 {}
 ```
 
@@ -163,14 +164,9 @@ input_json              # create_pipeline 可保存原始 payload；当前 POST 
 
 ```json
 {
-  "stages": ["register", "payment_link", "payment", "oauth_codex"],
+  "preset": "full_chain",
   "stop_after": "payment_link",
-  "stage_inputs": {
-    "register": {"email": "", "also_record_to_at_pool": false},
-    "payment_link": {"plan": "team", "seat_quantity": 2, "country": "US"},
-    "payment": {"payment_proxy_region": "US"},
-    "oauth_codex": {"sms_project": "openai_oauth"}
-  }
+  "count": 1
 }
 ```
 
@@ -204,6 +200,7 @@ on_job_finished(job):
 
 | Preset | stages | 用途 |
 | --- | --- | --- |
+| `full_chain` | `[register, payment_link, payment, oauth_codex, rt_keepalive]` | 默认完整链路，可配 `stop_after` 停在任一模块 |
 | `register_only` | `[register]` | Free 号 / AT 号池 |
 | `register_with_codex_rt` | `[register, oauth_codex]` | Free 号 + Codex RT |
 | `account_paid` | `[register, payment_link, payment]` | 全自动付费号 |
@@ -213,7 +210,7 @@ on_job_finished(job):
 
 API：
 
-- `POST /api/pipelines` body 可传 `preset` **或** 自定义 `stages`/`stop_after`。
+- `POST /api/pipelines` body 可传 `count`、`preset` **或** 自定义 `stages`、`stop_after`；不传链路时默认 `full_chain`。创建 API 禁止额外模块配置字段。
 - 旧 `/api/pipelines/chatgpt-account` 与 `/api/pipelines/chatgpt-register-only` 已删除；只保留声明式入口。
 
 ---
@@ -247,8 +244,8 @@ chatgpt_accounts (
 - **register stage** 是账号身份的唯一**写入者**：成功/失败落库时把 `proxy_id/proxy_url/UA/fingerprint/cookies/local_storage` 一并写入 `chatgpt_accounts`。
 - `register` 必须拿到完整 `proxy_id + proxy_url`，否则 job 失败。
 - 后续账号绑定 stage（payment_link / oauth_codex / rt_keepalive）启动前在 `JobContext` 里**强制从 `chatgpt_accounts` 重新 hydrate**身份，不从 Pipeline.input 取。
-- `payment` 也会 hydrate 账号身份用于排除账号代理，但实际支付代理通过 `payment_proxy_region` 从 `proxy_pool` 另选。
-- `Pipeline.proxy_id/proxy_url` 仅作为 `register` 启动前的建议值；账号绑定后以 `chatgpt_accounts` 为准。
+- `payment` 也会 hydrate 账号身份用于排除账号代理，但实际支付代理 region 来自 `workpool.payment.proxy_region`，再从 `proxy_pool` 另选。
+- 创建 pipeline 不传 `proxy_id/proxy_url`；注册代理 region 来自 register WorkPool 配置，账号绑定后以 `chatgpt_accounts` 为准。
 - ProxyPool 支持账号粘性：`proxy_pool.acquire(hint={"account_id": ...})` 在未指定 region/proxy_id 时返回账号绑定 proxy。
 
 ### 4.3 失败处理

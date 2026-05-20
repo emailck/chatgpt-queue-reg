@@ -1,21 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
-import {
-  Alert,
-  Button,
-  Card,
-  Form,
-  Input,
-  Modal,
-  Popconfirm,
-  Space,
-  Switch,
-  Table,
-  Typography,
-  message,
-} from 'antd'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Alert, Button, Form, Input, Popconfirm, Switch, Table, Tag, Typography, message } from 'antd'
+import type { TableColumnsType } from 'antd'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons'
 
-import { apiFetch } from '@/lib/api'
+import { ActionCard, CardToolbar, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
+import { CopyableText, SelectionSummary } from '@/components/ui/DomainBits'
+import { apiFetch, formatDateTime } from '@/lib/api'
 
 const { Text } = Typography
 
@@ -58,6 +48,18 @@ export default function Proxies() {
     return () => clearTimeout(initial)
   }, [reload])
 
+  const summary = useMemo(() => {
+    const regions = new Set(rows.map((row) => row.region).filter(Boolean))
+    return {
+      total: rows.length,
+      enabled: rows.filter((row) => row.enabled).length,
+      disabled: rows.filter((row) => !row.enabled).length,
+      success: rows.reduce((sum, row) => sum + Number(row.success_count || 0), 0),
+      failed: rows.reduce((sum, row) => sum + Number(row.fail_count || 0), 0),
+      regions: regions.size,
+    }
+  }, [rows])
+
   const submitCreate = async () => {
     const values = await form.validateFields()
     try {
@@ -73,10 +75,7 @@ export default function Proxies() {
 
   const submitBulk = async () => {
     const values = await bulkForm.validateFields()
-    const lines = String(values.content || '')
-      .split('\n')
-      .map((s) => s.trim())
-      .filter((s) => s && !s.startsWith('#'))
+    const lines = String(values.content || '').split('\n').map((s) => s.trim()).filter((s) => s && !s.startsWith('#'))
     if (!lines.length) {
       message.warning('内容为空')
       return
@@ -139,32 +138,54 @@ export default function Proxies() {
     }
   }
 
-  const columns = [
-    { title: 'ID', dataIndex: 'id', width: 60 },
-    { title: 'URL', dataIndex: 'url', ellipsis: true },
-    { title: '标签', dataIndex: 'label', width: 120 },
-    { title: '区域', dataIndex: 'region', width: 90 },
+  const columns: TableColumnsType<Proxy> = [
+    {
+      title: '标签',
+      dataIndex: 'label',
+      render: (value: string, row) => value || `Proxy #${row.id}`,
+    },
+    {
+      title: 'URL',
+      dataIndex: 'url',
+      ellipsis: true,
+      render: (value: string) => <CopyableText value={value} label="代理" />,
+    },
+    {
+      title: 'Region',
+      dataIndex: 'region',
+      width: 120,
+      render: (value: string) => <Tag color="blue">{value || 'no-region'}</Tag>,
+    },
     {
       title: '启用',
       dataIndex: 'enabled',
-      width: 80,
-      render: (value: boolean, row: Proxy) => (
-        <Switch checked={value} onChange={() => toggle(row)} />
-      ),
+      width: 120,
+      render: (_: boolean, row) => <Switch checked={row.enabled} onChange={() => toggle(row)} checkedChildren="启用" unCheckedChildren="停用" />,
     },
     {
-      title: '统计',
-      width: 160,
-      render: (_v: unknown, row: Proxy) => (
-        <Text type="secondary">
-          ✓{row.success_count} / ✗{row.fail_count}
-        </Text>
-      ),
+      title: '成功',
+      dataIndex: 'success_count',
+      width: 90,
+      render: (value: number) => <Tag color="green">{value || 0}</Tag>,
+    },
+    {
+      title: '失败',
+      dataIndex: 'fail_count',
+      width: 90,
+      render: (value: number) => <Tag color={value ? 'red' : 'default'}>{value || 0}</Tag>,
+    },
+    {
+      title: '最近使用',
+      dataIndex: 'last_used_at',
+      width: 180,
+      render: (value: string | null) => formatDateTime(value),
     },
     {
       title: '操作',
-      width: 100,
-      render: (_v: unknown, row: Proxy) => (
+      key: 'actions',
+      fixed: 'right',
+      width: 90,
+      render: (_, row) => (
         <Popconfirm title="删除该代理?" onConfirm={() => remove(row)}>
           <Button size="small" danger>删除</Button>
         </Popconfirm>
@@ -173,80 +194,63 @@ export default function Proxies() {
   ]
 
   return (
-    <Card>
-      <Space style={{ marginBottom: 12 }} wrap>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新增</Button>
-        <Button icon={<UploadOutlined />} onClick={() => setBulkOpen(true)}>批量导入</Button>
-        <Button icon={<ReloadOutlined />} onClick={reload}>刷新</Button>
-        <Button icon={<ThunderboltOutlined />} onClick={checkAll}>检测全部</Button>
-        <Popconfirm
-          title={`确认删除选中的 ${selected.length} 条?`}
-          onConfirm={batchDelete}
-          disabled={!selected.length}
-        >
-          <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>
-            批量删除（{selected.length}）
-          </Button>
-        </Popconfirm>
-      </Space>
-      <Table
-        rowKey="id"
-        dataSource={rows}
-        columns={columns as never}
-        loading={loading}
-        pagination={{ pageSize: 20 }}
-        rowSelection={{
-          selectedRowKeys: selected,
-          onChange: setSelected,
-        }}
+    <PageScaffold
+      title="代理"
+      description="代理资源用表格管理：区域、启用状态、成功/失败计数和最近使用时间集中展示。"
+      actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
+    >
+      <SummaryGrid>
+        <StatCard label="total" value={summary.total} tone="primary" />
+        <StatCard label="enabled" value={summary.enabled} tone="success" />
+        <StatCard label="disabled" value={summary.disabled} />
+        <StatCard label="success total" value={summary.success} tone="success" />
+        <StatCard label="failure total" value={summary.failed} tone={summary.failed ? 'danger' : 'default'} />
+        <StatCard label="regions" value={summary.regions} tone="info" />
+      </SummaryGrid>
+
+      <ActionCard
+        title="代理池操作"
+        description="注册链路锁住账号代理；支付模块按 WorkPool 配置选择不同 region 的代理。这里管理代理资源本身。"
+        actions={(
+          <CardToolbar>
+            <SelectionSummary count={selected.length} />
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新增</Button>
+            <Button icon={<UploadOutlined />} onClick={() => setBulkOpen(true)}>批量导入</Button>
+            <Button icon={<ThunderboltOutlined />} onClick={checkAll}>检测全部</Button>
+            <Popconfirm title={`确认删除选中的 ${selected.length} 条?`} onConfirm={batchDelete} disabled={!selected.length}>
+              <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>批量删除</Button>
+            </Popconfirm>
+          </CardToolbar>
+        )}
       />
 
-      <Modal
-        open={createOpen}
-        title="新增代理"
-        onCancel={() => setCreateOpen(false)}
-        onOk={submitCreate}
-        okText="添加"
-      >
+      <Table
+        className="surface-table"
+        rowKey="id"
+        columns={columns}
+        dataSource={rows}
+        loading={loading}
+        scroll={{ x: 980 }}
+        pagination={{ pageSize: 20, showSizeChanger: false }}
+        rowSelection={{ selectedRowKeys: selected, onChange: setSelected }}
+      />
+
+      <PopupCard open={createOpen} title="新增代理" onCancel={() => setCreateOpen(false)} onOk={submitCreate} okText="添加" width={560}>
         <Form form={form} layout="vertical">
-          <Form.Item name="url" label="URL" rules={[{ required: true }]}>
-            <Input placeholder="http://user:pass@host:port" />
-          </Form.Item>
+          <Form.Item name="url" label="URL" rules={[{ required: true }]}><Input placeholder="http://user:pass@host:port" /></Form.Item>
           <Form.Item name="label" label="标签"><Input /></Form.Item>
           <Form.Item name="region" label="区域"><Input /></Form.Item>
         </Form>
-      </Modal>
+      </PopupCard>
 
-      <Modal
-        open={bulkOpen}
-        title="批量导入代理"
-        onCancel={() => { if (!bulkLoading) { setBulkOpen(false); setBulkResult(null) } }}
-        onOk={submitBulk}
-        okText="导入"
-        confirmLoading={bulkLoading}
-        maskClosable={!bulkLoading}
-        closable={!bulkLoading}
-        width={640}
-      >
-        <Typography.Paragraph type="secondary">
-          每行一个代理 URL，例如 <Text code>http://user:pass@host:port</Text>、<Text code>socks5://user:pass@host:port</Text>。
-          重复 URL 会自动跳过。
-        </Typography.Paragraph>
+      <PopupCard open={bulkOpen} title="批量导入代理" onCancel={() => { if (!bulkLoading) { setBulkOpen(false); setBulkResult(null) } }} onOk={submitBulk} okText="导入" confirmLoading={bulkLoading} maskClosable={!bulkLoading} closable={!bulkLoading} width={720}>
+        <Typography.Paragraph type="secondary">每行一个代理 URL，例如 <Text code>http://user:pass@host:port</Text>、<Text code>socks5://user:pass@host:port</Text>。重复 URL 会自动跳过。</Typography.Paragraph>
         <Form form={bulkForm} layout="vertical">
-          <Form.Item name="content" label="代理列表" rules={[{ required: true }]}>
-            <Input.TextArea rows={10} placeholder="http://user:pass@1.2.3.4:1080" />
-          </Form.Item>
+          <Form.Item name="content" label="代理列表" rules={[{ required: true }]}><Input.TextArea rows={10} placeholder="http://user:pass@1.2.3.4:1080" /></Form.Item>
           <Form.Item name="region" label="区域（可选）"><Input /></Form.Item>
         </Form>
-        {bulkResult && (
-          <Alert
-            type="success"
-            message={`新增 ${bulkResult.added}，跳过 ${bulkResult.skipped}`}
-            showIcon
-            style={{ marginTop: 12 }}
-          />
-        )}
-      </Modal>
-    </Card>
+        {bulkResult && <Alert type="success" message={`新增 ${bulkResult.added}，跳过 ${bulkResult.skipped}`} showIcon style={{ marginTop: 12 }} />}
+      </PopupCard>
+    </PageScaffold>
   )
 }

@@ -1,27 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Button, Card, Drawer, Dropdown, Input, Modal, Popconfirm, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Button, Dropdown, Input, Popconfirm, Space, Tag, Typography, message } from 'antd'
 import { BugOutlined, DeleteOutlined, MailOutlined, ReloadOutlined } from '@ant-design/icons'
 
-import { CopyButton } from '@/components/CopyButton'
 import { JobLogPanel } from '@/components/JobLogPanel'
 import { StatusTag } from '@/components/StatusTag'
-import { apiFetch } from '@/lib/api'
+import { ActionCard, CardToolbar, EntityCard, EntityGrid, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
+import { CopyableText, ErrorCallout, SelectionSummary, Sub2ApiBadge, TokenBadges, UrlAction } from '@/components/ui/DomainBits'
+import { apiFetch, formatDateTime } from '@/lib/api'
 
 const { Text } = Typography
-
-const SUB2API_STATUS_COLORS: Record<string, string> = {
-  uploaded: 'blue',
-  active: 'green',
-  alive: 'green',
-  ok: 'green',
-  pending_upload: 'orange',
-  upload_failed: 'red',
-  sync_failed: 'red',
-  dead: 'red',
-  disabled: 'default',
-  invalid: 'red',
-  expired: 'red',
-}
 
 interface Account {
   id: number
@@ -51,6 +38,14 @@ interface Account {
   updated_at: string | null
 }
 
+function accountTone(row: Account): 'default' | 'primary' | 'success' | 'warning' | 'danger' | 'info' {
+  if (row.last_error) return 'danger'
+  if (row.status === 'registered') return 'success'
+  if (row.status === 'registering') return 'info'
+  if (row.status === 'failed') return 'danger'
+  return 'default'
+}
+
 export default function Accounts() {
   const [rows, setRows] = useState<Account[]>([])
   const [loading, setLoading] = useState(false)
@@ -58,6 +53,7 @@ export default function Accounts() {
   const [emailModalAccount, setEmailModalAccount] = useState<Account | null>(null)
   const [emailKeyword, setEmailKeyword] = useState('')
   const [selected, setSelected] = useState<React.Key[]>([])
+  const [page, setPage] = useState(1)
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -80,6 +76,15 @@ export default function Accounts() {
     }
   }, [reload])
 
+  const summary = useMemo(() => ({
+    total: rows.length,
+    registered: rows.filter((row) => row.status === 'registered').length,
+    failed: rows.filter((row) => row.status === 'failed' || !!row.last_error).length,
+    at: rows.filter((row) => row.has_access_token).length,
+    codexRt: rows.filter((row) => row.codex_token_has_refresh_token).length,
+    sub2api: rows.filter((row) => ['active', 'alive', 'ok', 'uploaded'].includes(String(row.sub2api_status || '').toLowerCase())).length,
+  }), [rows])
+
   const triggerReadEmail = async (account: Account, keyword: string) => {
     try {
       const resp = await apiFetch<{ job_id: number }>(`/accounts/${account.id}/read-email`, {
@@ -97,12 +102,11 @@ export default function Accounts() {
 
   const triggerDebugBrowser = async (account: Account) => {
     try {
-      const resp = await apiFetch<{ job_id: number }>(`/accounts/${account.id}/debug-browser`, {
+      const resp = await apiFetch<{ session_id: number; har_path: string }>(`/accounts/${account.id}/debug-browser`, {
         method: 'POST',
         body: JSON.stringify({}),
       })
-      message.success(`已派发调试浏览器 job #${resp.job_id}`)
-      setLogJobId(resp.job_id)
+      message.success(`Camoufox session #${resp.session_id} 已打开${resp.har_path ? `，HAR: ${resp.har_path}` : ''}`)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '调起浏览器失败')
     }
@@ -146,155 +150,116 @@ export default function Accounts() {
     }
   }
 
-  const columns = [
-    { title: 'ID', dataIndex: 'id', width: 60 },
-    {
-      title: '邮箱',
-      dataIndex: 'email',
-      render: (value: string) => (
-        <Space>
-          <Text>{value}</Text>
-          <CopyButton value={value} />
-        </Space>
-      ),
-    },
-    {
-      title: '密码',
-      dataIndex: 'password',
-      render: (value: string) => (
-        <Space>
-          <Text code style={{ fontSize: 12 }}>{value || '-'}</Text>
-          {value && <CopyButton value={value} />}
-        </Space>
-      ),
-    },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      width: 140,
-      render: (value: string) => <StatusTag status={value} />,
-    },
-    { title: '代理', dataIndex: 'proxy_url', ellipsis: true },
-    { title: 'Account ID', dataIndex: 'account_id', ellipsis: true },
-    {
-      title: 'Token',
-      width: 170,
-      render: (_v: unknown, row: Account) => (
-        <Space size={4} wrap>
-          {row.has_access_token && <Tag color="green">AT</Tag>}
-          {row.codex_token_has_refresh_token && <Tag color="blue">Codex RT</Tag>}
-          {row.codex_token_id && <Tag color={SUB2API_STATUS_COLORS[row.sub2api_status] || 'default'}>{row.sub2api_status || 'unknown'}</Tag>}
-          {row.codex_token_id && !row.codex_token_alive && <Tag color="red">失效</Tag>}
-          {!row.has_access_token && !row.codex_token_has_refresh_token && <Text type="secondary">-</Text>}
-        </Space>
-      ),
-    },
-    {
-      title: '最近长链',
-      dataIndex: 'last_payment_link_url',
-      render: (value: string) =>
-        value ? (
-          <Space>
-            <Tooltip title={value}>
-              <a href={value} target="_blank" rel="noopener noreferrer">打开</a>
-            </Tooltip>
-            <CopyButton value={value} />
-          </Space>
-        ) : (
-          <Text type="secondary">-</Text>
-        ),
-    },
-    {
-      title: '错误',
-      dataIndex: 'last_error',
-      ellipsis: true,
-      render: (value: string) => (value ? <Text type="danger">{value}</Text> : <Text type="secondary">-</Text>),
-    },
-    {
-      title: '操作',
-      width: 320,
-      render: (_v: unknown, row: Account) => (
-        <Space size={4} wrap>
-          <Button size="small" icon={<MailOutlined />} onClick={() => setEmailModalAccount(row)}>
-            收邮件
-          </Button>
-          <Button size="small" icon={<BugOutlined />} onClick={() => triggerDebugBrowser(row)}>
-            调试浏览器
-          </Button>
-          {row.status !== 'registering' && (
-            <Dropdown
-              menu={{
-                items: [
-                  { key: 'team', label: '生成 Team 长链' },
-                  { key: 'plus', label: '生成 Plus 长链 (IDR)' },
-                ],
-                onClick: ({ key }) => retryPaymentLink(row, key as 'team' | 'plus'),
-              }}
-            >
-              <Button size="small" type="dashed">支付长链 ▾</Button>
-            </Dropdown>
-          )}
-          <Popconfirm title="删除该账号?" onConfirm={() => deleteAccount(row)}>
-            <Button size="small" danger>删除</Button>
-          </Popconfirm>
-        </Space>
-      ),
-    },
-  ] as const
+  const toggleSelected = (id: number, checked: boolean) => {
+    setSelected((prev) => checked ? [...prev, id] : prev.filter((item) => Number(item) !== id))
+  }
 
   return (
-    <>
-      <Card>
-        <Space style={{ marginBottom: 12 }} wrap>
-          <Button icon={<ReloadOutlined />} onClick={reload}>刷新</Button>
-          <Popconfirm
-            title={`确认删除选中的 ${selected.length} 个账号?`}
-            onConfirm={batchDelete}
-            disabled={!selected.length}
-          >
-            <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>
-              批量删除（{selected.length}）
-            </Button>
-          </Popconfirm>
-        </Space>
-        <Table
-          rowKey="id"
-          dataSource={rows}
-          columns={columns as never}
-          loading={loading}
-          pagination={{ pageSize: 20 }}
-          rowSelection={{
-            selectedRowKeys: selected,
-            onChange: setSelected,
-          }}
-        />
-      </Card>
+    <PageScaffold
+      title="账号"
+      description="账号卡片展示注册状态、身份绑定、代理一致性、Token 与最近支付长链；操作仍按账号边界执行。"
+      actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
+    >
+      <SummaryGrid>
+        <StatCard label="账号总数" value={summary.total} tone="primary" />
+        <StatCard label="已注册" value={summary.registered} tone="success" />
+        <StatCard label="失败/异常" value={summary.failed} tone={summary.failed ? 'danger' : 'default'} />
+        <StatCard label="有 AT" value={summary.at} tone="info" />
+        <StatCard label="Codex RT" value={summary.codexRt} tone="info" />
+        <StatCard label="sub2api 活跃" value={summary.sub2api} tone="success" />
+      </SummaryGrid>
 
-      <Modal
+      <ActionCard
+        title="账号池操作"
+        description="收邮件、浏览器调试、重试支付长链都从账号卡片发起；日志用居中弹出卡片展示原始 transcript。"
+        actions={(
+          <CardToolbar>
+            <SelectionSummary count={selected.length} />
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>
+            <Popconfirm title={`确认删除选中的 ${selected.length} 个账号?`} onConfirm={batchDelete} disabled={!selected.length}>
+              <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>批量删除</Button>
+            </Popconfirm>
+          </CardToolbar>
+        )}
+      />
+
+      <EntityGrid
+        items={rows}
+        page={page}
+        pageSize={18}
+        onPageChange={setPage}
+        renderItem={(row) => (
+          <EntityCard
+            key={row.id}
+            title={<CopyableText value={row.email} label="邮箱" />}
+            subtitle={`Account #${row.id}`}
+            status={<StatusTag status={row.status} />}
+            tone={accountTone(row)}
+            selected={selected.includes(row.id)}
+            onSelect={(checked) => toggleSelected(row.id, checked)}
+            badges={(
+              <Space size={4} wrap>
+                <TokenBadges accessToken={row.has_access_token ? 'yes' : ''} refreshToken={row.has_refresh_token ? 'yes' : ''} codexRt={row.codex_token_has_refresh_token ? 'yes' : ''} />
+                {row.codex_token_id && <Tag color={row.codex_token_alive ? 'blue' : 'red'}>Codex #{row.codex_token_id}</Tag>}
+                {row.sub2api_status && <Sub2ApiBadge status={row.sub2api_status} />}
+              </Space>
+            )}
+            footer={formatDateTime(row.created_at)}
+            actions={(
+              <>
+                <Button size="small" icon={<MailOutlined />} onClick={() => setEmailModalAccount(row)}>收邮件</Button>
+                <Button size="small" icon={<BugOutlined />} onClick={() => triggerDebugBrowser(row)}>调试浏览器</Button>
+                {row.status !== 'registering' && (
+                  <Dropdown
+                    menu={{
+                      items: [
+                        { key: 'team', label: '生成 Team 长链' },
+                        { key: 'plus', label: '生成 Plus 长链 (IDR)' },
+                      ],
+                      onClick: ({ key }) => retryPaymentLink(row, key as 'team' | 'plus'),
+                    }}
+                  >
+                    <Button size="small" type="dashed">支付长链 ▾</Button>
+                  </Dropdown>
+                )}
+                <Popconfirm title="删除该账号?" onConfirm={() => deleteAccount(row)}>
+                  <Button size="small" danger>删除</Button>
+                </Popconfirm>
+              </>
+            )}
+          >
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <KeyValueGrid>
+                <KeyValue label="密码" value={<CopyableText value={row.password} label="密码" code />} />
+                <KeyValue label="OpenAI Account" value={<CopyableText value={row.account_id} label="Account ID" code />} />
+                <KeyValue label="Workspace" value={<CopyableText value={row.workspace_id} label="Workspace" code />} />
+                <KeyValue label="最近长链" value={row.last_payment_link_id ? <Tag color="purple">#{row.last_payment_link_id}</Tag> : <Text type="secondary">-</Text>} />
+                <KeyValue label="长链 URL" value={<UrlAction url={row.last_payment_link_url} />} />
+                <KeyValue label="代理" value={<CopyableText value={row.proxy_url} label="代理" />} />
+              </KeyValueGrid>
+              <ErrorCallout error={row.last_error || row.codex_token_last_error} />
+            </Space>
+          </EntityCard>
+        )}
+      />
+
+      <PopupCard
         open={!!emailModalAccount}
         onCancel={() => { setEmailModalAccount(null); setEmailKeyword('') }}
         onOk={() => emailModalAccount && triggerReadEmail(emailModalAccount, emailKeyword)}
         title={emailModalAccount ? `收 ${emailModalAccount.email} 的邮件` : ''}
         okText="开始读取"
+        width={560}
       >
         <Space direction="vertical" style={{ width: '100%' }}>
           <Text>关键字 (subject/body 包含；留空匹配最新一封)</Text>
-          <Input
-            value={emailKeyword}
-            onChange={(e) => setEmailKeyword(e.target.value)}
-            placeholder="例如 ChatGPT"
-          />
+          <Input value={emailKeyword} onChange={(e) => setEmailKeyword(e.target.value)} placeholder="例如 ChatGPT" />
         </Space>
-      </Modal>
+      </PopupCard>
 
-      <Drawer
-        open={logJobId !== null}
-        onClose={() => setLogJobId(null)}
-        width={720}
-        title={logJobId ? `Job #${logJobId} 原始日志` : ''}
-      >
+      <PopupCard open={logJobId !== null} onCancel={() => setLogJobId(null)} width={900} title={logJobId ? `Job #${logJobId} 原始日志` : ''} footer={null}>
         {logJobId !== null && <JobLogPanel jobId={logJobId} />}
-      </Drawer>
-    </>
+      </PopupCard>
+    </PageScaffold>
   )
 }

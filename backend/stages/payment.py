@@ -8,6 +8,7 @@ pipeline can advance.
 from __future__ import annotations
 
 from backend.core.job_context import JobContext
+from backend.core.settings import settings
 from backend.core.pools.base import AcquireOutcome
 from backend.core.stages import stage
 from backend.schemas.stage_io import PaymentInput, PaymentOutput
@@ -32,6 +33,7 @@ def run(ctx: JobContext) -> None:
         ctx.input.get("payment_proxy_region")
         or ctx.input.get("proxy_region")
         or ctx.input.get("region")
+        or settings.get("workpool.payment.proxy_region", "")
         or ""
     ).strip()
     if not payment_region:

@@ -10,7 +10,7 @@
 
 ## Pipeline
 
-后端统一走声明式 pipeline：`POST /api/pipelines` 传 `preset` 或显式 `stages`，并可用 `stop_after` 截停在任意 stage。
+后端统一走声明式 pipeline：`POST /api/pipelines` 默认使用 `full_chain` 完整链路，也可传 `preset` 或显式 `stages`；`stop_after` 可让账号停在任意 stage 边界。
 
 当前只有 5 个 WorkPool stage：
 
@@ -20,7 +20,7 @@
 4. `oauth_codex`：对已注册账号执行 OpenAI OAuth PKCE，获取 Codex RT/AT 并上传 sub2api。
 5. `rt_keepalive`：同步本地 `codex_tokens` 镜像与 sub2api 状态；RT 轮转由 sub2api 负责。
 
-任何一步失败/取消，pipeline 整体标记失败并停止推进。
+任何一步失败/取消，pipeline 整体标记失败并停止推进。默认完整链路为 `register → payment_link → payment → oauth_codex → rt_keepalive`；例如 `stop_after=payment_link` 会生成账号和长链后停住。创建 pipeline 只表达数量、链路和停止点，注册代理、支付代理 region、OAuth 接码等由各池配置决定。
 
 ## 核心 API
 
@@ -28,11 +28,11 @@
 - `GET /api/jobs` / `GET /api/jobs/{id}/events/stream` 查看 job 与 SSE 日志。
 - `GET /api/pools` / `GET /api/stages` / `GET /api/queue/stats` 查看 stage/resource pool 状态。
 - `GET /api/accounts` / `GET /api/accounts/subscriptions` / `POST /api/accounts/{id}/refresh-token|read-email|debug-browser|payment-link/retry`。
-- `GET /api/payment-links` / `POST /api/payment-links/{id}/payment|debug-browser`；payment 请求必须带 `payment_proxy_region`。
+- `GET /api/payment-links` / `POST /api/payment-links/{id}/payment|debug-browser`；payment 参数从 payment WorkPool 配置读取。
 - `GET /api/access-tokens` / `POST /api/access-tokens/{id}/refresh-token` / `GET /api/codex-tokens` / `POST /api/codex-tokens/{id}/sync`。
 - `POST /api/email/import` (支持 `alias_split_enabled` 邮箱裂变 + 含原邮箱) / `POST /api/email/read`。
 - `GET/POST/PATCH/DELETE /api/proxies`、`/api/cards`、`/api/sms/projects` 管理资源池数据。
-- `GET/PUT /api/settings` 管理全局配置和 sub2api/SMS/注册参数。
+- `GET/PUT /api/settings` 按 WorkPool / ResourcePool 维护配置列表，任务创建不携带模块配置。
 - `POST /api/browser-debug/open` 任何上下文调起 Camoufox/Chromium，注入 cookies/UA/localStorage 并抓 HAR。
 - `GET /api/healthz`。
 
@@ -70,6 +70,8 @@ pnpm dev   # localhost:5173 -> 代理到 8000
 非 SQLite 的 DB 也行，把 `DATABASE_URL` 指过去即可（SQLite 上自动开 WAL + busy_timeout）。
 
 ## 调试浏览器
+
+Pipeline、账号、支付长链页面都可以手动调起 Camoufox/HAR；pipeline 停在某个 stage 后不会自动弹窗。
 
 `open_debug_session(...)` 会把：
 

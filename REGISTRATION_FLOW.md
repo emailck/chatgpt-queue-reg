@@ -4,7 +4,7 @@
 
 ## 总览
 
-前端统一通过 `POST /api/pipelines` 创建 pipeline，可传 `preset` 或自定义 `stages`，并可用 `stop_after` 截停在任意 stage。
+前端统一通过 `POST /api/pipelines` 创建 pipeline，默认 preset 是 `full_chain` 完整链路；也可传自定义 `stages`，并用 `stop_after` 截停在任意 stage。
 
 当前只有 5 个 WorkPool stage：
 
@@ -18,6 +18,7 @@
 
 常用 preset：
 
+- `full_chain`：`register → payment_link → payment → oauth_codex → rt_keepalive`（默认完整链路）
 - `register_only`：`register`
 - `register_with_codex_rt`：`register → oauth_codex`
 - `link_only`：`register → payment_link`
@@ -30,18 +31,16 @@
 文件：`backend/api/jobs.py`
 
 - `POST /api/pipelines` 处理统一 pipeline 创建请求。
-- 请求体可包含：
+- 创建 pipeline 的请求体只包含编排字段：
+  - `count`
   - `preset` 或 `stages`
-  - `stop_after`
-  - `stage_inputs`
-  - `resource_bindings`
-  - `proxy_url` / `proxy_id`
-  - `concurrency`（按 stage 调整并发）
+  - `stop_after`（空值跑完整链路；非空表示成功停在该 stage）
+- 不在创建任务时传注册代理、支付代理 region、OAuth 接码、套餐等模块参数；这些都由对应 WorkPool / ResourcePool 配置读取。
 - `POST /api/jobs` 可直接派发任意已注册 stage；API 会把 input 中的 `account_id` / `payment_link_id` / `proxy_id` 提升到 Job 字段，保证 worker 能 hydrate identity。
 
 文件：`backend/core/pipeline.py`
 
-- `create_pipeline()` 创建声明式 pipeline，只持久化 stage 列表和输入，不替 stage 预先决定资源池。
+- `create_pipeline()` 创建声明式 pipeline，只持久化 stage 列表和停止点；未传 `preset/stages` 时解析为 `full_chain`。
 - `Job.type == stage.name`。
 - job 成功后，`_advance_pipeline()` 从 `stages_json` 找下一个 stage；命中最后一步或 `stop_after` 时 pipeline 成功。
 - carry-over 白名单：`account_id`、`payment_link_id`、`email_address`、`proxy_id`、`proxy_url`、`codex_rt`、`codex_at`。
@@ -66,13 +65,12 @@
 
 `register` 必须得到完整的 `proxy_id + proxy_url` 才会继续。来源可以是：
 
-1. pipeline/job 显式传入 `proxy_id + proxy_url`；
-2. 显式传入 `proxy_url`，且能在 `proxies` 表中反查到 `proxy_id`；
-3. 未传代理时由 `proxy_pool` 按 `proxy_id` / `proxy_region` hint 领取。
+1. `workpool.register.proxy_region` 指定注册代理 region；
+2. 未配置 region 时由 `proxy_pool` 从可用代理中领取。
 
 `payment_link` 和 `oauth_codex` 都通过 `ctx.effective_proxy_url()` 复用账号绑定代理；它们不会改绑账号代理。
 
-`payment` 必须传 `payment_proxy_region`（或兼容字段 `proxy_region` / `region`），并通过 `proxy_pool` 选择该 region 下不同于账号代理的 proxy。当前 `payment` 仍是 stub，只验证和记录代理选择，浏览器自动化支付后续实现。
+`payment` 从 `workpool.payment.proxy_region` 读取支付代理 region，并通过 `proxy_pool` 选择该 region 下不同于账号代理的 proxy。当前 `payment` 仍是 stub，只验证和记录代理选择，浏览器自动化支付后续实现。
 
 ## register stage
 
@@ -80,7 +78,7 @@
 
 主要步骤：
 
-1. 读取 `email`、`password`、`proxy_id`、`proxy_url`、`proxy_region`、`extra_config`。
+1. 从 register WorkPool 配置读取注册代理 region，并从 email/proxy 资源池领取资源。
 2. 绑定完整 `proxy_id + proxy_url`；绑定失败则 job 失败。
 3. 如果指定邮箱，先用 `email_domain_policy` 做域名策略校验。
 4. 合并全局 settings 和 job `extra_config`。

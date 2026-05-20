@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Button, Card, Popconfirm, Progress, Space, Table, Tag, Typography, message } from 'antd'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Button, Popconfirm, Progress, Space, Tag, Typography, message } from 'antd'
 import { KeyOutlined, ReloadOutlined } from '@ant-design/icons'
 
-import { CopyButton } from '@/components/CopyButton'
 import { StatusTag } from '@/components/StatusTag'
+import { ActionCard, CardToolbar, EntityCard, EntityGrid, KeyValue, KeyValueGrid, PageScaffold, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
+import { CopyableText, ErrorCallout, LinkedIdBadges, Sub2ApiBadge, TokenBadges, UrlAction } from '@/components/ui/DomainBits'
 import { apiFetch, formatDateTime } from '@/lib/api'
 import { stageLabel } from '@/lib/contracts'
 
@@ -46,23 +47,18 @@ interface SubscriptionAccount {
   refresh_token_job_error: string
 }
 
-const SUB2API_STATUS_COLORS: Record<string, string> = {
-  uploaded: 'blue',
-  active: 'green',
-  alive: 'green',
-  ok: 'green',
-  pending_upload: 'orange',
-  upload_failed: 'red',
-  sync_failed: 'red',
-  dead: 'red',
-  disabled: 'default',
-  invalid: 'red',
-  expired: 'red',
+function tone(row: SubscriptionAccount): 'default' | 'primary' | 'success' | 'warning' | 'danger' | 'info' {
+  if (row.last_error || row.payment_link_error || row.refresh_token_job_error || row.subscription_status === 'failed') return 'danger'
+  if (row.subscription_status === 'succeeded') return 'success'
+  if (row.subscription_status === 'running') return 'info'
+  if (row.subscription_status === 'queued') return 'warning'
+  return 'default'
 }
 
 export default function SubscriptionAccounts() {
   const [rows, setRows] = useState<SubscriptionAccount[]>([])
   const [loading, setLoading] = useState(false)
+  const [page, setPage] = useState(1)
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -85,12 +81,20 @@ export default function SubscriptionAccounts() {
     }
   }, [reload])
 
+  const summary = useMemo(() => ({
+    total: rows.length,
+    running: rows.filter((row) => row.subscription_status === 'running').length,
+    queued: rows.filter((row) => row.subscription_status === 'queued').length,
+    succeeded: rows.filter((row) => row.subscription_status === 'succeeded').length,
+    failed: rows.filter((row) => row.subscription_status === 'failed' || row.last_error || row.payment_link_error).length,
+    paymentReady: rows.filter((row) => row.last_payment_link_url || row.payment_link_status === 'ready').length,
+    rt: rows.filter((row) => row.codex_token_has_refresh_token).length,
+  }), [rows])
+
   const fetchRefreshToken = async (row: SubscriptionAccount) => {
     if (!row.id) return
     try {
-      const resp = await apiFetch<{ job_id: number; already_running: boolean }>(`/accounts/${row.id}/refresh-token`, {
-        method: 'POST',
-      })
+      const resp = await apiFetch<{ job_id: number; already_running: boolean }>(`/accounts/${row.id}/refresh-token`, { method: 'POST' })
       message.success(resp.already_running ? `RT 获取 job #${resp.job_id} 已在运行` : `已派发 RT 获取 job #${resp.job_id}`)
       reload()
     } catch (err) {
@@ -98,119 +102,77 @@ export default function SubscriptionAccounts() {
     }
   }
 
-  const columns = [
-    { title: 'Pipeline', dataIndex: 'subscription_pipeline_id', width: 90, render: (v: number) => `#${v}` },
-    {
-      title: '邮箱',
-      dataIndex: 'email',
-      render: (value: string) => value ? (
-        <Space size={2}>
-          <Text>{value}</Text>
-          <CopyButton value={value} />
-        </Space>
-      ) : <Text type="secondary">注册中</Text>,
-    },
-    {
-      title: '注册状态',
-      dataIndex: 'status',
-      width: 120,
-      render: (value: string) => <StatusTag status={value} />,
-    },
-    {
-      title: '订阅进度',
-      width: 180,
-      render: (_v: unknown, row: SubscriptionAccount) => (
-        <Space direction="vertical" size={2} style={{ width: '100%' }}>
-          <Space size={4}>
-            <StatusTag status={row.subscription_status} />
-            <Text>{stageLabel(row.subscription_current_stage)}</Text>
-          </Space>
-          <Progress
-            percent={Math.round((row.subscription_completed_steps / Math.max(row.subscription_total_steps, 1)) * 100)}
-            size="small"
-            format={() => `${row.subscription_completed_steps}/${row.subscription_total_steps}`}
-            status={row.subscription_status === 'failed' ? 'exception' : row.subscription_status === 'succeeded' ? 'success' : 'active'}
-          />
-        </Space>
-      ),
-    },
-    {
-      title: '支付长链',
-      dataIndex: 'last_payment_link_url',
-      render: (value: string, row: SubscriptionAccount) => value ? (
-        <Space>
-          <a href={value} target="_blank" rel="noopener noreferrer">打开</a>
-          <CopyButton value={value} />
-        </Space>
-      ) : row.payment_link_error ? <Text type="danger">失败</Text> : <Text type="secondary">-</Text>,
-    },
-    {
-      title: 'Token',
-      width: 150,
-      render: (_v: unknown, row: SubscriptionAccount) => (
-        <Space size={4} wrap>
-          {row.has_access_token && <Tag color="green">AT</Tag>}
-          {row.codex_token_has_refresh_token ? <Tag color="blue">Codex RT</Tag> : <Tag>无 RT</Tag>}
-          {row.codex_token_id && !row.codex_token_alive && <Tag color="red">失效</Tag>}
-        </Space>
-      ),
-    },
-    {
-      title: 'sub2api RT',
-      width: 190,
-      render: (_v: unknown, row: SubscriptionAccount) => row.codex_token_id ? (
-        <Space direction="vertical" size={2}>
-          <Space size={4} wrap>
-            <Text>#{row.codex_token_id}</Text>
-            <Tag color={SUB2API_STATUS_COLORS[row.sub2api_status] || 'default'}>{row.sub2api_status || 'unknown'}</Tag>
-          </Space>
-          {row.sub2api_external_id && <Text type="secondary" ellipsis style={{ maxWidth: 170 }}>{row.sub2api_external_id}</Text>}
-          {row.codex_token_last_error && <Text type="danger" ellipsis style={{ maxWidth: 170 }}>{row.codex_token_last_error}</Text>}
-        </Space>
-      ) : row.refresh_token_job_id ? (
-        <Space direction="vertical" size={2}>
-          <Space size={4}>
-            <Text>job #{row.refresh_token_job_id}</Text>
-            <StatusTag status={row.refresh_token_job_status} />
-          </Space>
-          {row.refresh_token_job_error && <Text type="danger" ellipsis style={{ maxWidth: 170 }}>{row.refresh_token_job_error}</Text>}
-        </Space>
-      ) : <Text type="secondary">未获取</Text>,
-    },
-    { title: '代理', dataIndex: 'proxy_url', ellipsis: true, width: 180 },
-    { title: '创建时间', width: 170, render: (_v: unknown, row: SubscriptionAccount) => formatDateTime(row.created_at) },
-    {
-      title: '操作',
-      width: 150,
-      render: (_v: unknown, row: SubscriptionAccount) => (
-        <Space size={4}>
-          <Popconfirm
-            title="为该订阅号获取 RT?"
-            onConfirm={() => fetchRefreshToken(row)}
-            disabled={!row.id || row.codex_token_has_refresh_token}
-          >
-            <Button size="small" icon={<KeyOutlined />} disabled={!row.id || row.codex_token_has_refresh_token}>
-              获取 RT
-            </Button>
-          </Popconfirm>
-        </Space>
-      ),
-    },
-  ] as const
-
   return (
-    <Card>
-      <Space style={{ marginBottom: 12 }} wrap>
-        <Button icon={<ReloadOutlined />} onClick={reload}>刷新</Button>
-        <Tag>共 {rows.length} 条</Tag>
-      </Space>
-      <Table
-        rowKey={(row) => row.subscription_pipeline_id}
-        dataSource={rows}
-        columns={columns as never}
-        loading={loading}
-        pagination={{ pageSize: 20 }}
+    <PageScaffold
+      title="订阅号池"
+      description="订阅账号按 pipeline 卡片展示完整链路进度、支付长链、Codex RT 和 sub2api 状态。"
+      actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
+    >
+      <SummaryGrid>
+        <StatCard label="总数" value={summary.total} tone="primary" />
+        <StatCard label="queued" value={summary.queued} tone="warning" />
+        <StatCard label="running" value={summary.running} tone="info" />
+        <StatCard label="succeeded" value={summary.succeeded} tone="success" />
+        <StatCard label="failed" value={summary.failed} tone={summary.failed ? 'danger' : 'default'} />
+        <StatCard label="长链 ready" value={summary.paymentReady} tone="info" />
+        <StatCard label="Codex RT" value={summary.rt} tone="success" />
+      </SummaryGrid>
+
+      <ActionCard
+        title="订阅链路"
+        description="这里是订阅账号的结果池视图；获取 RT 仍走账号边界接口，轮询保持 5 秒。"
+        actions={<CardToolbar><Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新状态</Button></CardToolbar>}
       />
-    </Card>
+
+      <EntityGrid
+        items={rows}
+        page={page}
+        pageSize={18}
+        onPageChange={setPage}
+        renderItem={(row) => (
+          <EntityCard
+            key={row.subscription_pipeline_id}
+            title={row.email ? <CopyableText value={row.email} label="邮箱" /> : '注册中'}
+            subtitle={`Pipeline #${row.subscription_pipeline_id}`}
+            status={<StatusTag status={row.subscription_status} />}
+            tone={tone(row)}
+            badges={(
+              <Space size={4} wrap>
+                <LinkedIdBadges pipelineId={row.subscription_pipeline_id} accountId={row.id} paymentLinkId={row.last_payment_link_id} />
+                <TokenBadges accessToken={row.has_access_token ? 'yes' : ''} refreshToken={row.has_refresh_token ? 'yes' : ''} codexRt={row.codex_token_has_refresh_token ? 'yes' : ''} />
+                {row.sub2api_status && <Sub2ApiBadge status={row.sub2api_status} />}
+              </Space>
+            )}
+            footer={formatDateTime(row.created_at)}
+            actions={(
+              <Popconfirm title="为该订阅号获取 RT?" onConfirm={() => fetchRefreshToken(row)} disabled={!row.id || row.codex_token_has_refresh_token}>
+                <Button size="small" icon={<KeyOutlined />} disabled={!row.id || row.codex_token_has_refresh_token}>获取 RT</Button>
+              </Popconfirm>
+            )}
+          >
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Progress
+                percent={Math.round((row.subscription_completed_steps / Math.max(row.subscription_total_steps, 1)) * 100)}
+                size="small"
+                format={() => `${row.subscription_completed_steps}/${row.subscription_total_steps}`}
+                status={row.subscription_status === 'failed' ? 'exception' : row.subscription_status === 'succeeded' ? 'success' : 'active'}
+              />
+              <KeyValueGrid>
+                <KeyValue label="当前 Stage" value={<Space size={4}><Text>{stageLabel(row.subscription_current_stage)}</Text><Text code type="secondary">{row.subscription_current_stage}</Text></Space>} />
+                <KeyValue label="注册状态" value={<StatusTag status={row.status} />} />
+                <KeyValue label="支付长链" value={<UrlAction url={row.last_payment_link_url} />} />
+                <KeyValue label="payment status" value={row.payment_link_status || '-'} />
+                <KeyValue label="sub2api external" value={<CopyableText value={row.sub2api_external_id} label="sub2api external" code />} />
+                <KeyValue label="代理" value={<CopyableText value={row.proxy_url} label="代理" />} />
+              </KeyValueGrid>
+              {row.refresh_token_job_id && !row.codex_token_has_refresh_token && (
+                <Tag color="processing">RT job #{row.refresh_token_job_id} / {row.refresh_token_job_status || '-'}</Tag>
+              )}
+              <ErrorCallout error={row.last_error || row.payment_link_error || row.codex_token_last_error || row.refresh_token_job_error} />
+            </Space>
+          </EntityCard>
+        )}
+      />
+    </PageScaffold>
   )
 }
