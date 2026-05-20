@@ -462,21 +462,52 @@ _FIELD_SELECTORS = {
 
 
 def _remove_captcha_elements(page: Any) -> None:
+    """One-shot captcha removal + install persistent MutationObserver watcher.
+
+    Mirrors plugin's startCaptchaWatcher: removes captcha elements on DOM
+    changes (debounced 800ms) + every 3 seconds as fallback. Only removes
+    inline overlays/iframes, NOT full-page redirect captchas.
+    """
     try:
         page.evaluate("""() => {
-            const sels = [
-                '#captchaComponent', '.captcha-overlay', '.captcha-container',
-                '.appChallengeNS', '#g-anomalydetection-div',
-                'iframe[src*="recaptcha"]', 'iframe[title*="recaptcha" i]',
-            ];
-            for (const sel of sels) {
-                document.querySelectorAll(sel).forEach(el => el.remove());
+            if (window.__ppaf_captcha_watcher) return;
+            function skipCaptcha() {
+                const sels = [
+                    '#captchaComponent', '.captcha-overlay', '.captcha-container',
+                    '.appChallengeNS', '#g-anomalydetection-div',
+                    'iframe[src*="recaptcha"]', 'iframe[title*="recaptcha" i]',
+                    'div[id^="challenge"]',
+                ];
+                for (const sel of sels) {
+                    document.querySelectorAll(sel).forEach(el => el.remove());
+                }
+                document.querySelectorAll('iframe').forEach(f => {
+                    if (/recaptcha|captcha|challenge/i.test((f.src||'')+(f.title||''))) f.remove();
+                });
+                document.querySelectorAll('div').forEach(d => {
+                    const cs = getComputedStyle(d);
+                    if (cs.position === 'fixed' && /visible/i.test(cs.visibility) &&
+                        parseInt(cs.zIndex || '0') > 1000000 &&
+                        /captcha|challenge/i.test((d.className || '') + ' ' + (d.id || ''))) {
+                        d.remove();
+                    }
+                });
+                document.documentElement.style.overflow = '';
+                document.body.style.overflow = '';
             }
-            document.querySelectorAll('iframe').forEach(f => {
-                if (/recaptcha|captcha|challenge/i.test((f.src||'')+(f.title||''))) f.remove();
-            });
-            document.documentElement.style.overflow = '';
-            document.body.style.overflow = '';
+            skipCaptcha();
+            let scheduled = false;
+            function schedule() {
+                if (scheduled) return;
+                scheduled = true;
+                setTimeout(() => { scheduled = false; skipCaptcha(); }, 800);
+            }
+            new MutationObserver(schedule).observe(
+                document.body || document.documentElement,
+                { childList: true, subtree: true }
+            );
+            setInterval(schedule, 3000);
+            window.__ppaf_captcha_watcher = true;
         }""")
     except Exception:
         pass
