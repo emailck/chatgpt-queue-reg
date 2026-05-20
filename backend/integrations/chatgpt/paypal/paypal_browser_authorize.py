@@ -309,17 +309,17 @@ def _fill_signup_form(
 
 
 _FIELD_SELECTORS = {
-    "email": ['input[name="email"]', "#email"],
-    "phone": ['input[name="phone"]', 'input[name="phoneNumber"]', "#phone", 'input[name="mobilePhone"]'],
-    "cardNumber": ['input[name="cardNumber"]', "#cardNumber", 'input[name="creditCardNumber"]'],
-    "expiry": ['input[name="expirationDate"]', "#cardExpiry", 'input[name="cardExpiry"]'],
-    "cvv": ['input[name="cvv"]', "#cardCvv", 'input[name="securityCode"]', 'input[name="cardCvv"]'],
-    "firstName": ['input[name="firstName"]', "#firstName"],
-    "lastName": ['input[name="lastName"]', "#lastName"],
-    "street": ['input[name="addressLine1"]', "#billingLine1", 'input[name="billingLine1"]', 'input[name="streetAddress"]'],
-    "city": ['input[name="city"]', "#billingCity", 'input[name="billingCity"]'],
-    "zip": ['input[name="billingPostalCode"]', "#billingPostalCode", 'input[name="postalCode"]', 'input[name="zipCode"]'],
-    "password": ['input[name="password"]', 'input[name="createPassword"]'],
+    "email": {"tag": "input", "names": ["email", "login_email"], "selectors": ["#email"], "placeholders": ["email"], "labels": ["email"]},
+    "phone": {"tag": "input", "names": ["phone", "phoneNumber", "telephone", "mobilePhone"], "selectors": ["#phone"], "placeholders": ["phone", "mobile"], "labels": ["phone number", "mobile number"]},
+    "cardNumber": {"tag": "input", "names": ["cardNumber", "creditCardNumber"], "selectors": ["#cardNumber"], "placeholders": ["card number"], "labels": ["card number"]},
+    "expiry": {"tag": "input", "names": ["expirationDate", "expiry", "cardExpiry"], "selectors": ["#cardExpiry"], "placeholders": ["expiration", "mm / yy", "mm/yy"], "labels": ["expiration"]},
+    "cvv": {"tag": "input", "names": ["cvv", "cvc", "securityCode", "cardCvv"], "selectors": ["#cardCvv"], "placeholders": ["cvv", "cvc", "security code"], "labels": ["cvv", "cvc", "security code"]},
+    "firstName": {"tag": "input", "names": ["firstName", "givenName"], "selectors": ["#firstName"], "placeholders": ["first name"], "labels": ["first name"]},
+    "lastName": {"tag": "input", "names": ["lastName", "familyName", "surname"], "selectors": ["#lastName"], "placeholders": ["last name"], "labels": ["last name"]},
+    "street": {"tag": "input", "names": ["addressLine1", "streetAddress", "line1", "billingAddressLine1", "billingLine1"], "selectors": ["#billingLine1"], "placeholders": ["street address", "address line 1", "street"], "labels": ["street address", "address"]},
+    "city": {"tag": "input", "names": ["city", "locality", "billingLocality", "billingCity"], "selectors": ["#billingCity"], "placeholders": ["city"], "labels": ["city"]},
+    "zip": {"tag": "input", "names": ["billingPostalCode", "postalCode", "zipCode", "zip", "postal_code"], "selectors": ["#billingPostalCode", 'input[autocomplete="postal-code"]'], "placeholders": ["zip code", "postal code", "zip", "postal"], "labels": ["zip code", "postal code"]},
+    "password": {"tag": "input", "names": ["password", "createPassword", "newPassword"], "selectors": [], "placeholders": ["create password", "password"], "labels": ["create password", "password"]},
 }
 
 
@@ -344,51 +344,90 @@ def _remove_captcha_elements(page: Any) -> None:
         pass
 
 
-def _wait_for_field(page: Any, name: str, timeout: int = 15000) -> Any:
-    """Wait for a field to appear and become visible, then return it."""
-    for sel in _FIELD_SELECTORS.get(name, []):
-        try:
-            el = page.wait_for_selector(sel, state="visible", timeout=timeout)
-            if el:
-                return el
-        except Exception:
-            continue
-    return None
-
-
-def _react_fill(page: Any, el: Any, value: str) -> None:
-    """Fill an input using the native setter + event dispatch to bypass React controlled inputs."""
-    try:
-        el.scroll_into_view_if_needed()
-    except Exception:
-        pass
-    page.evaluate("""([el, value]) => {
-        el.focus();
-        // clear
-        const proto = el instanceof HTMLTextAreaElement
-            ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-        if (desc && desc.set) desc.set.call(el, '');
-        el.dispatchEvent(new Event('input', {bubbles: true}));
-        // set value
-        if (desc && desc.set) desc.set.call(el, value);
-        else el.value = value;
-        el.dispatchEvent(new Event('input', {bubbles: true}));
-        el.dispatchEvent(new Event('change', {bubbles: true}));
-        el.dispatchEvent(new Event('blur', {bubbles: true}));
-    }""", [el, value])
-
-
 def _fill_field_safe(page: Any, name: str, value: str, log: LogFn | None) -> None:
-    """Wait for field → fill with React-safe injection → verify."""
+    """Find field using plugin's multi-strategy search, then fill with React-safe setter."""
     if not value:
         return
-    el = _wait_for_field(page, name)
-    if not el:
-        emit(log, f"paypal_http: browser WARNING field '{name}' not found", level="warning")
+    cfg = _FIELD_SELECTORS.get(name)
+    if not cfg:
         return
-    _react_fill(page, el, value)
-    time.sleep(0.3)
+    selectors = cfg.get("selectors", [])
+    names = cfg.get("names", [])
+    placeholders = cfg.get("placeholders", [])
+    labels = cfg.get("labels", [])
+    tag = cfg.get("tag", "input")
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        found = page.evaluate("""([tag, selectors, names, placeholders, labels, value]) => {
+            function isFillable(el) {
+                if (!el || el.tagName.toLowerCase() !== tag || el.disabled || el.readOnly) return false;
+                if (tag === 'input') {
+                    const type = (el.getAttribute('type') || 'text').toLowerCase();
+                    if (['hidden','submit','button','checkbox','radio'].includes(type)) return false;
+                }
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+            }
+            function tryFill(el) {
+                el.scrollIntoView({block:'center'});
+                el.focus();
+                const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                if (desc && desc.set) desc.set.call(el, '');
+                el.dispatchEvent(new Event('input', {bubbles:true}));
+                if (desc && desc.set) desc.set.call(el, value);
+                else el.value = value;
+                el.dispatchEvent(new Event('input', {bubbles:true}));
+                el.dispatchEvent(new Event('change', {bubbles:true}));
+                el.dispatchEvent(new Event('blur', {bubbles:true}));
+                return true;
+            }
+            // 1. CSS selectors
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (isFillable(el)) return tryFill(el);
+            }
+            // 2. name attribute
+            for (const n of names) {
+                const el = document.querySelector(tag + '[name="' + n + '"]');
+                if (isFillable(el)) return tryFill(el);
+                const byId = document.getElementById(n);
+                if (isFillable(byId)) return tryFill(byId);
+            }
+            // 3. placeholder
+            const all = Array.from(document.querySelectorAll(tag)).filter(isFillable);
+            for (const p of placeholders) {
+                const target = p.toLowerCase();
+                const el = all.find(e => (e.placeholder || '').toLowerCase().includes(target));
+                if (el) return tryFill(el);
+            }
+            // 4. aria-label
+            for (const p of placeholders.concat(labels)) {
+                const target = p.toLowerCase();
+                const el = all.find(e => (e.getAttribute('aria-label') || '').toLowerCase().includes(target));
+                if (el) return tryFill(el);
+            }
+            // 5. label text
+            for (const text of labels) {
+                const target = text.toLowerCase();
+                const label = Array.from(document.querySelectorAll('label'))
+                    .find(l => l.textContent.trim().toLowerCase().includes(target));
+                if (label) {
+                    const forId = label.getAttribute('for');
+                    if (forId) { const el = document.getElementById(forId); if (isFillable(el)) return tryFill(el); }
+                    const inner = label.querySelector(tag);
+                    if (isFillable(inner)) return tryFill(inner);
+                }
+            }
+            return false;
+        }""", [tag, selectors, names, placeholders, labels, value])
+        if found:
+            time.sleep(0.3)
+            return
+        time.sleep(0.5)
+    emit(log, f"paypal_http: browser WARNING field '{name}' not found after 30s", level="warning")
 
 
 def _verify_fields(page: Any, fields: list[tuple[str, str]], log: LogFn | None) -> list[str]:
@@ -397,7 +436,11 @@ def _verify_fields(page: Any, fields: list[tuple[str, str]], log: LogFn | None) 
     for name, expected in fields:
         if not expected:
             continue
-        for sel in _FIELD_SELECTORS.get(name, []):
+        cfg = _FIELD_SELECTORS.get(name)
+        if not cfg:
+            continue
+        all_sels = cfg.get("selectors", []) + [f'input[name="{n}"]' for n in cfg.get("names", [])]
+        for sel in all_sels:
             try:
                 el = page.query_selector(sel)
                 if el and el.is_visible():
