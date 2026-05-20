@@ -45,11 +45,32 @@ def _human_click(page: Any, el: Any, timeout: int = 5000) -> None:
 
 
 def _human_type(page: Any, el: Any, value: str) -> None:
-    """Instant JS-based fill via native setter — fast, no autocomplete dropdown trigger.
+    """Slow human-like typing using Playwright's trusted input events.
 
-    We delete captchas anyway via _remove_captcha_elements, so isTrusted:false
-    doesn't matter. Speed is more important: typing slowly into street address
-    triggers PayPal's address autocomplete which blocks clicks on other fields.
+    Used for middle page (/pay) where there's no autocomplete dropdown risk.
+    isTrusted:true keystrokes via browser's native input pipeline.
+    """
+    try:
+        el.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    _human_delay(0.2, 0.5)
+    el.click()
+    _human_delay(0.1, 0.3)
+    el.press("Control+a")
+    el.press("Backspace")
+    _human_delay(0.1, 0.2)
+    el.type(value, delay=random.randint(80, 180))
+    _human_delay(0.3, 0.8)
+
+
+def _instant_fill(page: Any, el: Any, value: str) -> None:
+    """Instant JS-based fill via native setter for signup form.
+
+    Speed matters here: typing slowly into street address triggers PayPal's
+    address autocomplete dropdown which blocks clicks on other fields.
+    Captchas are removed by _remove_captcha_elements watcher so isTrusted
+    doesn't matter on the signup page.
     """
     page.evaluate("""([el, value]) => {
         el.scrollIntoView({block:'center'});
@@ -609,7 +630,7 @@ def _fill_field_safe(page: Any, name: str, value: str, log: LogFn | None) -> Non
         el = _find_field(page, name)
         if el:
             try:
-                _human_type(page, el, value)
+                _instant_fill(page, el, value)
                 _human_delay(0.3, 0.8)
                 return
             except Exception:
@@ -801,31 +822,29 @@ def _submit_and_handle_otp(
 
 
 def _wait_after_otp(page: Any, log: LogFn | None) -> None:
-    """After OTP fill, wait for OTP dialog to close, then click any remaining submit button.
+    """After OTP fill, wait for PayPal to process and navigate AWAY from signup.
 
-    Mirrors plugin's clickFinalButtonAfterOtp: wait for OTP to finish → wait for
-    hermes review OR signup form to re-appear → click Continue/Next.
+    Critical: do NOT click any submit button while still on /checkoutweb/signup.
+    The OTP dialog disappearing doesn't mean the page is ready — PayPal still
+    processes the signup form. Clicking before navigation triggers anti-fraud
+    (re-submits the signup form). Just wait for URL change.
     """
-    emit(log, "paypal_http: browser waiting for OTP to process...")
-
-    for _ in range(60):
+    emit(log, "paypal_http: browser waiting for OTP to process (URL change)...")
+    start_url = page.url
+    deadline = time.time() + 90
+    while time.time() < deadline:
         try:
             cur = page.url
-            if "/webapps/hermes" in cur or "pay.openai.com" in cur or "chatgpt.com" in cur:
-                emit(log, f"paypal_http: browser OTP processed, now at {cur[:80]}")
+            if "/webapps/hermes" in cur or "pay.openai.com" in cur or "chatgpt.com" in cur or "/agreements/approve" in cur:
+                emit(log, f"paypal_http: browser OTP processed, navigated to {cur[:80]}")
                 return
-            otp_root = page.query_selector('[data-testid="sca-confirm-multi-field"], #ciBasic')
-            if not otp_root or not otp_root.is_visible():
-                emit(log, "paypal_http: browser OTP dialog closed")
-                time.sleep(1)
-                _click_submit(page)
+            if cur != start_url and "/checkoutweb/signup" not in cur:
+                emit(log, f"paypal_http: browser navigated post-OTP to {cur[:80]}")
                 return
         except Exception:
             pass
-        time.sleep(0.5)
-
-    emit(log, "paypal_http: browser OTP wait timed out, trying submit anyway")
-    _click_submit(page)
+        time.sleep(1)
+    emit(log, "paypal_http: browser OTP wait timed out (no navigation)", level="warning")
 
 
 def _click_submit(page: Any) -> None:
