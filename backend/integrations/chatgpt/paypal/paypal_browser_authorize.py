@@ -399,7 +399,7 @@ def _submit_and_handle_otp(
         if result == "card_error":
             emit(log, "paypal_http: browser card error, regenerating card")
             card = _generate_visa_card()
-            _fill_field(page, "cardNumber", card["number"])
+            _fill_field_safe(page, "cardNumber", card["number"], log)
             time.sleep(0.5)
             _click_submit(page)
             continue
@@ -407,14 +407,17 @@ def _submit_and_handle_otp(
             _click_submit(page)
 
     emit(log, "paypal_http: browser waiting for OTP inputs")
-    _wait_for_otp_inputs(page, timeout=20)
+    input_count = _wait_for_otp_inputs(page, timeout=20)
+    expected_length = input_count if input_count > 1 else 6
+    emit(log, f"paypal_http: browser OTP detected inputs={input_count} expectedLength={expected_length}")
 
-    otp = fetch_paypal_otp(paypal_cfg, timeout=int(paypal_cfg.get("otp_timeout") or 90), log=log)
-    if not otp:
-        raise PayPalHttpError("browser: PayPal phone OTP 获取失败")
+    otp = _fetch_otp_with_length_check(
+        paypal_cfg, smsurl, expected_length,
+        timeout=int(paypal_cfg.get("otp_timeout") or 90), log=log,
+    )
 
-    emit(log, f"paypal_http: browser filling OTP")
-    _fill_otp(page, otp)
+    emit(log, "paypal_http: browser filling OTP")
+    _fill_otp_cells(page, otp, log)
 
     otp_submit = _find_otp_submit(page)
     if otp_submit:
@@ -476,44 +479,150 @@ def _wait_post_submit(page: Any, timeout: int = 15000) -> str:
     return "timeout"
 
 
-def _wait_for_otp_inputs(page: Any, timeout: int = 20) -> None:
+def _wait_for_otp_inputs(page: Any, timeout: int = 20) -> int:
+    """Wait for OTP input fields to appear. Returns the input count."""
     for _ in range(timeout * 2):
-        try:
-            root = page.query_selector('[data-testid="sca-confirm-multi-field"], #ciBasic')
-            if root and root.is_visible():
-                inputs = root.query_selector_all('input')
-                if len(inputs) >= 4:
-                    return
-        except Exception:
-            pass
+        count = _detect_otp_input_count(page)
+        if count > 0:
+            return count
         time.sleep(0.5)
+    return 0
 
 
-def _fill_otp(page: Any, otp: str) -> None:
-    digits = re.sub(r"\D", "", otp)
-    root = page.query_selector('[data-testid="sca-confirm-multi-field"], #ciBasic')
-    if not root:
-        return
-    inputs = root.query_selector_all('input')
-    if len(inputs) >= len(digits):
-        for i, d in enumerate(digits):
+def _detect_otp_input_count(page: Any) -> int:
+    """Detect OTP inputs using the same heuristics as the browser plugin."""
+    try:
+        return page.evaluate("""() => {
+            function isSmsCodeInput(input) {
+                if (!input || input.disabled || input.readOnly) return false;
+                const rect = input.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return false;
+                const text = [input.name, input.id, input.placeholder, input.autocomplete,
+                    input.getAttribute('aria-label'), input.getAttribute('data-testid')].join(' ').toLowerCase();
+                if (/phone|mobile|card|cvv|cvc|expiry|expiration|email|password|postal|zip|billing|address|city|state|country/.test(text)) return false;
+                if (/otp|code|security|verification|one-time/.test(text)) return true;
+                const maxLen = Number(input.getAttribute('maxlength') || input.maxLength || 0);
+                const isPayPalCell = input.closest('#ciBasic') && /^(cibasic-|ci-cibasic-|ci-ci-)/.test(text);
+                const isOneDigit = /^(ci-|ci_|otp-|otp_|code-|code_)/.test(text) && (maxLen === 0 || maxLen === 1);
+                return isPayPalCell || isOneDigit || (/numeric|tel/.test(input.inputMode + ' ' + input.type) && maxLen >= 4 && maxLen <= 8);
+            }
+            // scoped: #ciBasic multi-digit cells
+            const root = document.querySelector('[data-testid="sca-confirm-multi-field"]') || document.getElementById('ciBasic');
+            if (root) {
+                const scoped = Array.from(root.querySelectorAll('input')).filter(isSmsCodeInput);
+                if (scoped.length >= 4) return scoped.length;
+            }
+            // fallback: single input
+            const sels = ['input[autocomplete="one-time-code"]', 'input[name*="otp" i]',
+                'input[name*="security" i]', 'input[name*="verification" i]',
+                'input[inputmode="numeric"]', 'input[type="tel"]'];
+            for (const sel of sels) {
+                const el = Array.from(document.querySelectorAll(sel)).find(isSmsCodeInput);
+                if (el) return 1;
+            }
+            return 0;
+        }""")
+    except Exception:
+        return 0
+
+
+def _fetch_otp_with_length_check(
+    paypal_cfg: dict[str, Any],
+    smsurl: str,
+    expected_length: int,
+    timeout: int,
+    log: LogFn | None,
+) -> str:
+    """Poll smsurl for OTP, only accept tokens matching expectedLength."""
+    import json
+    import requests as std_requests
+
+    deadline = time.time() + timeout
+    attempts = 0
+    while time.time() < deadline:
+        attempts += 1
+        try:
+            resp = std_requests.get(smsurl, timeout=15)
+            text = resp.text or ""
             try:
-                page.evaluate("""([el, val]) => {
-                    const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-                    if (desc && desc.set) desc.set.call(el, val);
-                    else el.value = val;
-                    el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, inputType:'insertText', data:val}));
-                    el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:val}));
-                    el.dispatchEvent(new Event('change', {bubbles:true}));
-                }""", [inputs[i], d])
+                payload = resp.json()
+                text += " " + json.dumps(payload, ensure_ascii=False)
             except Exception:
                 pass
-        time.sleep(0.5)
-    elif inputs:
-        try:
-            inputs[0].fill(digits)
-        except Exception:
-            pass
+            for match in re.finditer(r"\b(\d{4,8})\b", text):
+                token = match.group(1)
+                if len(token) == expected_length:
+                    emit(log, f"paypal_http: OTP received len={len(token)} attempts={attempts}")
+                    return token
+                else:
+                    emit(log, f"paypal_http: OTP ignored len={len(token)} expected={expected_length}", level="warning")
+        except Exception as exc:
+            emit(log, f"paypal_http: smsurl poll failed: {exc}", level="warning")
+        time.sleep(3)
+
+    raise PayPalHttpError(f"OTP 获取超时 ({timeout}s), expected_length={expected_length}")
+
+
+def _fill_otp_cells(page: Any, otp: str, log: LogFn | None) -> None:
+    """Fill OTP using the plugin's fillOtpCell event chain for React compatibility."""
+    digits = re.sub(r"\D", "", otp)
+    page.evaluate("""([digits]) => {
+        function isSmsCodeInput(input) {
+            if (!input || input.disabled || input.readOnly) return false;
+            const rect = input.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return false;
+            const text = [input.name, input.id, input.placeholder, input.autocomplete,
+                input.getAttribute('aria-label'), input.getAttribute('data-testid')].join(' ').toLowerCase();
+            if (/phone|mobile|card|cvv|cvc|expiry|expiration|email|password|postal|zip|billing|address|city|state|country/.test(text)) return false;
+            if (/otp|code|security|verification|one-time/.test(text)) return true;
+            const maxLen = Number(input.getAttribute('maxlength') || input.maxLength || 0);
+            const isPayPalCell = input.closest('#ciBasic') && /^(cibasic-|ci-cibasic-|ci-ci-)/.test(text);
+            const isOneDigit = /^(ci-|ci_|otp-|otp_|code-|code_)/.test(text) && (maxLen === 0 || maxLen === 1);
+            return isPayPalCell || isOneDigit || (/numeric|tel/.test(input.inputMode + ' ' + input.type) && maxLen >= 4 && maxLen <= 8);
+        }
+        function setVal(el, val) {
+            const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+            if (desc && desc.set) desc.set.call(el, val);
+            else el.value = val;
+        }
+        function fillCell(input, digit) {
+            input.scrollIntoView({block:'center'});
+            input.focus();
+            setVal(input, '');
+            input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'deleteContentBackward', data:null}));
+            input.dispatchEvent(new KeyboardEvent('keydown', {key:digit, code:'Digit'+digit, bubbles:true}));
+            input.dispatchEvent(new KeyboardEvent('keypress', {key:digit, code:'Digit'+digit, bubbles:true}));
+            setVal(input, digit);
+            input.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, cancelable:true, inputType:'insertText', data:digit}));
+            input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:digit}));
+            input.dispatchEvent(new KeyboardEvent('keyup', {key:digit, code:'Digit'+digit, bubbles:true}));
+            input.dispatchEvent(new Event('change', {bubbles:true}));
+        }
+        const root = document.querySelector('[data-testid="sca-confirm-multi-field"]') || document.getElementById('ciBasic');
+        if (root) {
+            const inputs = Array.from(root.querySelectorAll('input')).filter(isSmsCodeInput)
+                .sort((a,b) => {
+                    const ai = Number((a.name||a.id||'').match(/(\\d+)$/)?.[1]||0);
+                    const bi = Number((b.name||b.id||'').match(/(\\d+)$/)?.[1]||0);
+                    return ai - bi;
+                });
+            if (inputs.length > 1) {
+                const chars = digits.split('');
+                for (let i = 0; i < inputs.length && i < chars.length; i++) fillCell(inputs[i], chars[i]);
+                if (inputs.length > 0) inputs[Math.min(chars.length, inputs.length)-1].dispatchEvent(new Event('blur', {bubbles:true}));
+                return;
+            }
+        }
+        // single input fallback
+        const sels = ['input[autocomplete="one-time-code"]', 'input[name*="otp" i]',
+            'input[name*="verification" i]', 'input[inputmode="numeric"]', 'input[type="tel"]'];
+        for (const sel of sels) {
+            const el = Array.from(document.querySelectorAll(sel)).find(isSmsCodeInput);
+            if (el) { setVal(el, digits); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); return; }
+        }
+    }""", [digits])
+    time.sleep(0.5)
+    emit(log, f"paypal_http: browser OTP cells filled len={len(digits)}")
 
 
 def _find_otp_submit(page: Any) -> Any:
