@@ -195,6 +195,22 @@ def run(ctx: JobContext) -> None:
     if "email" not in billing_cfg or not billing_cfg.get("email"):
         billing_cfg["email"] = str(account_row.email or "")
 
+    if not billing_cfg.get("line1"):
+        from backend.integrations.chatgpt.paypal.runtime import fetch_random_address
+        addr = fetch_random_address(proxy_url=payment_proxy_url)
+        billing_cfg.setdefault("name", f"{addr['first_name']} {addr['last_name']}")
+        billing_cfg.setdefault("line1", addr["line1"])
+        billing_cfg.setdefault("city", addr["city"])
+        billing_cfg.setdefault("state", addr["state"])
+        billing_cfg.setdefault("postal_code", addr["postal_code"])
+        billing_cfg.setdefault("country", addr["country"])
+        paypal_cfg.setdefault("first_name", addr["first_name"])
+        paypal_cfg.setdefault("last_name", addr["last_name"])
+        paypal_cfg.setdefault("billing_line1", addr["line1"])
+        paypal_cfg.setdefault("billing_city", addr["city"])
+        paypal_cfg.setdefault("billing_state", addr["state"])
+        paypal_cfg.setdefault("billing_postal", addr["postal_code"])
+
     ctx.log(
         "starting payment stage (paypal_http)",
         payload={

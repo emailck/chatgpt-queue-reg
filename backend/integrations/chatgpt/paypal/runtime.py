@@ -374,6 +374,66 @@ def gen_paypal_password() -> str:
     return "Aa" + uuid.uuid4().hex[:10] + "*9"
 
 
+ADDRESS_API_URL = "https://ip.qiqicdn1.cf/api/address"
+
+_US_STATE_ABBR: dict[str, str] = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+    "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+    "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ",
+    "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+    "north dakota": "ND", "ohio": "OH", "oklahoma": "OK", "oregon": "OR",
+    "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+    "district of columbia": "DC",
+}
+
+
+def _abbr_state(state: str) -> str:
+    s = str(state or "").strip()
+    if len(s) <= 2:
+        return s.upper()
+    return _US_STATE_ABBR.get(s.lower(), s[:2].upper())
+
+
+def fetch_random_address(proxy_url: str = "") -> dict[str, str]:
+    """Fetch a random US address via the shared address API.
+
+    Returns a normalised dict with keys: first_name, last_name, line1, city,
+    state (2-letter), postal_code, country ("US").
+    Falls back to hardcoded defaults on failure.
+    """
+    try:
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else {}
+        resp = std_requests.get(ADDRESS_API_URL, proxies=proxies, timeout=10)
+        data = resp.json()
+        return {
+            "first_name": str(data.get("firstName") or "").strip(),
+            "last_name": str(data.get("lastName") or "").strip(),
+            "line1": str(data.get("street") or "").strip(),
+            "city": str(data.get("city") or "").strip(),
+            "state": _abbr_state(data.get("state") or ""),
+            "postal_code": str(data.get("postalCode") or "").strip(),
+            "country": "US",
+        }
+    except Exception:
+        return {
+            "first_name": "Tommy",
+            "last_name": "Jacobs",
+            "line1": "283 Clearview Drive",
+            "city": "Smyrna",
+            "state": "TN",
+            "postal_code": "37167",
+            "country": "US",
+        }
+
+
 def extract_redirect_url(payload: Any) -> str:
     if isinstance(payload, dict):
         rtu = payload.get("redirect_to_url")
