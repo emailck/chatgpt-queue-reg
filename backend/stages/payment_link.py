@@ -164,11 +164,9 @@ def run(ctx: JobContext) -> None:
 
 
 def _extract_cs_id(url: str) -> str:
-    text = str(url or "").strip()
-    if not text:
-        return ""
-    last = text.rstrip("/").split("/")[-1]
-    return last if last.startswith("cs_") else ""
+    import re
+    match = re.search(r"(cs_(?:live|test)_[A-Za-z0-9]+)", str(url or ""))
+    return match.group(1) if match else ""
 
 
 class _AccountAdapter:

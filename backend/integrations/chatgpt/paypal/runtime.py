@@ -79,10 +79,14 @@ def stripe_headers(referer: str = PAY_OPENAI_REFERER) -> dict[str, str]:
 
 
 def extract_session_id(checkout_session_id: str, checkout_url: str) -> str:
-    value = str(checkout_session_id or "").strip()
-    if value.startswith("cs_"):
-        return value
-    text = str(checkout_url or "")
+    """Pull a clean `cs_(live|test)_<alnum>` out of either field.
+
+    Stripe session_ids are alphanumeric. Callers may pass a value that still
+    has the page URL fragment (`#fidnand...`) or query string attached — we
+    always run the regex so the fragment is dropped at the first non-alnum
+    character.
+    """
+    text = f"{checkout_session_id or ''} {checkout_url or ''}"
     match = re.search(r"(cs_(?:live|test)_[A-Za-z0-9]+)", text)
     return match.group(1) if match else ""
 
