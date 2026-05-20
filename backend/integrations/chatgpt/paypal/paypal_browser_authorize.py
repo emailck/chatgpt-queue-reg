@@ -280,7 +280,24 @@ def _wait_for_signup_page(
 
 
 def _hard_reload(page: Any, approve_url: str, log: LogFn | None) -> None:
-    """Robust reload: try goto(approve_url) → reload() → wait, swallow timeouts."""
+    """In-place reload via JS — bypasses Playwright's stuck-navigation wait.
+
+    page.reload() waits for the current navigation to complete before reloading.
+    If PayPal SPA is in a 'navigating but never arrives' state (Continue clicked,
+    RSC request pending), page.reload() times out. JS reload doesn't wait.
+    """
+    try:
+        page.evaluate("() => { window.location.reload(); }")
+        emit(log, "paypal_http: /pay JS reload triggered")
+        time.sleep(5)
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        time.sleep(2)
+        return
+    except Exception as exc:
+        emit(log, f"paypal_http: /pay JS reload failed: {str(exc)[:80]}")
     if approve_url:
         try:
             page.goto(approve_url, wait_until="commit", timeout=15000)
@@ -288,12 +305,7 @@ def _hard_reload(page: Any, approve_url: str, log: LogFn | None) -> None:
             return
         except Exception as exc:
             emit(log, f"paypal_http: /pay goto failed: {str(exc)[:80]}")
-    try:
-        page.reload(wait_until="commit", timeout=15000)
-        time.sleep(5)
-    except Exception as exc:
-        emit(log, f"paypal_http: /pay reload failed: {str(exc)[:80]}")
-        time.sleep(3)
+    time.sleep(3)
 
 
 def _check_rsc_redirect(page: Any, log: LogFn | None) -> bool:
