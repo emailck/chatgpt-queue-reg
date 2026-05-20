@@ -753,8 +753,40 @@ def _submit_and_handle_otp(
 
     otp_submit = _find_otp_submit(page)
     if otp_submit:
-        otp_submit.click()
+        _human_click(page, otp_submit)
         emit(log, "paypal_http: browser OTP submitted")
+    else:
+        emit(log, "paypal_http: browser OTP no submit button found (may auto-submit)")
+
+    _wait_after_otp(page, log)
+
+
+def _wait_after_otp(page: Any, log: LogFn | None) -> None:
+    """After OTP fill, wait for OTP dialog to close, then click any remaining submit button.
+
+    Mirrors plugin's clickFinalButtonAfterOtp: wait for OTP to finish → wait for
+    hermes review OR signup form to re-appear → click Continue/Next.
+    """
+    emit(log, "paypal_http: browser waiting for OTP to process...")
+
+    for _ in range(60):
+        try:
+            cur = page.url
+            if "/webapps/hermes" in cur or "pay.openai.com" in cur or "chatgpt.com" in cur:
+                emit(log, f"paypal_http: browser OTP processed, now at {cur[:80]}")
+                return
+            otp_root = page.query_selector('[data-testid="sca-confirm-multi-field"], #ciBasic')
+            if not otp_root or not otp_root.is_visible():
+                emit(log, "paypal_http: browser OTP dialog closed")
+                time.sleep(1)
+                _click_submit(page)
+                return
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    emit(log, "paypal_http: browser OTP wait timed out, trying submit anyway")
+    _click_submit(page)
 
 
 def _click_submit(page: Any) -> None:
