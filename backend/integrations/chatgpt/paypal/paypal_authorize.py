@@ -78,7 +78,16 @@ def authorize_paypal_http(
     flow_id = first_match([r'"flowId"\s*:\s*"([^"]+)"'], html) or ctx_id
 
     if phone and smsurl and not cookies and "/webapps/hermes" not in str(resp.url):
-        return paypal_guest_signup_authorize(http, str(resp.url), html, ba_token, paypal_cfg, log, authorize_from_hermes)
+        from .paypal_browser_authorize import browser_paypal_checkout
+        address = {
+            "first_name": str(paypal_cfg.get("first_name") or ""),
+            "last_name": str(paypal_cfg.get("last_name") or ""),
+            "line1": str(paypal_cfg.get("billing_line1") or ""),
+            "city": str(paypal_cfg.get("billing_city") or ""),
+            "state": str(paypal_cfg.get("billing_state") or ""),
+            "postal_code": str(paypal_cfg.get("billing_postal") or ""),
+        }
+        return browser_paypal_checkout(approve_url, ba_token, proxy_url, paypal_cfg, address, log)
 
     at_hermes = "/webapps/hermes" in str(resp.url)
     logged_in = at_hermes
