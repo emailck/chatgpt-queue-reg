@@ -123,15 +123,42 @@ def run_paypal_http_payment(
 
     paypal_runtime = {**paypal, "_runtime": ctx, "_proxy_url": proxy_url}
     emit(log, "paypal_http: authorize paypal billing agreement")
-    paypal_result = authorize_paypal_http(paypal_approve_url, paypal_runtime, proxy_url, log)
+    paypal_result = authorize_paypal_http(paypal_approve_url, paypal_runtime, proxy_url, log, check_cancelled)
     checkpoint(check_cancelled)
 
+    post_return_allowed_origins_error = ""
     emit(log, "paypal_http: stripe allowed origins after return")
-    fetch_allowed_origins(http, stripe_pk, session_id)
+    try:
+        fetch_allowed_origins(http, stripe_pk, session_id)
+    except Exception as exc:
+        checkpoint(check_cancelled)
+        post_return_allowed_origins_error = str(exc)[:1000]
+        emit(log, f"paypal_http: stripe allowed origins after return skipped/failed: {post_return_allowed_origins_error}", level="warning")
     checkpoint(check_cancelled)
 
     emit(log, "paypal_http: stripe poll result")
-    poll_data = poll_result(http, stripe_pk, session_id, runtime, log, check_cancelled)
+    try:
+        poll_data = poll_result(http, stripe_pk, session_id, runtime, log, check_cancelled)
+    except Exception as exc:
+        checkpoint(check_cancelled)
+        poll_error = str(exc)[:1000]
+        emit(log, f"paypal_http: stripe poll result after return failed; not rerunning checkout init: {poll_error}", level="warning")
+        return {
+            "state": "paypal_authorized",
+            "checkout_session_id": session_id,
+            "checkout_url": checkout_url,
+            "payment_method_id": pm_id,
+            "stripe_redirect_url": redirect_url,
+            "paypal_approve_url": paypal_approve_url,
+            "paypal_final_url": paypal_result.get("final_url", ""),
+            "paypal_ba_token": paypal_result.get("ba_token", ""),
+            "paypal_ec_token": paypal_result.get("ec_token", ""),
+            "stripe_poll_state": "unknown",
+            "stripe_payment_status": "",
+            "stripe_poll_error": poll_error,
+            "stripe_allowed_origins_error": post_return_allowed_origins_error,
+            "stripe_poll": {},
+        }
 
     state = str(poll_data.get("state") or "paypal_authorized")
     return {
@@ -146,5 +173,6 @@ def run_paypal_http_payment(
         "paypal_ec_token": paypal_result.get("ec_token", ""),
         "stripe_poll_state": state,
         "stripe_payment_status": poll_data.get("payment_object_status") or poll_data.get("payment_status") or "",
+        "stripe_allowed_origins_error": post_return_allowed_origins_error,
         "stripe_poll": poll_data,
     }

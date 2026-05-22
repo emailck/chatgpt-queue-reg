@@ -44,7 +44,7 @@ export default function Settings() {
 
         <EntityCard
           title="WorkPool config boundary"
-          subtitle="register / payment_link / payment / oauth_codex / rt_keepalive"
+          subtitle="register / payment_link / payment / chatgpt_session / openai_oauth / sub2api_sync"
           tone="info"
           status={<SettingOutlined />}
           actions={<Button size="small" onClick={() => navigate('/pools')}>配置 WorkPool</Button>}
@@ -52,8 +52,9 @@ export default function Settings() {
           <KeyValueGrid>
             <KeyValue label="register" value="注册代理 region、注册并发" />
             <KeyValue label="payment" value="支付代理 region、PayPal 账号、PayPal 号码池、Stripe/Captcha 参数" />
-            <KeyValue label="oauth_codex" value="add-phone 接码配置" />
-            <KeyValue label="rt_keepalive" value="sub2api 上传/状态同步配置" />
+            <KeyValue label="chatgpt_session" value="注册 Session 标准化/刷新配置" />
+            <KeyValue label="openai_oauth" value="OpenAI OAuth RT 接码配置" />
+            <KeyValue label="sub2api_sync" value="sub2api 池导入/状态同步配置" />
           </KeyValueGrid>
         </EntityCard>
 

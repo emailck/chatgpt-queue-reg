@@ -1,14 +1,35 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Button, Dropdown, Input, Popconfirm, Space, Tag, Typography, message } from 'antd'
-import { BugOutlined, DeleteOutlined, MailOutlined, ReloadOutlined } from '@ant-design/icons'
+import type { TableColumnsType } from 'antd'
+import { Button, Dropdown, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd'
+import { BugOutlined, CloudDownloadOutlined, CloudSyncOutlined, DeleteOutlined, MailOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import { JobLogPanel } from '@/components/JobLogPanel'
-import { StatusTag } from '@/components/StatusTag'
-import { ActionCard, CardToolbar, EntityCard, EntityGrid, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
-import { CopyableText, ErrorCallout, SelectionSummary, Sub2ApiBadge, TokenBadges, UrlAction } from '@/components/ui/DomainBits'
-import { apiFetch, formatDateTime } from '@/lib/api'
+import { ActionCard, CardToolbar, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
+import { CopyableText, ErrorCallout, SelectionSummary, Sub2ApiBadge, TokenBadges } from '@/components/ui/DomainBits'
+import { API_BASE, apiFetch, formatDateTime } from '@/lib/api'
 
 const { Text } = Typography
+
+type SoldFilter = 'all' | 'unsold' | 'sold'
+
+function sub2apiError(value: string) {
+  const text = String(value || '').trim()
+  if (['success', 'ok', 'synced', 'active', 'alive'].includes(text.toLowerCase())) return ''
+  return text
+}
+
+interface EmailHistoryMessage {
+  id: number | string
+  email: string
+  provider: string
+  subject: string
+  sender: string
+  body_text: string
+  code: string
+  received_at: string | null
+  created_at: string | null
+  folder?: string
+}
 
 interface Account {
   id: number
@@ -17,20 +38,28 @@ interface Account {
   status: string
   account_id: string
   workspace_id: string
+  plan_type: string
+  sold: boolean
+  sold_at: string | null
   proxy_url: string
   last_error: string
   last_payment_link_id: number | null
   last_payment_link_url: string
+  last_payment_link_status: string
   user_agent: string
   has_access_token: boolean
   has_refresh_token: boolean
   has_session_token: boolean
-  codex_token_id: number | null
-  codex_token_alive: boolean
-  codex_token_has_refresh_token: boolean
-  codex_token_last_error: string
-  sub2api_external_id: string
+  refresh_token_id: number | null
+  refresh_token_enabled: boolean
+  refresh_token_has_token: boolean
+  refresh_token_last_error: string
+  sub2api_account_id: string
   sub2api_status: string
+  sub2api_auth_mode: string
+  sub2api_schedulable: boolean | null
+  sub2api_relogin_required: boolean
+  sub2api_last_error: string
   sub2api_uploaded_at: string | null
   sub2api_status_checked_at: string | null
   created_at: string | null
@@ -38,34 +67,32 @@ interface Account {
   updated_at: string | null
 }
 
-function accountTone(row: Account): 'default' | 'primary' | 'success' | 'warning' | 'danger' | 'info' {
-  if (row.last_error) return 'danger'
-  if (row.status === 'registered') return 'success'
-  if (row.status === 'registering') return 'info'
-  if (row.status === 'failed') return 'danger'
-  return 'default'
-}
-
 export default function Accounts() {
   const [rows, setRows] = useState<Account[]>([])
   const [loading, setLoading] = useState(false)
   const [logJobId, setLogJobId] = useState<number | null>(null)
   const [emailModalAccount, setEmailModalAccount] = useState<Account | null>(null)
-  const [emailKeyword, setEmailKeyword] = useState('')
+  const [emailHistory, setEmailHistory] = useState<EmailHistoryMessage[]>([])
+  const [emailHistoryLoading, setEmailHistoryLoading] = useState(false)
   const [selected, setSelected] = useState<React.Key[]>([])
-  const [page, setPage] = useState(1)
+  const [soldFilter, setSoldFilter] = useState<SoldFilter>('all')
+  const [exportingSold, setExportingSold] = useState(false)
+  const [refreshingSub2ApiStatus, setRefreshingSub2ApiStatus] = useState(false)
+  const [refreshingAccessToken, setRefreshingAccessToken] = useState(false)
 
   const reload = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await apiFetch<Account[]>('/accounts?limit=300')
+      const params = new URLSearchParams({ paid_only: 'true', limit: '300' })
+      if (soldFilter !== 'all') params.set('sold', soldFilter === 'sold' ? 'true' : 'false')
+      const data = await apiFetch<Account[]>(`/accounts?${params.toString()}`)
       setRows(data)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载失败')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [soldFilter])
 
   useEffect(() => {
     const initial = setTimeout(reload, 0)
@@ -78,25 +105,24 @@ export default function Accounts() {
 
   const summary = useMemo(() => ({
     total: rows.length,
-    registered: rows.filter((row) => row.status === 'registered').length,
-    failed: rows.filter((row) => row.status === 'failed' || !!row.last_error).length,
-    at: rows.filter((row) => row.has_access_token).length,
-    codexRt: rows.filter((row) => row.codex_token_has_refresh_token).length,
-    sub2api: rows.filter((row) => ['active', 'alive', 'ok', 'uploaded'].includes(String(row.sub2api_status || '').toLowerCase())).length,
+    unsold: rows.filter((row) => !row.sold).length,
+    sold: rows.filter((row) => row.sold).length,
+    schedulable: rows.filter((row) => row.sub2api_schedulable === true && !row.sub2api_relogin_required).length,
+    failed: rows.filter((row) => row.sub2api_status === 'sync_failed' || !!sub2apiError(row.sub2api_last_error)).length,
+    relogin: rows.filter((row) => row.sub2api_relogin_required).length,
   }), [rows])
 
-  const triggerReadEmail = async (account: Account, keyword: string) => {
+  const showEmailHistory = async (account: Account) => {
+    setEmailModalAccount(account)
+    setEmailHistory([])
+    setEmailHistoryLoading(true)
     try {
-      const resp = await apiFetch<{ job_id: number }>(`/accounts/${account.id}/read-email`, {
-        method: 'POST',
-        body: JSON.stringify({ keyword, timeout_seconds: 120 }),
-      })
-      message.success(`已派发收邮件 job #${resp.job_id}`)
-      setLogJobId(resp.job_id)
-      setEmailModalAccount(null)
-      setEmailKeyword('')
+      const data = await apiFetch<EmailHistoryMessage[]>(`/accounts/${account.id}/email-history?limit=10`)
+      setEmailHistory(data)
     } catch (err) {
-      message.error(err instanceof Error ? err.message : '收邮件失败')
+      message.error(err instanceof Error ? err.message : '读取邮件历史失败')
+    } finally {
+      setEmailHistoryLoading(false)
     }
   }
 
@@ -112,16 +138,52 @@ export default function Accounts() {
     }
   }
 
-  const retryPaymentLink = async (account: Account, plan: 'team' | 'plus') => {
+  const triggerSub2ApiSync = async (account: Account) => {
     try {
-      const resp = await apiFetch<{ job_id: number }>(`/accounts/${account.id}/payment-link/retry`, {
+      const resp = await apiFetch<{ job_id: number; already_running: boolean }>(`/accounts/${account.id}/sub2api-sync`, {
         method: 'POST',
-        body: JSON.stringify({ plan }),
       })
-      message.success(`已重试 ${plan} 长链生成 job #${resp.job_id}`)
+      message.success(resp.already_running ? `sub2api_sync job #${resp.job_id} 已在运行` : `已派发 sub2api_sync job #${resp.job_id}`)
       setLogJobId(resp.job_id)
+      reload()
     } catch (err) {
-      message.error(err instanceof Error ? err.message : '重试失败')
+      message.error(err instanceof Error ? err.message : 'sub2api_sync 失败')
+    }
+  }
+
+  const refreshSub2ApiStatus = async (ids: number[]) => {
+    if (!ids.length) return
+    setRefreshingSub2ApiStatus(true)
+    try {
+      const resp = await apiFetch<{ refreshed: number; failed: number }>('/accounts/sub2api-status-refresh', {
+        method: 'POST',
+        body: JSON.stringify({ ids }),
+      })
+      message.success(`已刷新 sub2api 状态 ${resp.refreshed} 个${resp.failed ? `，失败 ${resp.failed} 个` : ''}`)
+      reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '刷新 sub2api 状态失败')
+    } finally {
+      setRefreshingSub2ApiStatus(false)
+    }
+  }
+
+  const refreshAccessToken = async (ids: number[]) => {
+    if (!ids.length) return
+    setRefreshingAccessToken(true)
+    try {
+      const resp = await apiFetch<{ enqueued: number; already_running: number; jobs: { job_id: number; already_running: boolean }[] }>('/accounts/access-token-refresh', {
+        method: 'POST',
+        body: JSON.stringify({ ids }),
+      })
+      message.success(`已派发 AT 刷新 ${resp.enqueued} 个${resp.already_running ? `，运行中 ${resp.already_running} 个` : ''}`)
+      const firstJob = resp.jobs.find((job) => job.job_id)?.job_id
+      if (firstJob) setLogJobId(firstJob)
+      reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '刷新 AT 失败')
+    } finally {
+      setRefreshingAccessToken(false)
     }
   }
 
@@ -150,32 +212,238 @@ export default function Accounts() {
     }
   }
 
-  const toggleSelected = (id: number, checked: boolean) => {
-    setSelected((prev) => checked ? [...prev, id] : prev.filter((item) => Number(item) !== id))
+  const exportSelectedSub2Api = async () => {
+    if (!selected.length) return
+    setExportingSold(true)
+    try {
+      const response = await fetch(`${API_BASE}/accounts/sub2api-export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selected.map((id) => Number(id)), mark_sold: true }),
+      })
+      if (!response.ok) {
+        const text = await response.text()
+        let detail = text || response.statusText
+        try {
+          const data = JSON.parse(text)
+          detail = String(data?.detail || detail)
+        } catch {
+          // keep raw detail
+        }
+        throw new Error(detail)
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'plus-sub2api-accounts.json'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      message.success(`已导出并标记已售 ${selected.length} 个账号`)
+      setSelected([])
+      reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '导出失败')
+    } finally {
+      setExportingSold(false)
+    }
   }
+
+  const emailHistoryColumns: TableColumnsType<EmailHistoryMessage> = [
+    {
+      title: '时间',
+      key: 'time',
+      width: 170,
+      render: (_, row) => formatDateTime(row.received_at || row.created_at),
+    },
+    {
+      title: '主题',
+      dataIndex: 'subject',
+      width: 240,
+      ellipsis: true,
+      render: (value: string) => value || '无主题',
+    },
+    {
+      title: '发件人',
+      dataIndex: 'sender',
+      width: 220,
+      ellipsis: true,
+      render: (value: string) => <CopyableText value={value} label="发件人" />,
+    },
+    {
+      title: '文件夹',
+      dataIndex: 'folder',
+      width: 100,
+      render: (value: string | undefined) => value || '-',
+    },
+    {
+      title: '正文预览',
+      dataIndex: 'body_text',
+      ellipsis: true,
+      render: (value: string) => value || '-',
+    },
+  ]
+
+  const columns: TableColumnsType<Account> = [
+    {
+      title: '账号',
+      dataIndex: 'email',
+      width: 280,
+      fixed: 'left',
+      render: (value: string, row) => (
+        <Space direction="vertical" size={2} style={{ maxWidth: 260 }}>
+          <CopyableText value={value} label="邮箱" />
+          <Space size={4} wrap>
+            <Text type="secondary">Account #{row.id}</Text>
+            {row.last_payment_link_id && <Tag color="green">已支付</Tag>}
+            <Tag color={row.sold ? 'default' : 'green'}>{row.sold ? '已售出' : '可售'}</Tag>
+            {row.plan_type && <Tag color="blue">{row.plan_type}</Tag>}
+          </Space>
+          {row.sold && <Text type="secondary">售出 {formatDateTime(row.sold_at)}</Text>}
+        </Space>
+      ),
+    },
+    {
+      title: 'sub2api 状态',
+      key: 'sub2api_status',
+      width: 260,
+      render: (_, row) => (
+        <Space direction="vertical" size={4}>
+          <Space size={4} wrap>
+            <Sub2ApiBadge status={row.sub2api_status} />
+            {row.sub2api_auth_mode && <Tag color="blue">{row.sub2api_auth_mode}</Tag>}
+            {row.sub2api_schedulable === true && !row.sub2api_relogin_required && <Tag color="green">schedulable</Tag>}
+            {row.sub2api_schedulable === false && <Tag color="orange">unschedulable</Tag>}
+            {row.sub2api_relogin_required && <Tag color="red">relogin</Tag>}
+          </Space>
+          <ErrorCallout error={sub2apiError(row.sub2api_last_error)} />
+        </Space>
+      ),
+    },
+    {
+      title: 'sub2api ID',
+      dataIndex: 'sub2api_account_id',
+      width: 210,
+      ellipsis: true,
+      render: (value: string) => value ? <CopyableText value={value} label="sub2api ID" code /> : <Text type="secondary">待同步</Text>,
+    },
+    {
+      title: '同步时间',
+      key: 'sub2api_times',
+      width: 190,
+      render: (_, row) => (
+        <Space direction="vertical" size={2}>
+          <Text type="secondary">同步 {formatDateTime(row.sub2api_uploaded_at)}</Text>
+          <Text type="secondary">检查 {formatDateTime(row.sub2api_status_checked_at)}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: '密码',
+      dataIndex: 'password',
+      width: 180,
+      ellipsis: true,
+      render: (value: string) => <CopyableText value={value} label="密码" code />,
+    },
+    {
+      title: 'Token',
+      key: 'tokens',
+      width: 220,
+      render: (_, row) => (
+        <Space direction="vertical" size={4}>
+          <TokenBadges accessToken={row.has_access_token ? 'yes' : ''} refreshToken={(row.has_refresh_token || row.refresh_token_has_token) ? 'yes' : ''} />
+          {row.refresh_token_id && <Tag color={row.refresh_token_enabled ? 'blue' : 'red'}>RT #{row.refresh_token_id}</Tag>}
+        </Space>
+      ),
+    },
+    {
+      title: 'OpenAI Account',
+      dataIndex: 'account_id',
+      width: 220,
+      ellipsis: true,
+      render: (value: string) => <CopyableText value={value} label="Account ID" code />,
+    },
+    {
+      title: 'Workspace',
+      dataIndex: 'workspace_id',
+      width: 200,
+      ellipsis: true,
+      render: (value: string) => <CopyableText value={value} label="Workspace" code />,
+    },
+    {
+      title: '更新时间',
+      dataIndex: 'updated_at',
+      width: 170,
+      render: (value: string | null) => formatDateTime(value),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      fixed: 'right',
+      width: 330,
+      render: (_, row) => (
+        <Space size={6} wrap>
+          <Button size="small" icon={<CloudSyncOutlined />} onClick={() => refreshSub2ApiStatus([row.id])}>刷新状态</Button>
+          <Button size="small" icon={<ReloadOutlined />} onClick={() => refreshAccessToken([row.id])}>重新获取 AT</Button>
+          <Dropdown
+            menu={{
+              items: [
+                { key: 'sync', icon: <CloudSyncOutlined />, label: '同步 sub2api' },
+                { key: 'mail', icon: <MailOutlined />, label: '收邮件' },
+                { key: 'debug', icon: <BugOutlined />, label: '调试浏览器' },
+              ],
+              onClick: ({ key }) => {
+                if (key === 'sync') triggerSub2ApiSync(row)
+                else if (key === 'mail') showEmailHistory(row)
+                else if (key === 'debug') triggerDebugBrowser(row)
+              },
+            }}
+          >
+            <Button size="small">更多 ▾</Button>
+          </Dropdown>
+          <Popconfirm title="删除该账号?" onConfirm={() => deleteAccount(row)}>
+            <Button size="small" danger>删除</Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ]
 
   return (
     <PageScaffold
-      title="账号"
-      description="账号卡片展示注册状态、身份绑定、代理一致性、Token 与最近支付长链；操作仍按账号边界执行。"
+      title="Plus 池（sub2api）"
+      description="已完成支付并同步到 sub2api 的账号池；sub2api_sync 写回的状态是这里的主状态。"
       actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
     >
       <SummaryGrid>
-        <StatCard label="账号总数" value={summary.total} tone="primary" />
-        <StatCard label="已注册" value={summary.registered} tone="success" />
-        <StatCard label="失败/异常" value={summary.failed} tone={summary.failed ? 'danger' : 'default'} />
-        <StatCard label="有 AT" value={summary.at} tone="info" />
-        <StatCard label="Codex RT" value={summary.codexRt} tone="info" />
-        <StatCard label="sub2api 活跃" value={summary.sub2api} tone="success" />
+        <StatCard label="Plus 账号" value={summary.total} tone="primary" />
+        <StatCard label="可售" value={summary.unsold} tone="success" />
+        <StatCard label="已售出" value={summary.sold} tone={summary.sold ? 'warning' : 'default'} />
+        <StatCard label="可调度" value={summary.schedulable} tone="success" />
+        <StatCard label="同步失败" value={summary.failed} tone={summary.failed ? 'danger' : 'default'} />
+        <StatCard label="需重登" value={summary.relogin} tone={summary.relogin ? 'danger' : 'default'} />
       </SummaryGrid>
 
       <ActionCard
-        title="账号池操作"
-        description="收邮件、浏览器调试、重试支付长链都从账号卡片发起；日志用居中弹出卡片展示原始 transcript。"
+        title="Plus 池操作"
+        description="列表只包含 Plus 账号；导出会生成 sub2api-data 文件，并将 sub2api 账号迁移到已售出分组后本地标记已售。"
         actions={(
           <CardToolbar>
             <SelectionSummary count={selected.length} />
+            <Select<SoldFilter>
+              value={soldFilter}
+              onChange={(value) => { setSoldFilter(value); setSelected([]) }}
+              style={{ width: 132 }}
+              options={[{ value: 'all', label: '全部' }, { value: 'unsold', label: '可售' }, { value: 'sold', label: '已售出' }]}
+            />
             <Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>
+            <Button icon={<CloudSyncOutlined />} loading={refreshingSub2ApiStatus} disabled={!selected.length} onClick={() => refreshSub2ApiStatus(selected.map((id) => Number(id)))}>刷新 sub2api 状态</Button>
+            <Button icon={<ReloadOutlined />} loading={refreshingAccessToken} disabled={!selected.length} onClick={() => refreshAccessToken(selected.map((id) => Number(id)))}>重新获取 AT</Button>
+            <Popconfirm title={`导出选中的 ${selected.length} 个账号并迁移到 sub2api 已售出分组?`} onConfirm={exportSelectedSub2Api} disabled={!selected.length}>
+              <Button icon={<CloudDownloadOutlined />} type="primary" loading={exportingSold} disabled={!selected.length}>导出 sub2api 并标记已售</Button>
+            </Popconfirm>
             <Popconfirm title={`确认删除选中的 ${selected.length} 个账号?`} onConfirm={batchDelete} disabled={!selected.length}>
               <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>批量删除</Button>
             </Popconfirm>
@@ -183,78 +451,36 @@ export default function Accounts() {
         )}
       />
 
-      <EntityGrid
-        items={rows}
-        page={page}
-        pageSize={18}
-        onPageChange={setPage}
-        renderItem={(row) => (
-          <EntityCard
-            key={row.id}
-            title={<CopyableText value={row.email} label="邮箱" />}
-            subtitle={`Account #${row.id}`}
-            status={<StatusTag status={row.status} />}
-            tone={accountTone(row)}
-            selected={selected.includes(row.id)}
-            onSelect={(checked) => toggleSelected(row.id, checked)}
-            badges={(
-              <Space size={4} wrap>
-                <TokenBadges accessToken={row.has_access_token ? 'yes' : ''} refreshToken={row.has_refresh_token ? 'yes' : ''} codexRt={row.codex_token_has_refresh_token ? 'yes' : ''} />
-                {row.codex_token_id && <Tag color={row.codex_token_alive ? 'blue' : 'red'}>Codex #{row.codex_token_id}</Tag>}
-                {row.sub2api_status && <Sub2ApiBadge status={row.sub2api_status} />}
-              </Space>
-            )}
-            footer={formatDateTime(row.created_at)}
-            actions={(
-              <>
-                <Button size="small" icon={<MailOutlined />} onClick={() => setEmailModalAccount(row)}>收邮件</Button>
-                <Button size="small" icon={<BugOutlined />} onClick={() => triggerDebugBrowser(row)}>调试浏览器</Button>
-                {row.status !== 'registering' && (
-                  <Dropdown
-                    menu={{
-                      items: [
-                        { key: 'team', label: '生成 Team 长链' },
-                        { key: 'plus', label: '生成 Plus 长链 (IDR)' },
-                      ],
-                      onClick: ({ key }) => retryPaymentLink(row, key as 'team' | 'plus'),
-                    }}
-                  >
-                    <Button size="small" type="dashed">支付长链 ▾</Button>
-                  </Dropdown>
-                )}
-                <Popconfirm title="删除该账号?" onConfirm={() => deleteAccount(row)}>
-                  <Button size="small" danger>删除</Button>
-                </Popconfirm>
-              </>
-            )}
-          >
-            <Space direction="vertical" size="small" style={{ width: '100%' }}>
-              <KeyValueGrid>
-                <KeyValue label="密码" value={<CopyableText value={row.password} label="密码" code />} />
-                <KeyValue label="OpenAI Account" value={<CopyableText value={row.account_id} label="Account ID" code />} />
-                <KeyValue label="Workspace" value={<CopyableText value={row.workspace_id} label="Workspace" code />} />
-                <KeyValue label="最近长链" value={row.last_payment_link_id ? <Tag color="purple">#{row.last_payment_link_id}</Tag> : <Text type="secondary">-</Text>} />
-                <KeyValue label="长链 URL" value={<UrlAction url={row.last_payment_link_url} />} />
-                <KeyValue label="代理" value={<CopyableText value={row.proxy_url} label="代理" />} />
-              </KeyValueGrid>
-              <ErrorCallout error={row.last_error || row.codex_token_last_error} />
-            </Space>
-          </EntityCard>
-        )}
+      <Table
+        className="surface-table"
+        rowKey="id"
+        columns={columns}
+        dataSource={rows}
+        loading={loading}
+        scroll={{ x: 2000 }}
+        pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], showTotal: (total) => `共 ${total} 条` }}
+        rowSelection={{
+          selectedRowKeys: selected,
+          onChange: setSelected,
+        }}
       />
 
       <PopupCard
         open={!!emailModalAccount}
-        onCancel={() => { setEmailModalAccount(null); setEmailKeyword('') }}
-        onOk={() => emailModalAccount && triggerReadEmail(emailModalAccount, emailKeyword)}
-        title={emailModalAccount ? `收 ${emailModalAccount.email} 的邮件` : ''}
-        okText="开始读取"
-        width={560}
+        onCancel={() => { setEmailModalAccount(null); setEmailHistory([]) }}
+        title={emailModalAccount ? `${emailModalAccount.email} 最近 10 封邮件` : ''}
+        footer={null}
+        width={980}
       >
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Text>关键字 (subject/body 包含；留空匹配最新一封)</Text>
-          <Input value={emailKeyword} onChange={(e) => setEmailKeyword(e.target.value)} placeholder="例如 ChatGPT" />
-        </Space>
+        <Table
+          rowKey={(row) => String(row.id || `${row.received_at}-${row.subject}`)}
+          columns={emailHistoryColumns}
+          dataSource={emailHistory}
+          loading={emailHistoryLoading}
+          pagination={false}
+          scroll={{ x: 900, y: 480 }}
+          size="small"
+        />
       </PopupCard>
 
       <PopupCard open={logJobId !== null} onCancel={() => setLogJobId(null)} width={900} title={logJobId ? `Job #${logJobId} 原始日志` : ''} footer={null}>

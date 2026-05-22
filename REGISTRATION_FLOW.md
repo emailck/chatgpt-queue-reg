@@ -1,55 +1,60 @@
 # ChatGPT 注册链路说明
 
-本文记录当前后端的声明式 pipeline 注册链路。后端不再用请求级 `refresh_token` 模式分支；是否获取 Codex RT 由 pipeline stage 决定：包含 `oauth_codex` 就获取 RT/AT 并上传 sub2api，不包含则只保留 ChatGPT access/session token。
+本文记录当前后端的声明式 pipeline 注册链路和 AT/RT 语义。
+
+## AT / RT 边界
+
+- **AT**：ChatGPT Web Session access token，来自 `chatgpt.com/api/auth/session`，由 `chatgpt_session` 维护并写入 `ChatGPTAccount.access_token`。
+- **RT**：OpenAI OAuth refresh token，来自 OAuth PKCE，显式通过 `openai_oauth` 获取并写入 `OpenAIRefreshToken.refresh_token`。
+- OAuth 短期 access token 只保存为 `OpenAIRefreshToken.oauth_access_token`，不是业务 AT，不传给 sub2api 的 `credentials.access_token`。
+- `ChatGPTAccount.session_token` 是 ChatGPT Web session token，不是 RT。
 
 ## 总览
 
-前端统一通过 `POST /api/pipelines` 创建 pipeline，默认 preset 是 `full_chain` 完整链路；也可传自定义 `stages`，并用 `stop_after` 截停在任意 stage。
+前端通过 `POST /api/pipelines` 创建 pipeline，默认 preset 是 `full_chain` 完整链路；也可传自定义 `stages`，并用 `stop_after` 截停在任意 stage。
 
-当前只有 5 个 WorkPool stage：
+当前 WorkPool stage：
 
 | stage | 作用 | 资源要求 |
 | --- | --- | --- |
-| `register` | 注册 ChatGPT 账号，写入 `chatgpt_accounts`，绑定账号身份 | declares `email_pool` + optional `proxy_pool`；当前邮箱领取由 `MicrosoftEmailService` 调用邮箱池完成 |
+| `register` | 注册 ChatGPT 账号，写入 `chatgpt_accounts`，绑定账号身份 | email + optional `proxy_pool` |
 | `payment_link` | 复用账号身份生成 Team/Plus hosted 长链，写入 `payment_links` | optional `proxy_pool` |
-| `payment` | 支付浏览器自动化框架位，当前 v1 stub | declares `card_pool` + `sms_pool`，optional `proxy_pool`；当前只实际领取支付代理 |
-| `oauth_codex` | 对已注册账号执行 OpenAI OAuth PKCE，获取 Codex RT/AT | declares optional `sms_pool` + `proxy_pool`；当前 add-phone 接码走 settings 驱动 phone provider |
-| `rt_keepalive` | 同步本地 `codex_tokens` 镜像与 sub2api 状态 | optional `proxy_pool` |
+| `payment` | 支付浏览器自动化 | `card_pool` + `sms_pool` + optional `proxy_pool` |
+| `chatgpt_session` | 刷新/规范化 ChatGPT Web Session AT、cookies、localStorage、fingerprint | optional `proxy_pool` |
+| `openai_oauth` | 对已有账号执行 OpenAI OAuth PKCE，获取 RT | optional `sms_pool` + `proxy_pool` |
+| `sub2api_sync` | 同步 ChatGPT AT + 可选 OpenAI RT / Web session 到 sub2api，并回写状态 | optional `proxy_pool` |
 
 常用 preset：
 
-- `full_chain`：`register → payment_link → payment → oauth_codex → rt_keepalive`（默认完整链路）
+- `full_chain`：`register → payment_link → payment → chatgpt_session → sub2api_sync`（默认完整链路）
 - `register_only`：`register`
-- `register_with_codex_rt`：`register → oauth_codex`
+- `register_with_refresh_token`：`register → chatgpt_session → openai_oauth → sub2api_sync`
 - `link_only`：`register → payment_link`
 - `account_paid`：`register → payment_link → payment`
-- `account_paid_with_codex_rt`：`register → payment_link → payment → oauth_codex`
-- `codex_rt_only`：`oauth_codex`
+- `account_paid_with_refresh_token`：`register → payment_link → payment → chatgpt_session → openai_oauth → sub2api_sync`
+- `refresh_token_only`：`chatgpt_session → openai_oauth → sub2api_sync`
 
 ## 入口和队列
 
 文件：`backend/api/jobs.py`
 
 - `POST /api/pipelines` 处理统一 pipeline 创建请求。
-- 创建 pipeline 的请求体只包含编排字段：
-  - `count`
-  - `preset` 或 `stages`
-  - `stop_after`（空值跑完整链路；非空表示成功停在该 stage）
-- 不在创建任务时传注册代理、支付代理 region、OAuth 接码、套餐等模块参数；这些都由对应 WorkPool / ResourcePool 配置读取。
-- `POST /api/jobs` 可直接派发任意已注册 stage；API 会把 input 中的 `account_id` / `payment_link_id` / `proxy_id` 提升到 Job 字段，保证 worker 能 hydrate identity。
+- 创建 pipeline 的请求体只包含编排字段：`count`、`preset` 或 `stages`、`stop_after`。
+- 不在创建任务时传注册代理、支付代理 region、OAuth 接码、套餐等模块参数；这些由对应 WorkPool / ResourcePool 配置读取。
+- `POST /api/jobs` 可直接派发任意已注册 stage。
 
 文件：`backend/core/pipeline.py`
 
-- `create_pipeline()` 创建声明式 pipeline，只持久化 stage 列表和停止点；未传 `preset/stages` 时解析为 `full_chain`。
+- `create_pipeline()` 创建声明式 pipeline。
 - `Job.type == stage.name`。
-- job 成功后，`_advance_pipeline()` 从 `stages_json` 找下一个 stage；命中最后一步或 `stop_after` 时 pipeline 成功。
-- carry-over 白名单：`account_id`、`payment_link_id`、`email_address`、`proxy_id`、`proxy_url`、`codex_rt`、`codex_at`。
+- job 成功后，`_advance_pipeline()` 找下一个 stage；命中最后一步或 `stop_after` 时 pipeline 成功。
+- carry-over 白名单包括：`account_id`、`payment_link_id`、`email_address`、`proxy_id`、`proxy_url`、`refresh_token_id`、`has_refresh_token`。
 
 文件：`backend/core/queue.py`
 
 - `StagePoolManager` 为每个 stage 维护独立 `ThreadPoolExecutor`。
 - `set_concurrency(stage, n)` 只调整对应 stage 的并发。
-- 非 `register` 的 account-bound stage 会先 `ctx.require_identity()`，避免绕过账号身份。
+- 非 `register` 的 account-bound stage 会先 hydrate 账号身份，避免绕过账号身份。
 
 ## 账号身份绑定
 
@@ -57,20 +62,12 @@
 
 - `proxy_id`
 - `proxy_url`
-- proxy region（通过 `Proxy.region` 反查）
 - `user_agent`
 - browser fingerprint
 - cookies
 - local_storage
 
-`register` 必须得到完整的 `proxy_id + proxy_url` 才会继续。来源可以是：
-
-1. `workpool.register.proxy_region` 指定注册代理 region；
-2. 未配置 region 时由 `proxy_pool` 从可用代理中领取。
-
-`payment_link` 和 `oauth_codex` 都通过 `ctx.effective_proxy_url()` 复用账号绑定代理；它们不会改绑账号代理。
-
-`payment` 从 `workpool.payment.proxy_region` 读取支付代理 region，并通过 `proxy_pool` 选择该 region 下不同于账号代理的 proxy。当前 `payment` 仍是 stub，只验证和记录代理选择，浏览器自动化支付后续实现。
+`register` 必须得到完整的 `proxy_id + proxy_url` 才会继续。`payment_link`、`chatgpt_session`、`openai_oauth`、`sub2api_sync` 都通过账号绑定身份运行。`payment` 按 payment WorkPool 配置另选支付代理。
 
 ## register stage
 
@@ -79,47 +76,62 @@
 主要步骤：
 
 1. 从 register WorkPool 配置读取注册代理 region，并从 email/proxy 资源池领取资源。
-2. 绑定完整 `proxy_id + proxy_url`；绑定失败则 job 失败。
-3. 如果指定邮箱，先用 `email_domain_policy` 做域名策略校验。
-4. 合并全局 settings 和 job `extra_config`。
-5. 构造 `MicrosoftEmailService`，由邮箱池领取 Microsoft 邮箱。
-6. 使用 `AccessTokenOnlyRegistrationEngine` 完成 ChatGPT 注册。
-7. 从注册 session 提取 access/session/id token，并导出 UA、fingerprint、cookies、local_storage。
-8. 写入 `chatgpt_accounts`。
-9. 如果 stage input 显式带 `also_record_to_at_pool=true`，额外写入 `access_token_accounts`。
-10. 根据注册结果消费或退回邮箱。
+2. 绑定完整 `proxy_id + proxy_url`。
+3. 合并全局 settings 和 job `extra_config`。
+4. 构造 `MicrosoftEmailService`，由邮箱池领取 Microsoft 邮箱。
+5. 使用 `AccessTokenOnlyRegistrationEngine` 完成 ChatGPT 注册。
+6. 从注册 session 提取 AT/session/id token，并导出 UA、fingerprint、cookies、localStorage。
+7. 写入 `chatgpt_accounts`。
+8. 如果 stage input 显式带 `also_record_to_at_pool=true`，额外写入 `access_token_accounts`。
+9. 根据注册结果消费或退回邮箱。
 
-当前 `register` stage 只负责 AT-only 注册；Codex RT 获取由后续 `oauth_codex` stage 负责。
+`register` 不负责获取 RT；RT 获取由后续 `openai_oauth` stage 显式执行。
 
-## OAuth Codex RT stage
+## chatgpt_session stage
 
-文件：`backend/stages/oauth_codex.py`
+文件：`backend/stages/chatgpt_session.py`
 
-`oauth_codex` 面向已有 `chatgpt_accounts` 账号运行：
+`chatgpt_session` 只维护 ChatGPT Web Session：
+
+- 复用账号保存的 cookies、localStorage、fingerprint、UA、proxy。
+- 请求 `chatgpt.com/api/auth/session`。
+- 写入 `ChatGPTAccount.access_token`、`id_token`、`session_token`、`session_expires_at`、plan/account/user metadata。
+- 不获取 OpenAI OAuth RT。
+
+## openai_oauth stage
+
+文件：`backend/stages/openai_oauth.py`
+
+`openai_oauth` 面向已有 `chatgpt_accounts` 账号运行：
 
 1. 加载账号 email/password/access identity。
 2. 复用账号绑定 proxy、UA、fingerprint、cookies。
 3. 创建 OpenAI OAuth PKCE authorize session。
-4. 通过 `ProtocolOAuthClient` 跑登录状态机，必要时收 email OTP。
-5. 只有遇到 add_phone 时才通过 settings 驱动的 phone provider（smsbower/fivesim/smsgiare）触发 SMS 接码。
-6. 请求 OpenAI token endpoint，获取 Codex `refresh_token` / `access_token` / `id_token`。
-7. Upsert 本地 `codex_tokens` 镜像。
-8. 调用 sub2api 上传 RT；若 sub2api 未配置，则保持 `pending_upload`，等待后续同步。
+4. 通过协议状态机跑登录/OAuth，必要时收 email OTP 或 add-phone SMS。
+5. 请求 OpenAI token endpoint，获取 OAuth token 响应。
+6. Upsert `openai_refresh_tokens`：
+   - `refresh_token` → RT
+   - `access_token` → `oauth_access_token`
+   - `id_token` → `oauth_id_token`
+7. 输出 `refresh_token_id` / `has_refresh_token`，不输出原始 token secret。
 
-OpenAI OAuth 参数来自 `backend/integrations/chatgpt/oauth.py` / `oauth_protocol.py`，token endpoint 与参数对齐 codex2api 参考实现。
+## sub2api 同步
 
-## RT keepalive / sub2api 同步
+文件：`backend/stages/sub2api_sync.py`、`backend/core/scheduler.py`
 
-文件：`backend/stages/rt_keepalive.py`、`backend/core/scheduler.py`
+本项目不本地轮转 RT；sub2api 承担账号池维护和状态。本项目只做：
 
-本项目不本地轮转 RT；sub2api 承担 RT 池维护和轮转。本项目只做两件事：
+1. 用现有 sub2api admin import/export/status/update 接口导入或更新账号。
+2. 轮询/回写账号状态到 `Sub2ApiAccountBinding` 和 `OpenAIRefreshToken`。
 
-1. 对 `pending_upload` / `upload_failed` / `sync_failed` 或没有 `sub2api_external_id` 的 `codex_tokens` 行上传 RT。
-2. 对已有 `sub2api_external_id` 的行拉取远端状态，更新本地镜像。
+Payload 来源规则：
 
-调度器每 60 秒扫描一次本地表，只 enqueue `alive=true` 且 `next_refresh_at IS NULL OR next_refresh_at <= now` 的 RT，同一 token 已有 queued/running `rt_keepalive` 时不会重复入队。正常同步后下一次状态探测为 24h 后。
+- `credentials.access_token` 只来自 `ChatGPTAccount.access_token`。
+- `credentials.refresh_token` 只来自 `OpenAIRefreshToken.refresh_token`。
+- `credentials.expires_at` 对应 ChatGPT session expiry。
+- OAuth `oauth_access_token` 不会作为 sub2api `access_token`。
 
-如果 sub2api 未配置，`rt_keepalive` 记录 `pending_upload`，不增加失败计数，也不进入快速重试循环。
+调度器每 60 秒扫描 `OpenAIRefreshToken.enabled=true` 且 `next_sync_at IS NULL OR next_sync_at <= now` 的行，入队 `sub2api_sync`，同一 `refresh_token_id` 已有 queued/running job 时跳过。
 
 ## 邮箱池链路
 
@@ -127,40 +139,29 @@ OpenAI OAuth 参数来自 `backend/integrations/chatgpt/oauth.py` / `oauth_proto
 
 当前注册邮箱服务是 `MicrosoftEmailService`。
 
-领取邮箱：
-
 - 不指定邮箱：从 Microsoft 邮箱池取一个 enabled 的账号。
 - 指定邮箱：只取该邮箱；如果不在启用池中，注册失败。
-- 被领取后邮箱状态变为 claimed。
-
-获取 OTP：
-
-1. 按 email 查询 `email_accounts`。
-2. 读取 Microsoft OAuth `refresh_token` 和 `client_id`。
-3. 调用 `wait_for_otp()` 轮询邮箱。
-4. 找到 OTP 后写入 `email_messages`。
-
-这里的 `refresh_token` 是 Microsoft 邮箱 OAuth token，不是 Codex RT。
+- 获取 OTP 时读取 Microsoft OAuth `refresh_token` 和 `client_id`，这里的 `refresh_token` 是 Microsoft 邮箱 OAuth token，不是 OpenAI RT。
 
 ## 落库
 
 ### `chatgpt_accounts`
 
-`register` 在注册引擎返回结果后写入账号行；如果引擎直接抛异常，则 job 失败且不会创建账号行。关键字段包括：
+`register` / `chatgpt_session` 写入账号 Web Session 状态：
 
 - email/password/status/account_id/workspace_id
-- access_token/id_token/session_token
-- cookies/local_storage/browser_fingerprint/user_agent
+- access_token/id_token/session_token/session_expires_at
+- cookies/localStorage/browser_fingerprint/user_agent
 - proxy_id/proxy_url
-- last_error/registered_at/metadata_json
+- plan_type/metadata_json
 
 ### `access_token_accounts`
 
 只有 `register` stage input 显式带 `also_record_to_at_pool=true` 时写入，用于 Free AT 号池展示。
 
-### `codex_tokens`
+### `openai_refresh_tokens`
 
-Codex RT 池的本地镜像。RT 是否可用以 `alive`、`sub2api_status` 和 sub2api 同步结果为准；`chatgpt_accounts.refresh_token` 不再作为 RT 池权威来源。
+OpenAI RT 的本地行。RT 是否可调度以 `enabled`、`sub2api_status` 和 sub2api 同步结果为准。
 
 ## 邮箱消费和回退
 
@@ -169,9 +170,3 @@ Codex RT 池的本地镜像。RT 是否可用以 `alive`、`sub2api_status` 和 
 - 注册成功：`mark_consumed(email, note="registered")`。
 - 注册失败，但 result metadata 有 `mailbox_account_consumed = true`：`mark_consumed(email, note="registered_before_failure")`。
 - 注册失败且未标记 consumed：`requeue(email)`，邮箱回到 available。
-
-## 当前不包含的链路
-
-- payment 浏览器自动化真实扣款流程；当前只保留 stage/resource/proxy 框架。
-- sub2api 内部 RT 轮转实现；本项目只上传 RT 并同步状态。
-- 本地 OAuth callback HTTP listener；当前按状态机中的 callback URL 字符串解析 `code`。

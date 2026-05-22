@@ -15,7 +15,7 @@ from backend.api.access_tokens import router as access_tokens_router
 from backend.api.auth import router as auth_router
 from backend.api.browser_debug import router as browser_debug_router
 from backend.api.cards import router as cards_router
-from backend.api.codex_tokens import router as codex_tokens_router
+from backend.api.refresh_tokens import router as refresh_tokens_router
 from backend.api.emails import router as emails_router
 from backend.api.jobs import router as jobs_router
 from backend.api.payments import router as payments_router
@@ -72,7 +72,7 @@ app.include_router(proxies_router)
 app.include_router(cards_router)
 app.include_router(paypal_numbers_router)
 app.include_router(sms_router)
-app.include_router(codex_tokens_router)
+app.include_router(refresh_tokens_router)
 app.include_router(pools_router)
 app.include_router(browser_debug_router)
 app.include_router(settings_router)
@@ -105,4 +105,11 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
     reload_enabled = os.getenv("APP_RELOAD", "0").lower() in {"1", "true", "yes"}
-    uvicorn.run("backend.main:app", host=host, port=port, reload=reload_enabled)
+    shutdown_timeout = float(os.getenv("UVICORN_SHUTDOWN_TIMEOUT", "2"))
+    uvicorn.run(
+        "backend.main:app",
+        host=host,
+        port=port,
+        reload=reload_enabled,
+        timeout_graceful_shutdown=shutdown_timeout,
+    )

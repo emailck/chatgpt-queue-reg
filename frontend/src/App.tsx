@@ -1,15 +1,17 @@
 import { App as AntdApp, ConfigProvider, Layout, Menu, Typography } from 'antd'
+import type { ItemType } from 'antd/es/menu/interface'
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
   AppstoreOutlined,
   BugOutlined,
+  ClusterOutlined,
   GlobalOutlined,
   KeyOutlined,
-  LinkOutlined,
   MailOutlined,
   PhoneOutlined,
   PlayCircleOutlined,
   SettingOutlined,
+  TeamOutlined,
   UnorderedListOutlined,
   UserOutlined,
 } from '@ant-design/icons'
@@ -19,8 +21,6 @@ import Pipelines from '@/pages/Pipelines'
 import Jobs from '@/pages/Jobs'
 import Accounts from '@/pages/Accounts'
 import AccessTokens from '@/pages/AccessTokens'
-import SubscriptionAccounts from '@/pages/SubscriptionAccounts'
-import PaymentLinks from '@/pages/PaymentLinks'
 import Emails from '@/pages/Emails'
 import Proxies from '@/pages/Proxies'
 import PayPalNumbers from '@/pages/PayPalNumbers'
@@ -32,25 +32,57 @@ import { lightTheme } from './theme'
 
 const { Sider, Content, Header } = Layout
 
-const MENU = [
+const MENU: ItemType[] = [
   { key: '/pipelines', icon: <PlayCircleOutlined />, label: '任务队列' },
   { key: '/jobs', icon: <UnorderedListOutlined />, label: 'Jobs 追踪' },
-  { key: '/pools', icon: <AppstoreOutlined />, label: '池子 / WorkPools' },
-  { key: '/accounts', icon: <UserOutlined />, label: '账号' },
-  { key: '/access-tokens', icon: <KeyOutlined />, label: 'Free 号池' },
-  { key: '/subscription-accounts', icon: <LinkOutlined />, label: '订阅号池' },
-  { key: '/payment-links', icon: <LinkOutlined />, label: '支付长链' },
-  { key: '/emails', icon: <MailOutlined />, label: '邮箱' },
-  { key: '/paypal-numbers', icon: <PhoneOutlined />, label: 'PayPal 号码' },
-  { key: '/proxies', icon: <GlobalOutlined />, label: '代理' },
+  { key: '/pools', icon: <AppstoreOutlined />, label: 'WorkPools' },
+  {
+    key: 'account-pools',
+    icon: <TeamOutlined />,
+    label: '账号池',
+    children: [
+      { key: '/access-tokens', icon: <KeyOutlined />, label: 'Free 池（已注册 AT）' },
+      { key: '/accounts', icon: <UserOutlined />, label: 'Plus 池（sub2api）' },
+    ],
+  },
+  {
+    key: 'resource-pools',
+    icon: <ClusterOutlined />,
+    label: '资源池',
+    children: [
+      { key: '/emails', icon: <MailOutlined />, label: '邮箱池' },
+      { key: '/paypal-numbers', icon: <PhoneOutlined />, label: 'PayPal 号码池' },
+      { key: '/proxies', icon: <GlobalOutlined />, label: '代理池' },
+    ],
+  },
   { key: '/browser-debug', icon: <BugOutlined />, label: '浏览器调试' },
   { key: '/settings', icon: <SettingOutlined />, label: '设置' },
 ]
 
+const PAGE_TITLES: Record<string, string> = {
+  '/pipelines': '任务队列',
+  '/jobs': 'Jobs 追踪',
+  '/access-tokens': 'Free 池（已注册 AT）',
+  '/accounts': 'Plus 池（sub2api）',
+  '/pools': 'WorkPools',
+  '/emails': '邮箱池',
+  '/paypal-numbers': 'PayPal 号码池',
+  '/proxies': '代理池',
+  '/browser-debug': '浏览器调试',
+  '/settings': '设置',
+}
+
+const MENU_KEYS = Object.keys(PAGE_TITLES)
+
 function Shell() {
   const navigate = useNavigate()
   const location = useLocation()
-  const selectedKey = MENU.find((item) => location.pathname.startsWith(item.key))?.key || '/pipelines'
+  const selectedKey = MENU_KEYS.find((key) => location.pathname.startsWith(key)) || '/pipelines'
+  const openKeys = selectedKey === '/access-tokens' || selectedKey === '/accounts'
+    ? ['account-pools']
+    : ['/emails', '/paypal-numbers', '/proxies'].includes(selectedKey)
+      ? ['resource-pools']
+      : []
 
   return (
     <Layout className="app-shell">
@@ -62,15 +94,16 @@ function Shell() {
         <Menu
           mode="inline"
           selectedKeys={[selectedKey]}
+          defaultOpenKeys={openKeys}
           items={MENU}
-          onClick={({ key }) => navigate(key)}
+          onClick={({ key }) => { if (String(key).startsWith('/')) navigate(key) }}
           style={{ borderInlineEnd: 0, padding: '6px 12px', background: 'transparent' }}
         />
       </Sider>
       <Layout style={{ background: 'transparent' }}>
         <Header className="app-header">
           <Typography.Title level={4} style={{ margin: 0, color: '#0f172a' }}>
-            {MENU.find((item) => item.key === selectedKey)?.label || ''}
+            {PAGE_TITLES[selectedKey] || ''}
           </Typography.Title>
         </Header>
         <Content className="app-content">
@@ -81,8 +114,6 @@ function Shell() {
             <Route path="/pools" element={<Pools />} />
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/access-tokens" element={<AccessTokens />} />
-            <Route path="/subscription-accounts" element={<SubscriptionAccounts />} />
-            <Route path="/payment-links" element={<PaymentLinks />} />
             <Route path="/emails" element={<Emails />} />
             <Route path="/paypal-numbers" element={<PayPalNumbers />} />
             <Route path="/proxies" element={<Proxies />} />

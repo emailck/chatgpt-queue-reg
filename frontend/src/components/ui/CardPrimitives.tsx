@@ -82,11 +82,13 @@ interface EntityGridProps<T> {
   renderItem: (item: T) => ReactNode
   pageSize?: number
   page?: number
-  onPageChange?: (page: number) => void
+  onPageChange?: (page: number, pageSize: number) => void
+  showSizeChanger?: boolean
+  pageSizeOptions?: number[]
   empty?: ReactNode
 }
 
-export function EntityGrid<T>({ items, renderItem, pageSize = 24, page = 1, onPageChange, empty }: EntityGridProps<T>) {
+export function EntityGrid<T>({ items, renderItem, pageSize = 24, page = 1, onPageChange, showSizeChanger = false, pageSizeOptions = [18, 36, 72, 144], empty }: EntityGridProps<T>) {
   const start = (page - 1) * pageSize
   const visible = items.slice(start, start + pageSize)
   if (!items.length) return <EmptyCard>{empty || '暂无数据'}</EmptyCard>
@@ -95,7 +97,7 @@ export function EntityGrid<T>({ items, renderItem, pageSize = 24, page = 1, onPa
       <div className="entity-grid">{visible.map((item) => renderItem(item))}</div>
       {items.length > pageSize && (
         <div className="entity-pagination">
-          <Pagination current={page} pageSize={pageSize} total={items.length} onChange={onPageChange} showSizeChanger={false} />
+          <Pagination current={page} pageSize={pageSize} total={items.length} onChange={onPageChange} showSizeChanger={showSizeChanger} pageSizeOptions={pageSizeOptions.map(String)} showTotal={(total) => `共 ${total} 条`} />
         </div>
       )}
     </Space>

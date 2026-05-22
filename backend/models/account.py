@@ -29,6 +29,12 @@ class ChatGPTAccount(SQLModel, table=True):
     refresh_token: str = ""
     id_token: str = ""
     session_token: str = ""
+    session_expires_at: Optional[datetime] = Field(default=None, index=True)
+    session_refresh_status: str = Field(default="", index=True)
+    last_session_refresh_at: Optional[datetime] = None
+    plan_type: str = Field(default="", index=True)
+    sold: bool = Field(default=False, index=True)
+    sold_at: Optional[datetime] = Field(default=None, index=True)
 
     cookies_json: str = "[]"
     local_storage_json: str = "{}"

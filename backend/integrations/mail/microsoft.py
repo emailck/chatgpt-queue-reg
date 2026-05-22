@@ -128,6 +128,7 @@ class MicrosoftMailMessage:
     id: str
     subject: str
     sender: str
+    recipients: list[str]
     received_at: str
     body_text: str
     folder: str
@@ -255,15 +256,27 @@ def _parse_graph_message(entry: dict[str, Any], folder: str) -> MicrosoftMailMes
     body_text = str(body.get("content") or "")
     from_obj = (entry.get("from") or {}).get("emailAddress") or {}
     sender = str(from_obj.get("address") or "")
+    recipients = _extract_recipients(entry)
     return MicrosoftMailMessage(
         id=str(entry.get("id") or ""),
         subject=str(entry.get("subject") or ""),
         sender=sender,
+        recipients=recipients,
         received_at=str(entry.get("receivedDateTime") or ""),
         body_text=body_text,
         folder=folder,
         raw=entry,
     )
+
+
+def _extract_recipients(entry: dict[str, Any]) -> list[str]:
+    recipients: list[str] = []
+    for key in ("toRecipients", "ccRecipients", "bccRecipients"):
+        for item in entry.get(key) or []:
+            address = str(((item or {}).get("emailAddress") or {}).get("address") or "").strip().lower()
+            if address:
+                recipients.append(address)
+    return recipients
 
 
 def _extract_otp(text: str, pattern: str | None) -> str:

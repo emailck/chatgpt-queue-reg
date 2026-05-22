@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Button, Form, Input, Popconfirm, Radio, Select, Space, Switch, Tag, Typography, message } from 'antd'
+import { Button, Form, Input, Popconfirm, Select, Space, Switch, Tag, Typography, message } from 'antd'
 import { DeleteOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import { API_BASE, apiFetch, formatDateTime } from '@/lib/api'
@@ -7,8 +7,6 @@ import { ActionCard, CardToolbar, EntityCard, EntityGrid, KeyValue, KeyValueGrid
 import { CopyableText, ErrorCallout, LinkedIdBadges, SelectionSummary, Sub2ApiBadge, TokenBadges } from '@/components/ui/DomainBits'
 
 const { Text, Paragraph } = Typography
-
-type FreePool = 'at' | 'rt'
 
 interface AccessTokenAccount {
   id: number
@@ -25,11 +23,11 @@ interface AccessTokenAccount {
   has_access_token: boolean
   has_refresh_token: boolean
   has_session_token: boolean
-  codex_token_id: number | null
-  codex_token_alive: boolean
-  codex_token_has_refresh_token: boolean
-  codex_token_last_error: string
-  sub2api_external_id: string
+  refresh_token_id: number | null
+  refresh_token_enabled: boolean
+  refresh_token_has_token: boolean
+  refresh_token_last_error: string
+  sub2api_account_id: string
   sub2api_status: string
   sub2api_uploaded_at: string | null
   sub2api_status_checked_at: string | null
@@ -57,26 +55,26 @@ const TXT_FIELD_OPTIONS = [
 export default function AccessTokens() {
   const [rows, setRows] = useState<AccessTokenAccount[]>([])
   const [loading, setLoading] = useState(false)
-  const [pool, setPool] = useState<FreePool>('at')
   const [showSecrets, setShowSecrets] = useState(false)
   const [selected, setSelected] = useState<React.Key[]>([])
   const [exportOpen, setExportOpen] = useState(false)
   const [detail, setDetail] = useState<AccessTokenAccount | null>(null)
   const [fetchingRtId, setFetchingRtId] = useState<number | null>(null)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(18)
   const [exportForm] = Form.useForm()
 
   const reload = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await apiFetch<AccessTokenAccount[]>(`/access-tokens?pool=${pool}&include_secrets=${showSecrets}`)
+      const data = await apiFetch<AccessTokenAccount[]>(`/access-tokens?pool=at&include_secrets=${showSecrets}`)
       setRows(data)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载失败')
     } finally {
       setLoading(false)
     }
-  }, [pool, showSecrets])
+  }, [showSecrets])
 
   useEffect(() => {
     const initial = setTimeout(reload, 0)
@@ -86,10 +84,10 @@ export default function AccessTokens() {
   const summary = useMemo(() => ({
     total: rows.length,
     at: rows.filter((row) => row.has_access_token).length,
-    rt: rows.filter((row) => row.has_refresh_token || row.codex_token_has_refresh_token).length,
+    rt: rows.filter((row) => row.has_refresh_token || row.refresh_token_has_token).length,
     sub2api: rows.filter((row) => ['active', 'alive', 'ok', 'uploaded'].includes(String(row.sub2api_status || '').toLowerCase())).length,
-    invalid: rows.filter((row) => row.codex_token_id && !row.codex_token_alive).length,
-    errors: rows.filter((row) => row.codex_token_last_error).length,
+    invalid: rows.filter((row) => row.refresh_token_id && !row.refresh_token_enabled).length,
+    errors: rows.filter((row) => row.refresh_token_last_error).length,
   }), [rows])
 
   const openDetail = useCallback(async (row: AccessTokenAccount) => {
@@ -156,7 +154,7 @@ export default function AccessTokens() {
       const f = (values.fields || []) as string[]
       params.set('fields', f.length ? f.join(',') : 'email,password,access_token,refresh_token,session_token')
     }
-    params.set('pool', pool)
+    params.set('pool', 'at')
     const url = `${API_BASE}/access-tokens/export?${params.toString()}`
     window.open(url, '_blank')
     setExportOpen(false)
@@ -170,12 +168,12 @@ export default function AccessTokens() {
 
   return (
     <PageScaffold
-      title="Free 号池"
-      description="AT/RT 池按账号卡片展示，敏感 token 默认只显示状态；详情弹出卡片会按需拉取完整 secrets。"
+      title="Free 池（已注册 AT）"
+      description="已注册且已获取 ChatGPT AT 的账号池；RT 只是账号附加状态，不再作为独立业务池入口。"
       actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
     >
       <SummaryGrid>
-        <StatCard label="当前池" value={pool === 'rt' ? 'RT' : 'AT'} hint={`${summary.total} 条`} tone="primary" />
+        <StatCard label="Free AT" value={summary.total} hint="已注册账号" tone="primary" />
         <StatCard label="AT present" value={summary.at} tone="success" />
         <StatCard label="RT present" value={summary.rt} tone="info" />
         <StatCard label="sub2api active" value={summary.sub2api} tone="success" />
@@ -184,17 +182,10 @@ export default function AccessTokens() {
       </SummaryGrid>
 
       <ActionCard
-        title="Token 池操作"
-        description="切换池子、导出、补 RT 和删除都保留原接口；完整 token 只在显式开关或详情弹出卡片中展示。"
+        title="Free 池操作"
+        description="导出、补 RT 和删除都保留原接口；完整 token 只在显式开关或详情弹出卡片中展示。"
         actions={(
           <CardToolbar>
-            <Radio.Group
-              value={pool}
-              onChange={(e) => { setPool(e.target.value); setSelected([]); setPage(1) }}
-              optionType="button"
-              buttonStyle="solid"
-              options={[{ value: 'at', label: 'Free AT 池' }, { value: 'rt', label: 'Free RT 池' }]}
-            />
             <SelectionSummary count={selected.length} />
             <Space size={6}><Switch checked={showSecrets} onChange={setShowSecrets} /><Text>显示完整 token</Text></Space>
             <Button icon={<DownloadOutlined />} type="primary" onClick={() => setExportOpen(true)}>导出{selected.length ? `（${selected.length}）` : '全部'}</Button>
@@ -208,20 +199,21 @@ export default function AccessTokens() {
       <EntityGrid
         items={rows}
         page={page}
-        pageSize={18}
-        onPageChange={setPage}
+        pageSize={pageSize}
+        onPageChange={(nextPage, nextPageSize) => { setPage(nextPage); setPageSize(nextPageSize) }}
+        showSizeChanger
         renderItem={(row) => (
           <EntityCard
             key={row.id}
             title={<CopyableText value={row.email} label="邮箱" />}
             subtitle={`Token #${row.id}`}
-            status={<Tag color={pool === 'rt' ? 'blue' : 'green'}>{pool.toUpperCase()} pool</Tag>}
-            tone={row.codex_token_id && !row.codex_token_alive ? 'danger' : row.codex_token_has_refresh_token ? 'success' : 'default'}
+            status={<Tag color="green">FREE AT</Tag>}
+            tone={row.refresh_token_id && !row.refresh_token_enabled ? 'danger' : row.refresh_token_has_token ? 'success' : 'default'}
             selected={selected.includes(row.id)}
             onSelect={(checked) => toggleSelected(row.id, checked)}
             badges={(
               <Space size={4} wrap>
-                <TokenBadges accessToken={row.has_access_token ? 'yes' : ''} refreshToken={row.has_refresh_token ? 'yes' : ''} codexRt={row.codex_token_has_refresh_token ? 'yes' : ''} />
+                <TokenBadges accessToken={row.has_access_token ? 'yes' : ''} refreshToken={(row.has_refresh_token || row.refresh_token_has_token) ? 'yes' : ''} />
                 <LinkedIdBadges pipelineId={row.pipeline_id} accountId={row.chatgpt_account_id} />
                 {row.sub2api_status && <Sub2ApiBadge status={row.sub2api_status} />}
               </Space>
@@ -230,7 +222,7 @@ export default function AccessTokens() {
             actions={(
               <>
                 <Button size="small" onClick={() => openDetail(row)}>详情</Button>
-                {pool === 'at' && !row.codex_token_has_refresh_token && <Button size="small" type="primary" loading={fetchingRtId === row.id} onClick={() => fetchRefreshToken(row)}>获取 RT</Button>}
+                {!row.refresh_token_has_token && <Button size="small" type="primary" loading={fetchingRtId === row.id} onClick={() => fetchRefreshToken(row)}>获取 RT</Button>}
                 <Popconfirm title="删除该 token?" onConfirm={() => deleteOne(row)}>
                   <Button size="small" danger>删除</Button>
                 </Popconfirm>
@@ -244,15 +236,15 @@ export default function AccessTokens() {
                 <KeyValue label="session_token" value={secretValue(row.session_token, 'session_token')} />
                 <KeyValue label="workspace" value={<CopyableText value={row.workspace_id} label="workspace" code />} />
                 <KeyValue label="代理" value={<CopyableText value={row.proxy_url} label="代理" />} />
-                <KeyValue label="sub2api external" value={<CopyableText value={row.sub2api_external_id} label="sub2api external" code />} />
+                <KeyValue label="sub2api external" value={<CopyableText value={row.sub2api_account_id} label="sub2api external" code />} />
               </KeyValueGrid>
-              <ErrorCallout error={row.codex_token_last_error} />
+              <ErrorCallout error={row.refresh_token_last_error} />
             </Space>
           </EntityCard>
         )}
       />
 
-      <PopupCard open={exportOpen} title={`导出 ${pool === 'rt' ? 'Free RT 池' : 'Free AT 池'}`} onCancel={() => setExportOpen(false)} onOk={submitExport} okText="下载" width={620}>
+      <PopupCard open={exportOpen} title="导出 Free AT 池" onCancel={() => setExportOpen(false)} onOk={submitExport} okText="下载" width={620}>
         <Paragraph type="secondary">{selected.length ? `当前选中 ${selected.length} 条，仅导出选中。` : '未选中任何条目，将导出全部。'}</Paragraph>
         <Form form={exportForm} layout="vertical" initialValues={{ fmt: 'txt', separator: '----', fields: ['email', 'password', 'access_token', 'refresh_token', 'session_token'] }}>
           <Form.Item label="格式" name="fmt">
@@ -280,16 +272,16 @@ export default function AccessTokens() {
                 ['account_id', detail.account_id],
                 ['workspace_id', detail.workspace_id],
                 ['access_token', detail.access_token],
-                ['codex_refresh_token', detail.refresh_token],
+                ['refresh_token', detail.refresh_token],
                 ['sub2api_status', detail.sub2api_status],
-                ['sub2api_external_id', detail.sub2api_external_id],
+                ['sub2api_account_id', detail.sub2api_account_id],
                 ['id_token', detail.id_token],
                 ['session_token', detail.session_token],
                 ['user_agent', detail.user_agent],
                 ['proxy_url', detail.proxy_url],
               ].map(([label, value]) => <KeyValue key={label} label={label} value={<CopyableText value={value} label={label} code />} />)}
             </KeyValueGrid>
-            <ErrorCallout error={detail.codex_token_last_error} />
+            <ErrorCallout error={detail.refresh_token_last_error} />
           </Space>
         )}
       </PopupCard>

@@ -5,9 +5,10 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from .paypal_graphql import graphql_authorize
-from .paypal_guest_signup import paypal_guest_signup_authorize
+from .paypal_guest_signup import paypal_guest_signup_authorize_pure_protocol
 from .paypal_login import paypal_full_login_http
 from .runtime import (
+    CheckCancelledFn,
     LogFn,
     PayPalHttpError,
     USER_AGENT,
@@ -36,6 +37,7 @@ def authorize_paypal_http(
     paypal_cfg: dict[str, Any],
     proxy_url: str,
     log: LogFn | None,
+    check_cancelled: CheckCancelledFn | None = None,
 ) -> dict[str, Any]:
     cookies = paypal_cookie_header(paypal_cfg.get("cookies") or paypal_cfg.get("cookie_header") or "")
     email = str(paypal_cfg.get("email") or "").strip()
@@ -43,6 +45,7 @@ def authorize_paypal_http(
 
     phone = str(paypal_cfg.get("phone") or paypal_cfg.get("phone_number") or "").strip()
     number_id = int(paypal_cfg.get("_number_id") or 0)
+    paypal_mode = _normalize_paypal_mode(paypal_cfg.get("_paypal_mode"))
 
     if not cookies and not (email and password) and not (phone and number_id):
         raise PayPalHttpError("PayPal HTTP 授权需要 paypal.phone/_number_id 或 paypal.cookies 或 paypal.email/password")
@@ -66,7 +69,12 @@ def authorize_paypal_http(
     ba_token = query_value(resp.url, "ba_token") or query_value(approve_url, "ba_token")
     emit(log, f"paypal_http: paypal approve status={resp.status_code} ba={bool(ba_token)}")
     if resp.status_code == 403:
-        raise PayPalHttpError("PayPal approve 返回 403")
+        if phone and number_id and not cookies and ba_token and paypal_mode == "hybrid":
+            emit(log, "paypal_http: paypal approve HTTP 403; continuing with browser hybrid checkout", level="warning")
+            address = _guest_address_from_config(paypal_cfg)
+            from .paypal_browser_authorize import browser_paypal_checkout
+            return browser_paypal_checkout(approve_url, ba_token, proxy_url, paypal_cfg, address, log, check_cancelled)
+        raise PayPalHttpError("payment_proxy_rotation_required: PayPal approve 返回 403")
 
     csrf = first_match([
         r'name="_csrf"\s+value="([^"]+)"',
@@ -78,16 +86,12 @@ def authorize_paypal_http(
     flow_id = first_match([r'"flowId"\s*:\s*"([^"]+)"'], html) or ctx_id
 
     if phone and number_id and not cookies and "/webapps/hermes" not in str(resp.url):
+        if paypal_mode == "pure_protocol":
+            emit(log, "paypal_http: using pure_protocol paypal guest signup")
+            return paypal_guest_signup_authorize_pure_protocol(http, approve_url, html, ba_token, paypal_cfg, log, authorize_from_hermes, check_cancelled)
         from .paypal_browser_authorize import browser_paypal_checkout
-        address = {
-            "first_name": str(paypal_cfg.get("first_name") or ""),
-            "last_name": str(paypal_cfg.get("last_name") or ""),
-            "line1": str(paypal_cfg.get("billing_line1") or ""),
-            "city": str(paypal_cfg.get("billing_city") or ""),
-            "state": str(paypal_cfg.get("billing_state") or ""),
-            "postal_code": str(paypal_cfg.get("billing_postal") or ""),
-        }
-        return browser_paypal_checkout(approve_url, ba_token, proxy_url, paypal_cfg, address, log)
+        address = _guest_address_from_config(paypal_cfg)
+        return browser_paypal_checkout(approve_url, ba_token, proxy_url, paypal_cfg, address, log, check_cancelled)
 
     at_hermes = "/webapps/hermes" in str(resp.url)
     logged_in = at_hermes
@@ -147,6 +151,24 @@ def authorize_paypal_http(
         emit(log, f"paypal_http: hermes status={hermes_resp.status_code}")
 
     return _authorize_from_hermes_html(http, hermes_html, hermes_final_url, ba_token, log)
+
+
+def _normalize_paypal_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower().replace("-", "_")
+    if mode in {"pure", "pure_protocol", "protocol"}:
+        return "pure_protocol"
+    return "hybrid"
+
+
+def _guest_address_from_config(paypal_cfg: dict[str, Any]) -> dict[str, str]:
+    return {
+        "first_name": str(paypal_cfg.get("first_name") or ""),
+        "last_name": str(paypal_cfg.get("last_name") or ""),
+        "line1": str(paypal_cfg.get("billing_line1") or ""),
+        "city": str(paypal_cfg.get("billing_city") or ""),
+        "state": str(paypal_cfg.get("billing_state") or ""),
+        "postal_code": str(paypal_cfg.get("billing_postal") or ""),
+    }
 
 
 def authorize_from_hermes(http: Any, hermes_url: str, ba_token: str, log: LogFn | None) -> dict[str, Any]:

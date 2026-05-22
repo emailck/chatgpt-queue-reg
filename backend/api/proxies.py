@@ -39,10 +39,23 @@ class ProxyBatchDelete(BaseModel):
 
 
 @router.get("/api/proxies", tags=["proxies"])
-def list_proxies(limit: int = Query(500, ge=1, le=1000)):
+def list_proxies(
+    region: str = "",
+    limit: int = Query(500, ge=1, le=2000),
+):
     with Session(engine) as s:
-        rows = list(s.exec(sa_select(Proxy).order_by(Proxy.id.desc()).limit(limit)).scalars())
+        stmt = sa_select(Proxy)
+        if region:
+            stmt = stmt.where(Proxy.region == region)
+        rows = list(s.exec(stmt.order_by(Proxy.id.desc()).limit(limit)).scalars())
     return [proxy_to_dict(r) for r in rows]
+
+
+@router.get("/api/proxies/regions", tags=["proxies"])
+def list_proxy_regions():
+    with Session(engine) as s:
+        values = s.exec(sa_select(Proxy.region).where(Proxy.region != "").distinct().order_by(Proxy.region.asc())).all()
+    return [str(value or "") for value in values if str(value or "")]
 
 
 @router.post("/api/proxies", tags=["proxies"])

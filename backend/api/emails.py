@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -166,6 +166,83 @@ def list_messages(
         stmt = stmt.order_by(EmailMessage.id.desc()).limit(limit)
         rows = list(s.exec(stmt).scalars().all())
     return [email_message_to_dict(r) for r in rows]
+
+
+@router.get("/api/email/accounts/{email}/history", tags=["email"])
+def email_account_history(email: str, limit: int = Query(10, ge=1, le=50)):
+    row = _get_microsoft_email_account(email)
+    history = _fetch_live_email_history(row, limit=limit)
+    if history is not None:
+        return history
+    return _local_email_history(row.email, limit=limit)
+
+
+def email_history_for_address(email: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    row = _get_microsoft_email_account(email)
+    history = _fetch_live_email_history(row, limit=limit)
+    if history is not None:
+        return history
+    return _local_email_history(row.email, limit=limit)
+
+
+def _get_microsoft_email_account(email: str) -> EmailAccount:
+    value = str(email or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="email 不能为空")
+    with Session(engine) as s:
+        row = (
+            s.exec(
+                sa_select(EmailAccount)
+                .where(EmailAccount.provider == "microsoft")
+                .where(EmailAccount.email == value)
+            ).scalars().first()
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"邮箱不在 Microsoft 池中: {value}")
+    return row
+
+
+def _fetch_live_email_history(row: EmailAccount, *, limit: int) -> list[dict[str, Any]] | None:
+    meta = json_loads(row.metadata_json, fallback={}) or {}
+    client_id = str(meta.get("client_id") or "")
+    refresh_token = row.refresh_token
+    if not client_id or not refresh_token:
+        return None
+    target_email = str(row.email or "").strip().lower()
+    messages = MicrosoftMailbox().list_messages(client_id=client_id, refresh_token=refresh_token, top=max(limit * 5, 50))
+    messages = [message for message in messages if target_email in {recipient.lower() for recipient in message.recipients}]
+    messages.sort(key=lambda item: item.received_at or "", reverse=True)
+    return [
+        {
+            "id": message.id,
+            "account_id": row.id,
+            "job_id": None,
+            "email": row.email,
+            "provider": row.provider,
+            "subject": message.subject,
+            "sender": message.sender,
+            "recipients": message.recipients,
+            "body_text": message.body_text,
+            "code": "",
+            "received_at": message.received_at or None,
+            "created_at": None,
+            "folder": message.folder,
+        }
+        for message in messages[:limit]
+    ]
+
+
+def _local_email_history(email: str, *, limit: int) -> list[dict[str, Any]]:
+    with Session(engine) as s:
+        rows = list(
+            s.exec(
+                sa_select(EmailMessage)
+                .where(EmailMessage.email == email)
+                .order_by(EmailMessage.id.desc())
+                .limit(limit)
+            ).scalars()
+        )
+    return [email_message_to_dict(row) for row in rows]
 
 
 class MessageIdsRequest(BaseModel):

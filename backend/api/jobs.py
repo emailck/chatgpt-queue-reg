@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select as sa_select
 from sqlmodel import Session
@@ -296,6 +296,7 @@ def force_stop_job(job_id: int):
 
         prev_status = job.status
         job.status = JOB_STATUS_FAILED
+        job.cancel_requested = True
         job.error = job.error or "force stopped by user"
         job.finished_at = job.finished_at or utcnow()
         job.updated_at = utcnow()
@@ -405,7 +406,7 @@ def list_job_events(job_id: int, since_id: int = 0, limit: int = Query(500, ge=1
 
 
 @router.get("/api/jobs/{job_id}/events/stream", tags=["jobs"])
-async def stream_job_events(job_id: int, since_id: int = 0):
+async def stream_job_events(request: Request, job_id: int, since_id: int = 0):
     """SSE stream: replay events past `since_id`, then live-tail."""
     from fastapi.responses import StreamingResponse
 
@@ -433,8 +434,12 @@ async def stream_job_events(job_id: int, since_id: int = 0):
             for row in rows:
                 yield f"data: {_sse_payload(event_to_dict(row))}\n\n"
 
-            while True:
-                data = await queue.get()
+            while not await request.is_disconnected():
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
                 yield f"data: {_sse_payload(data)}\n\n"
                 if data.get("kind") == "status" and data.get("status") in JOB_TERMINAL_STATUSES:
                     break

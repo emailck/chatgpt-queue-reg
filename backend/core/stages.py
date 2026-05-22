@@ -27,8 +27,9 @@ ALLOWED_STAGE_NAMES: tuple[str, ...] = (
     "register",
     "payment_link",
     "payment",
-    "oauth_codex",
-    "rt_keepalive",
+    "chatgpt_session",
+    "openai_oauth",
+    "sub2api_sync",
 )
 ALLOWED_STAGE_SET = set(ALLOWED_STAGE_NAMES)
 
@@ -104,7 +105,7 @@ def register_stage(meta: StageMeta) -> None:
     during dev reload). Re-registering with conflicting resource lists raises.
     """
     if meta.name not in ALLOWED_STAGE_SET:
-        raise ValueError(f"stage {meta.name!r} is not one of the 5 WorkPool stages")
+        raise ValueError(f"stage {meta.name!r} is not an allowed WorkPool stage")
     existing = STAGE_REGISTRY.get(meta.name)
     if existing is None:
         STAGE_REGISTRY[meta.name] = meta
@@ -149,8 +150,7 @@ def declare_stage(
 ) -> StageMeta:
     """Reserve a stage name without providing a handler yet.
 
-    Used to register `payment` / `oauth_codex` / `rt_keepalive` in P1 even
-    though their handlers land in P3. The queue dispatcher will refuse to run
+    Used to reserve stage names before their handlers land. The queue dispatcher will refuse to run
     a job whose stage has no handler, so it stays safe.
     """
     meta = StageMeta(

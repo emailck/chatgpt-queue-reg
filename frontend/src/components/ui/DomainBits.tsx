@@ -3,7 +3,6 @@ import { Button, Progress, Space, Tag, Tooltip, Typography } from 'antd'
 import { ExportOutlined } from '@ant-design/icons'
 
 import { CopyButton } from '@/components/CopyButton'
-import { StatusTag } from '@/components/StatusTag'
 
 const { Text } = Typography
 
@@ -23,21 +22,35 @@ export function LinkedIdBadges({ pipelineId, accountId, paymentLinkId, jobId }: 
   )
 }
 
-export function TokenBadges({ accessToken, refreshToken, codexRt, codexAt }: { accessToken?: string | null; refreshToken?: string | null; codexRt?: string | null; codexAt?: string | null }) {
+export function TokenBadges({ accessToken, refreshToken }: { accessToken?: string | null; refreshToken?: string | null }) {
   return (
     <Space size={4} wrap>
       <Tag color={accessToken ? 'green' : 'default'}>AT {accessToken ? 'yes' : 'no'}</Tag>
       <Tag color={refreshToken ? 'green' : 'default'}>RT {refreshToken ? 'yes' : 'no'}</Tag>
-      <Tag color={codexRt ? 'blue' : 'default'}>Codex RT {codexRt ? 'yes' : 'no'}</Tag>
-      <Tag color={codexAt ? 'blue' : 'default'}>Codex AT {codexAt ? 'yes' : 'no'}</Tag>
     </Space>
   )
 }
 
 export function Sub2ApiBadge({ status }: { status?: string | null }) {
-  const value = String(status || '').trim()
-  if (!value) return <Tag>sub2api -</Tag>
-  return <StatusTag status={value} />
+  const value = String(status || '').trim().toLowerCase()
+  if (!value) return <Tag>未同步</Tag>
+  const meta: Record<string, { color: string; label: string }> = {
+    success: { color: 'green', label: '同步成功' },
+    synced: { color: 'green', label: '已同步' },
+    active: { color: 'green', label: '可用' },
+    alive: { color: 'green', label: '可用' },
+    ok: { color: 'green', label: '可用' },
+    pending_sync: { color: 'gold', label: '待同步' },
+    sync_failed: { color: 'red', label: '同步失败' },
+    relogin_required: { color: 'red', label: '需重登' },
+    dead: { color: 'red', label: '失效' },
+    disabled: { color: 'orange', label: '禁用' },
+    banned: { color: 'red', label: '封禁' },
+    invalid: { color: 'red', label: '无效' },
+    expired: { color: 'red', label: '过期' },
+  }
+  const config = meta[value] || { color: 'default', label: value }
+  return <Tag color={config.color}>{config.label}</Tag>
 }
 
 export function ProgressLine({ current, total, status }: { current: number; total: number; status?: 'normal' | 'exception' | 'active' | 'success' }) {
@@ -46,8 +59,9 @@ export function ProgressLine({ current, total, status }: { current: number; tota
 }
 
 export function ErrorCallout({ error }: { error?: string | null }) {
-  if (!error) return null
-  return <div className="error-callout"><Text type="danger">{error}</Text></div>
+  const value = String(error || '').trim()
+  if (!value || ['success', 'ok', 'synced', 'active', 'alive'].includes(value.toLowerCase())) return null
+  return <div className="error-callout"><Text type="danger">{value}</Text></div>
 }
 
 export function CopyableText({ value, label, code }: { value?: string | number | null; label?: string; code?: boolean }) {

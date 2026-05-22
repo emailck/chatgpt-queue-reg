@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Checkbox, Col, Dropdown, Form, Input, InputNumber, Popconfirm, Row, Space, Spin, Table, Tabs, Tag, Typography, message } from 'antd'
+import { Alert, Button, Checkbox, Col, Dropdown, Form, Input, InputNumber, Popconfirm, Row, Space, Table, Tabs, Tag, Typography, message } from 'antd'
 import type { TableColumnsType } from 'antd'
-import { DeleteOutlined, LoadingOutlined, MailOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons'
+import { DeleteOutlined, MailOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons'
 
-import { JobLogPanel } from '@/components/JobLogPanel'
 import { ActionCard, CardToolbar, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
 import { CopyableText, SelectionSummary } from '@/components/ui/DomainBits'
 import { apiFetch, formatDateTime } from '@/lib/api'
@@ -23,7 +22,7 @@ interface EmailAccount {
 }
 
 interface EmailMessage {
-  id: number
+  id: number | string
   email: string
   provider: string
   subject: string
@@ -32,6 +31,7 @@ interface EmailMessage {
   code: string
   received_at: string | null
   created_at: string | null
+  folder?: string
 }
 
 interface ImportResponse {
@@ -70,13 +70,12 @@ export default function Emails() {
   const [importOpen, setImportOpen] = useState(false)
   const [importing, setImporting] = useState(false)
   const [readModalEmail, setReadModalEmail] = useState<string | null>(null)
-  const [reading, setReading] = useState(false)
+  const [emailHistory, setEmailHistory] = useState<EmailMessage[]>([])
+  const [emailHistoryLoading, setEmailHistoryLoading] = useState(false)
   const [importResult, setImportResult] = useState<ImportResponse | null>(null)
-  const [logJobId, setLogJobId] = useState<number | null>(null)
   const [accountSelected, setAccountSelected] = useState<React.Key[]>([])
   const [messageSelected, setMessageSelected] = useState<React.Key[]>([])
   const [form] = Form.useForm()
-  const [readForm] = Form.useForm()
 
   const reloadAccounts = useCallback(async () => {
     setLoading(true)
@@ -155,28 +154,17 @@ export default function Emails() {
     }
   }
 
-  const submitRead = async () => {
-    const values = await readForm.validateFields()
-    setReading(true)
+  const showEmailHistory = async (email: string) => {
+    setReadModalEmail(email)
+    setEmailHistory([])
+    setEmailHistoryLoading(true)
     try {
-      const resp = await apiFetch<{ job_id: number }>('/email/read', {
-        method: 'POST',
-        body: JSON.stringify({
-          email: readModalEmail,
-          timeout_seconds: Number(values.timeout_seconds || 120),
-          keyword: values.keyword || '',
-          code_regex: values.code_regex || null,
-        }),
-      })
-      message.success(`已派发 job #${resp.job_id}`)
-      setReadModalEmail(null)
-      readForm.resetFields()
-      setLogJobId(resp.job_id)
-      reloadMessages()
+      const data = await apiFetch<EmailMessage[]>(`/email/accounts/${encodeURIComponent(email)}/history?limit=10`)
+      setEmailHistory(data)
     } catch (err) {
-      message.error(err instanceof Error ? err.message : '派发失败')
+      message.error(err instanceof Error ? err.message : '读取邮件历史失败')
     } finally {
-      setReading(false)
+      setEmailHistoryLoading(false)
     }
   }
 
@@ -274,7 +262,7 @@ export default function Emails() {
       width: 210,
       render: (_, row) => (
         <Space size={6}>
-          <Button size="small" icon={<MailOutlined />} onClick={() => setReadModalEmail(row.email)}>读取</Button>
+          <Button size="small" icon={<MailOutlined />} onClick={() => showEmailHistory(row.email)}>查看邮件</Button>
           <Dropdown
             menu={{
               items: [
@@ -289,6 +277,41 @@ export default function Emails() {
           </Dropdown>
         </Space>
       ),
+    },
+  ]
+
+  const emailHistoryColumns: TableColumnsType<EmailMessage> = [
+    {
+      title: '时间',
+      key: 'time',
+      width: 170,
+      render: (_, row) => formatDateTime(row.received_at || row.created_at),
+    },
+    {
+      title: '主题',
+      dataIndex: 'subject',
+      width: 240,
+      ellipsis: true,
+      render: (value: string) => value || '无主题',
+    },
+    {
+      title: '发件人',
+      dataIndex: 'sender',
+      width: 220,
+      ellipsis: true,
+      render: (value: string) => <CopyableText value={value} label="发件人" />,
+    },
+    {
+      title: '文件夹',
+      dataIndex: 'folder',
+      width: 100,
+      render: (value: string | undefined) => value || '-',
+    },
+    {
+      title: '正文预览',
+      dataIndex: 'body_text',
+      ellipsis: true,
+      render: (value: string) => value || '-',
     },
   ]
 
@@ -337,8 +360,8 @@ export default function Emails() {
 
   return (
     <PageScaffold
-      title="邮箱"
-      description="邮箱资源池用表格管理账号和邮件记录；导入、读信、池状态变更仍在弹出卡片或行操作里完成。"
+      title="邮箱池"
+      description="资源池 / 邮箱：用表格管理邮箱账号和邮件记录；导入、读信、池状态变更仍在弹出卡片或行操作里完成。"
       actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={() => { reloadAccounts(); reloadMessages(); reloadPoolStats() }}>刷新</Button>}
     >
       <SummaryGrid>
@@ -359,7 +382,7 @@ export default function Emails() {
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
                 <ActionCard
                   title="邮箱账号池"
-                  description="导入微软邮箱、读取验证码、退回池/消费/拉黑都在卡片边界操作。"
+                  description="导入微软邮箱、查看最近邮件、退回池/消费/拉黑都在卡片边界操作。"
                   actions={(
                     <CardToolbar>
                       <SelectionSummary count={accountSelected.length} />
@@ -378,7 +401,7 @@ export default function Emails() {
                   dataSource={accounts}
                   loading={loading}
                   scroll={{ x: 980 }}
-                  pagination={{ pageSize: 20, showSizeChanger: false }}
+                  pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], showTotal: (total) => `共 ${total} 条` }}
                   rowSelection={{ selectedRowKeys: accountSelected, onChange: setAccountSelected }}
                 />
               </Space>
@@ -408,7 +431,7 @@ export default function Emails() {
                   columns={messageColumns}
                   dataSource={messages}
                   scroll={{ x: 980 }}
-                  pagination={{ pageSize: 20, showSizeChanger: false }}
+                  pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], showTotal: (total) => `共 ${total} 条` }}
                   rowSelection={{ selectedRowKeys: messageSelected, onChange: setMessageSelected }}
                 />
               </Space>
@@ -418,32 +441,30 @@ export default function Emails() {
       />
 
       <PopupCard open={importOpen} title="批量导入微软邮箱" onCancel={() => { if (!importing) { setImportOpen(false); setImportResult(null) } }} onOk={submitImport} okText="导入" confirmLoading={importing} maskClosable={!importing} closable={!importing} width={820}>
-        <Spin spinning={importing} tip="正在导入并校验微软邮箱（OAuth 探活并发执行中，可能需几秒到几十秒）..." indicator={<LoadingOutlined style={{ fontSize: 36 }} spin />}>
-          <Paragraph>支持每行一条 <Text code>邮箱----密码----client_id----refresh_token</Text> 或 <Text code>邮箱----mailapi_url</Text>。可选启用 <Text code>裂变</Text>，按 + 别名扩展邮箱（最多 5 个）。</Paragraph>
-          {importing && <Alert type="info" message="正在导入邮箱，请稍候..." showIcon style={{ marginBottom: 12 }} />}
-          <Form form={form} layout="vertical" initialValues={{ enabled: true, alias_split_count: 5 }}>
-            <Form.Item label="导入内容" name="content" rules={[{ required: true }]}><Input.TextArea rows={8} placeholder="example@outlook.com----password----client_id----refresh_token" /></Form.Item>
-            <Row gutter={12}>
-              <Col span={6}><Form.Item name="enabled" valuePropName="checked"><Checkbox>导入即启用</Checkbox></Form.Item></Col>
-              <Col span={6}><Form.Item name="alias_split_enabled" valuePropName="checked"><Checkbox>启用裂变</Checkbox></Form.Item></Col>
-              <Col span={6}><Form.Item name="alias_split_count" label="裂变数量"><InputNumber min={1} max={5} /></Form.Item></Col>
-              <Col span={6}><Form.Item name="alias_include_original" valuePropName="checked"><Checkbox>含原邮箱</Checkbox></Form.Item></Col>
-            </Row>
-          </Form>
-          {importResult && <Alert type={importResult.summary.failed > 0 ? 'warning' : 'success'} message={`成功 ${importResult.summary.success} / 失败 ${importResult.summary.failed}`} description={importResult.errors?.length ? importResult.errors.slice(0, 5).join('\n') : undefined} showIcon style={{ marginTop: 12, whiteSpace: 'pre-wrap' }} />}
-        </Spin>
-      </PopupCard>
-
-      <PopupCard open={!!readModalEmail} title={readModalEmail ? `读取 ${readModalEmail}` : ''} onCancel={() => { if (!reading) { setReadModalEmail(null); readForm.resetFields() } }} onOk={submitRead} okText="开始" confirmLoading={reading} maskClosable={!reading} closable={!reading} width={560}>
-        <Form form={readForm} layout="vertical" initialValues={{ timeout_seconds: 120 }}>
-          <Form.Item name="keyword" label="关键字"><Input placeholder="可留空" /></Form.Item>
-          <Form.Item name="timeout_seconds" label="超时时间(秒)"><InputNumber min={10} max={1800} /></Form.Item>
-          <Form.Item name="code_regex" label="自定义验证码正则"><Input placeholder="留空使用默认" /></Form.Item>
+        <Paragraph>支持每行一条 <Text code>邮箱----密码----client_id----refresh_token</Text> 或 <Text code>邮箱----mailapi_url</Text>。导入只做格式和重复检查，不做 OAuth 探活。</Paragraph>
+        {importing && <Alert type="info" message="正在导入邮箱，只写入数据库，不校验登录可用性。" showIcon style={{ marginBottom: 12 }} />}
+        <Form form={form} layout="vertical" initialValues={{ enabled: true, alias_split_count: 5 }}>
+          <Form.Item label="导入内容" name="content" rules={[{ required: true }]}><Input.TextArea rows={8} placeholder="example@outlook.com----password----client_id----refresh_token" /></Form.Item>
+          <Row gutter={12}>
+            <Col span={6}><Form.Item name="enabled" valuePropName="checked"><Checkbox>导入即启用</Checkbox></Form.Item></Col>
+            <Col span={6}><Form.Item name="alias_split_enabled" valuePropName="checked"><Checkbox>启用裂变</Checkbox></Form.Item></Col>
+            <Col span={6}><Form.Item name="alias_split_count" label="裂变数量"><InputNumber min={1} max={5} /></Form.Item></Col>
+            <Col span={6}><Form.Item name="alias_include_original" valuePropName="checked"><Checkbox>含原邮箱</Checkbox></Form.Item></Col>
+          </Row>
         </Form>
+        {importResult && <Alert type={importResult.summary.failed > 0 ? 'warning' : 'success'} message={`成功 ${importResult.summary.success} / 失败 ${importResult.summary.failed}`} description={importResult.errors?.length ? importResult.errors.slice(0, 5).join('\n') : undefined} showIcon style={{ marginTop: 12, whiteSpace: 'pre-wrap' }} />}
       </PopupCard>
 
-      <PopupCard open={logJobId !== null} onCancel={() => setLogJobId(null)} width={900} title={logJobId ? `Job #${logJobId} 原始日志` : ''} footer={null}>
-        {logJobId !== null && <JobLogPanel jobId={logJobId} onTerminal={() => reloadMessages()} />}
+      <PopupCard open={!!readModalEmail} title={readModalEmail ? `${readModalEmail} 最近 10 封邮件` : ''} onCancel={() => { setReadModalEmail(null); setEmailHistory([]) }} footer={null} width={980}>
+        <Table
+          rowKey={(row) => String(row.id || `${row.received_at}-${row.subject}`)}
+          columns={emailHistoryColumns}
+          dataSource={emailHistory}
+          loading={emailHistoryLoading}
+          pagination={false}
+          scroll={{ x: 900, y: 480 }}
+          size="small"
+        />
       </PopupCard>
     </PageScaffold>
   )

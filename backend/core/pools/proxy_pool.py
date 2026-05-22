@@ -24,8 +24,16 @@ class ProxyResourcePool:
         account_id = int(hint.get("account_id") or 0)
         requested_proxy_id = int(hint.get("proxy_id") or 0)
         region = str(hint.get("region") or "").strip()
-        exclude_proxy_id = int(hint.get("exclude_proxy_id") or 0)
-        exclude_url = str(hint.get("exclude_url") or "").strip()
+        exclude_proxy_ids = {int(hint.get("exclude_proxy_id") or 0)} if hint.get("exclude_proxy_id") else set()
+        for value in hint.get("exclude_proxy_ids") or []:
+            try:
+                parsed = int(value or 0)
+            except Exception:
+                parsed = 0
+            if parsed:
+                exclude_proxy_ids.add(parsed)
+        exclude_urls = {str(hint.get("exclude_url") or "").strip()} if hint.get("exclude_url") else set()
+        exclude_urls.update(str(value or "").strip() for value in hint.get("exclude_urls") or [] if str(value or "").strip())
 
         if account_id and not region and not requested_proxy_id:
             with Session(engine) as s:
@@ -45,10 +53,10 @@ class ProxyResourcePool:
                 stmt = stmt.where(Proxy.id == requested_proxy_id)
             if region:
                 stmt = stmt.where(Proxy.region == region)
-            if exclude_proxy_id:
-                stmt = stmt.where(Proxy.id != exclude_proxy_id)
-            if exclude_url:
-                stmt = stmt.where(Proxy.url != exclude_url)
+            if exclude_proxy_ids:
+                stmt = stmt.where(Proxy.id.not_in(exclude_proxy_ids))
+            if exclude_urls:
+                stmt = stmt.where(Proxy.url.not_in(exclude_urls))
             rows = list(s.exec(stmt).all())
             if not rows:
                 return None

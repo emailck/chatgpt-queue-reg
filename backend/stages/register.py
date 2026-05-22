@@ -10,7 +10,10 @@ mailbox via the bundled adapter.
 """
 from __future__ import annotations
 
+import secrets
+import string
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 from backend.core.constants import (
@@ -42,7 +45,8 @@ from backend.schemas.stage_io import RegisterInput, RegisterOutput
 def run(ctx: JobContext) -> None:
     payload = dict(ctx.input or {})
     requested_email = str(payload.get("email") or "").strip()
-    requested_password = str(payload.get("password") or "").strip()
+    password_from_input = bool(str(payload.get("password") or "").strip())
+    requested_password = str(payload.get("password") or "").strip() or _generate_register_password()
     proxy_url = ctx.proxy_url or str(payload.get("proxy_url") or "").strip()
     proxy_id = ctx.proxy_id or int(payload.get("proxy_id") or 0) or None
     proxy_region = str(
@@ -87,7 +91,8 @@ def run(ctx: JobContext) -> None:
         "starting ChatGPT register stage",
         payload={
             "email_provided": bool(requested_email),
-            "password_provided": bool(requested_password),
+            "password_provided": password_from_input,
+            "password_generated": not password_from_input,
             "proxy_provided": bool(proxy_url),
             "proxy_id": proxy_id,
             "proxy_region": proxy_region,
@@ -201,6 +206,20 @@ def run(ctx: JobContext) -> None:
 # ---- helpers ---------------------------------------------------------------
 
 
+def _generate_register_password() -> str:
+    length = secrets.randbelow(7) + 12
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*_-+="
+    while True:
+        password = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (
+            any(ch.islower() for ch in password)
+            and any(ch.isupper() for ch in password)
+            and any(ch.isdigit() for ch in password)
+            and any(ch in "!@#$%^&*_-+=" for ch in password)
+        ):
+            return password
+
+
 def _read_int_config(
     values: dict[str, Any],
     key: str,
@@ -218,7 +237,10 @@ def _read_int_config(
 
 def _result_consumed_email(result) -> bool:
     metadata = dict(getattr(result, "metadata", None) or {})
-    return bool(metadata.get("mailbox_account_consumed"))
+    if metadata.get("mailbox_account_consumed"):
+        return True
+    error = str(getattr(result, "error_message", None) or "").lower()
+    return "user_already_exists" in error
 
 
 def _free_pool_note(reason: str) -> str:
@@ -292,6 +314,9 @@ def _persist_account(result, *, proxy_id: int | None, proxy_url: str) -> int | N
         user_agent = ""
 
     status = ACCOUNT_STATUS_REGISTERED if result.success else ACCOUNT_STATUS_FAILED
+    raw_account = metadata.get("account") if isinstance(metadata.get("account"), dict) else {}
+    session_expires_at = _parse_datetime(metadata.get("expires"))
+    plan_type = str(raw_account.get("planType") or raw_account.get("plan_type") or "")
 
     with session_scope() as s:
         account = ChatGPTAccount(
@@ -304,6 +329,10 @@ def _persist_account(result, *, proxy_id: int | None, proxy_url: str) -> int | N
             refresh_token="",
             id_token=result.id_token or "",
             session_token=result.session_token or "",
+            session_expires_at=session_expires_at,
+            session_refresh_status="current" if result.success and result.access_token else "",
+            last_session_refresh_at=utcnow() if result.success and result.access_token else None,
+            plan_type=plan_type,
             cookies_json=json_dumps(cookies or []),
             local_storage_json=json_dumps(local_storage or {}),
             browser_fingerprint_json=json_dumps(fingerprint or {}),
@@ -318,6 +347,23 @@ def _persist_account(result, *, proxy_id: int | None, proxy_url: str) -> int | N
         s.commit()
         s.refresh(account)
         return int(account.id or 0)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _persist_access_token_account(

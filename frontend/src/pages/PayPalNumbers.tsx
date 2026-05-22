@@ -36,6 +36,7 @@ interface PayPalNumber {
   smsurl: string
   status: string
   use_count: number
+  otp_failure_count: number
   last_used_at: string | null
   last_error: string
   bound_job_id: number | null
@@ -46,6 +47,14 @@ interface PayPalNumber {
 
 interface BulkResult {
   created: number
+  skipped_duplicates?: number
+  skipped_invalid?: number
+}
+
+interface DedupeResult {
+  deleted: number
+  deleted_ids: number[]
+  skipped_bound_ids: number[]
 }
 
 function parseBulkLines(content: string, note: string) {
@@ -150,7 +159,7 @@ export default function PayPalNumbers() {
         body: JSON.stringify({ numbers }),
       })
       setBulkResult(resp)
-      message.success(`已导入 ${resp.created}`)
+      message.success(`已导入 ${resp.created}，跳过重复 ${resp.skipped_duplicates || 0}`)
       reload()
     } catch (err) {
       message.error(err instanceof Error ? err.message : '导入失败')
@@ -226,6 +235,32 @@ export default function PayPalNumbers() {
     }
   }
 
+  const batchSetStatus = async (status: 'available' | 'banned') => {
+    if (!selected.length) return
+    try {
+      const resp = await apiFetch<{ updated: number }>('/paypal-numbers/batch-status', {
+        method: 'POST',
+        body: JSON.stringify({ ids: selected.map((id) => Number(id)), status }),
+      })
+      message.success(status === 'banned' ? `已禁用 ${resp.updated}` : `已启用 ${resp.updated}`)
+      setSelected([])
+      reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '批量更新失败')
+    }
+  }
+
+  const dedupeNumbers = async () => {
+    try {
+      const resp = await apiFetch<DedupeResult>('/paypal-numbers/dedupe', { method: 'POST' })
+      message.success(`已清理重复 ${resp.deleted}${resp.skipped_bound_ids.length ? `，保留绑定中 ${resp.skipped_bound_ids.length}` : ''}`)
+      setSelected([])
+      reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '去重失败')
+    }
+  }
+
   const columns: TableColumnsType<PayPalNumber> = [
     {
       title: '手机号',
@@ -247,6 +282,12 @@ export default function PayPalNumbers() {
       title: '使用',
       dataIndex: 'use_count',
       width: 90,
+      render: (value: number) => value || 0,
+    },
+    {
+      title: 'OTP 后失败',
+      dataIndex: 'otp_failure_count',
+      width: 110,
       render: (value: number) => value || 0,
     },
     {
@@ -326,7 +367,16 @@ export default function PayPalNumbers() {
             <Select allowClear placeholder="状态筛选" value={statusFilter} onChange={setStatusFilter} options={STATUS_OPTIONS} style={{ width: 150 }} />
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新增</Button>
             <Button icon={<UploadOutlined />} onClick={() => setBulkOpen(true)}>批量导入</Button>
+            <Popconfirm title="确认清理重复手机号? 已绑定 Job 的重复行会保留。" onConfirm={dedupeNumbers}>
+              <Button>去重</Button>
+            </Popconfirm>
             <Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>
+            <Popconfirm title={`确认禁用选中的 ${selected.length} 个号码?`} onConfirm={() => batchSetStatus('banned')} disabled={!selected.length}>
+              <Button disabled={!selected.length}>批量禁用</Button>
+            </Popconfirm>
+            <Popconfirm title={`确认启用选中的 ${selected.length} 个号码?`} onConfirm={() => batchSetStatus('available')} disabled={!selected.length}>
+              <Button disabled={!selected.length}>批量启用</Button>
+            </Popconfirm>
             <Popconfirm title={`确认删除选中的 ${selected.length} 个号码?`} onConfirm={batchDelete} disabled={!selected.length}>
               <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>批量删除</Button>
             </Popconfirm>
@@ -340,8 +390,8 @@ export default function PayPalNumbers() {
         columns={columns}
         dataSource={rows}
         loading={loading}
-        scroll={{ x: 1180 }}
-        pagination={{ pageSize: 20, showSizeChanger: false }}
+        scroll={{ x: 1290 }}
+        pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], showTotal: (total) => `共 ${total} 条` }}
         rowSelection={{ selectedRowKeys: selected, onChange: setSelected }}
       />
 
@@ -359,7 +409,7 @@ export default function PayPalNumbers() {
           <Form.Item name="content" label="号码列表" rules={[{ required: true }]}><Input.TextArea rows={10} placeholder="+15551234567----https://sms.example/item/1" /></Form.Item>
           <Form.Item name="note" label="默认备注"><Input /></Form.Item>
         </Form>
-        {bulkResult && <Alert type="success" message={`已导入 ${bulkResult.created}`} showIcon style={{ marginTop: 12 }} />}
+        {bulkResult && <Alert type="success" message={`已导入 ${bulkResult.created}，跳过重复 ${bulkResult.skipped_duplicates || 0}，跳过无效 ${bulkResult.skipped_invalid || 0}`} showIcon style={{ marginTop: 12 }} />}
       </PopupCard>
 
       <PopupCard open={!!editing} title={editing ? `编辑 PayPal 号码 #${editing.id}` : ''} onCancel={() => setEditing(null)} onOk={submitEdit} okText="保存" width={620}>

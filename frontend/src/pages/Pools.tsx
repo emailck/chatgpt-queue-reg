@@ -139,8 +139,8 @@ export default function Pools() {
 
   return (
     <PageScaffold
-      title="池子控制台"
-      description="每个 WorkPool 和 ResourcePool 都是独立卡片：看容量、看资源、进配置；不再用大表格堆所有字段。"
+      title="WorkPools"
+      description="Stage worker pool 控制台：看并发容量、运行中任务、stage 状态和 WorkPool 配置；资源数据放在资源池菜单。"
       actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
     >
       <SummaryGrid>

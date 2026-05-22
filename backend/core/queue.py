@@ -42,6 +42,7 @@ from backend.core.constants import (
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
+    JOB_TERMINAL_STATUSES,
 )
 from backend.core.db import engine, session_scope
 from backend.core.errors import JobCancelled
@@ -201,9 +202,11 @@ class StagePoolManager:
             self._dispatcher.join(timeout=timeout)
             self._dispatcher = None
         with self._lock:
-            for ex in list(self._executors.values()):
-                ex.shutdown(wait=True, cancel_futures=False)
+            executors = list(self._executors.values())
             self._executors.clear()
+            self._inflight.clear()
+        for ex in executors:
+            ex.shutdown(wait=False, cancel_futures=True)
 
     def wake(self) -> None:
         self._wakeup.set()
@@ -427,6 +430,8 @@ def _finish_job(
     with session_scope() as s:
         job = s.get(Job, job_id)
         if job is None:
+            return
+        if job.status in JOB_TERMINAL_STATUSES:
             return
         job.status = status
         job.error = error

@@ -13,16 +13,16 @@ from backend.core.json_utils import json_loads
 from backend.core.queue import enqueue_job
 from backend.core.time_utils import utcnow
 from backend.models.account import ChatGPTAccount
-from backend.models.codex_token import CodexToken
+from backend.models.openai_refresh_token import OpenAIRefreshToken
 from backend.models.job import Job
 
 logger = logging.getLogger(__name__)
 
 SCAN_INTERVAL_SECONDS = 60
-RT_SYNC_STAGE = "rt_keepalive"
+SUB2API_SYNC_STAGE = "sub2api_sync"
 
 
-class RtPoolSyncScheduler:
+class Sub2ApiSyncScheduler:
     def __init__(self, *, interval_seconds: int = SCAN_INTERVAL_SECONDS) -> None:
         self.interval_seconds = max(1, int(interval_seconds))
         self._stop = threading.Event()
@@ -38,7 +38,7 @@ class RtPoolSyncScheduler:
             daemon=True,
         )
         self._thread.start()
-        logger.info("sub2api RT pool sync scheduler started")
+        logger.info("sub2api account sync scheduler started")
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
@@ -52,10 +52,10 @@ class RtPoolSyncScheduler:
         with Session(engine) as s:
             rows = list(
                 s.exec(
-                    sa_select(CodexToken)
-                    .where(CodexToken.alive == True)  # noqa: E712
-                    .where(or_(CodexToken.next_refresh_at == None, CodexToken.next_refresh_at <= now))  # noqa: E711
-                    .order_by(CodexToken.next_refresh_at.asc())
+                    sa_select(OpenAIRefreshToken)
+                    .where(OpenAIRefreshToken.enabled == True)  # noqa: E712
+                    .where(or_(OpenAIRefreshToken.next_sync_at == None, OpenAIRefreshToken.next_sync_at <= now))  # noqa: E711
+                    .order_by(OpenAIRefreshToken.next_sync_at.asc())
                     .limit(100)
                 ).scalars()
             )
@@ -76,15 +76,15 @@ class RtPoolSyncScheduler:
         for account_id, token_id, proxy_id, proxy_url in due:
             try:
                 enqueue_job(
-                    type=RT_SYNC_STAGE,
-                    input={"account_id": account_id, "codex_token_id": token_id},
+                    type=SUB2API_SYNC_STAGE,
+                    input={"account_id": account_id, "refresh_token_id": token_id},
                     account_id=account_id or None,
                     proxy_id=proxy_id,
                     proxy_url=proxy_url,
                 )
                 enqueued += 1
             except Exception:
-                logger.exception("failed to enqueue sub2api RT sync for token_id=%s", token_id)
+                logger.exception("failed to enqueue sub2api sync for token_id=%s", token_id)
         return enqueued
 
     def _loop(self) -> None:
@@ -92,30 +92,30 @@ class RtPoolSyncScheduler:
             try:
                 count = self.scan_once()
                 if count:
-                    logger.info("enqueued %s sub2api RT sync job(s)", count)
+                    logger.info("enqueued %s sub2api sync job(s)", count)
             except Exception:
-                logger.exception("sub2api RT pool sync scan failed")
+                logger.exception("sub2api sync scan failed")
             self._stop.wait(self.interval_seconds)
 
     @staticmethod
     def _has_active_job(s: Session, token_id: int) -> bool:
         rows = s.exec(
             sa_select(Job)
-            .where(Job.type == RT_SYNC_STAGE)
+            .where(Job.type == SUB2API_SYNC_STAGE)
             .where(Job.status.in_([JOB_STATUS_QUEUED, JOB_STATUS_RUNNING]))
         ).scalars()
         for job in rows:
             payload = json_loads(job.input_json, fallback={}) or {}
-            if isinstance(payload, dict) and int(payload.get("codex_token_id") or 0) == token_id:
+            if isinstance(payload, dict) and int(payload.get("refresh_token_id") or 0) == token_id:
                 return True
         return False
 
 
-_scheduler = RtPoolSyncScheduler()
+_scheduler = Sub2ApiSyncScheduler()
 
 
-def get_scheduler() -> RtPoolSyncScheduler:
+def get_scheduler() -> Sub2ApiSyncScheduler:
     return _scheduler
 
 
-RtKeepaliveScheduler = RtPoolSyncScheduler
+Sub2ApiAccountSyncScheduler = Sub2ApiSyncScheduler

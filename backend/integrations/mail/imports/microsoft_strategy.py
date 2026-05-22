@@ -2,23 +2,19 @@
 
 Reads `email----password----client_id----refresh_token` (OAuth) or
 `email----mailapi_url` (mailapi-url polling) lines, optionally fans them out
-into Plus-aliases ("裂变"), probes OAuth availability via
-`MicrosoftMailbox.probe_oauth_availability`, and writes survivors to the new
+into Plus-aliases ("裂变"), and writes valid rows to the new
 `email_accounts` table.
 """
 from __future__ import annotations
 
-import os
 import random
 import string
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Iterable
 
 from sqlmodel import Session, select
 
 from backend.core.db import engine, session_scope
 from backend.core.json_utils import json_dumps
-from backend.integrations.mail.microsoft import MicrosoftMailbox
 from backend.models.email import EmailAccount
 
 from .microsoft_import_rules import (
@@ -229,45 +225,8 @@ class MicrosoftMailImportStrategy:
             include_original=bool(request.alias_include_original),
         )
 
-        oauth_records = [r for r in valid_records if r.account_type == ACCOUNT_TYPE_MICROSOFT_OAUTH]
-        oauth_results: dict[int, dict[str, Any]] = {}
-        if oauth_records:
-            mailbox = MicrosoftMailbox()
-            workers = _resolve_oauth_check_workers(len(oauth_records))
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="oauth-import") as pool:
-                future_map = {
-                    pool.submit(_evaluate_record_availability, record, mailbox): record
-                    for record in oauth_records
-                }
-                for fut in as_completed(future_map):
-                    record = future_map[fut]
-                    try:
-                        oauth_results[record.line_number] = fut.result()
-                    except Exception as exc:
-                        oauth_results[record.line_number] = {
-                            "ok": False,
-                            "message": f"行 {record.line_number}: OAuth 检测异常: {exc}",
-                            "reason": "oauth_probe_exception",
-                        }
-
-        passed: list[MicrosoftMailImportRecord] = []
-        for record in valid_records:
-            if record.account_type != ACCOUNT_TYPE_MICROSOFT_OAUTH:
-                passed.append(record)
-                continue
-            verdict = oauth_results.get(record.line_number) or {
-                "ok": False,
-                "message": f"行 {record.line_number}: OAuth 检测未返回结果",
-                "reason": "oauth_probe_missing_result",
-            }
-            if verdict.get("ok"):
-                passed.append(record)
-            else:
-                failed += 1
-                errors.append(str(verdict.get("message")))
-
         with session_scope() as s:
-            for record in passed:
+            for record in valid_records:
                 try:
                     account = EmailAccount(
                         provider=PROVIDER_NAME,
@@ -383,26 +342,6 @@ def _account_type(account: EmailAccount):
     if account.refresh_token:
         return ACCOUNT_TYPE_MICROSOFT_OAUTH
     return ACCOUNT_TYPE_MAILAPI_URL
-
-
-def _resolve_oauth_check_workers(total: int) -> int:
-    raw = str(os.getenv("MAIL_IMPORT_OAUTH_WORKERS", "8")).strip()
-    try:
-        configured = int(raw)
-    except (TypeError, ValueError):
-        configured = 8
-    configured = max(1, min(configured, 32))
-    return max(1, min(configured, max(total, 1)))
-
-
-def _evaluate_record_availability(record: MicrosoftMailImportRecord, mailbox: MicrosoftMailbox) -> dict[str, Any]:
-    if record.account_type != ACCOUNT_TYPE_MICROSOFT_OAUTH:
-        return {"ok": True}
-    return mailbox.probe_oauth_availability(
-        email=record.email,
-        client_id=record.client_id,
-        refresh_token=record.refresh_token,
-    )
 
 
 registry = {PROVIDER_NAME: MicrosoftMailImportStrategy()}

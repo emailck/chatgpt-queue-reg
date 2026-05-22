@@ -85,31 +85,56 @@ class PaymentOutput(StageOutput):
     payment_proxy_region: str = ""
 
 
-class OAuthCodexInput(StageInput):
+class ChatGPTSessionInput(StageInput):
+    account_id: int
+    mode: str = "session"
+    force_refresh: bool = False
+    sync_sub2api_after_refresh: bool = False
+    extra_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatGPTSessionOutput(StageOutput):
+    account_id: int
+    chatgpt_account_id: str = ""
+    chatgpt_user_id: str = ""
+    access_token: str = ""
+    id_token: str = ""
+    session_token: str = ""
+    session_expires_at: str = ""
+    session_refresh_status: str = ""
+    plan_type: str = ""
+
+
+class Sub2ApiSyncInput(StageInput):
+    account_id: Optional[int] = None
+    refresh_token_id: Optional[int] = None
+    sub2api_account_id: str = ""
+    force_upload: bool = False
+    mode: str = "auto"
+    extra_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class Sub2ApiSyncOutput(StageOutput):
+    account_id: int
+    refresh_token_id: Optional[int] = None
+    sub2api_account_id: str = ""
+    sub2api_status: str = ""
+    auth_mode: str = ""
+    schedulable: bool = True
+    relogin_required: bool = False
+
+
+class OpenAIOAuthInput(StageInput):
     account_id: int
     sms_project: str = "openai_oauth"
     extra_config: dict[str, Any] = Field(default_factory=dict)
 
 
-class OAuthCodexOutput(StageOutput):
+class OpenAIOAuthOutput(StageOutput):
     account_id: int
-    codex_token_id: Optional[int] = None
-    codex_rt: str = ""
-    codex_at: str = ""
+    refresh_token_id: Optional[int] = None
+    has_refresh_token: bool = False
     expires_in: int = 0
-    sub2api_external_id: str = ""
-    sub2api_status: str = ""
-
-
-class RtKeepaliveInput(StageInput):
-    account_id: Optional[int] = None
-    codex_token_id: Optional[int] = None
-
-
-class RtKeepaliveOutput(StageOutput):
-    account_id: int
-    codex_token_id: Optional[int] = None
-    sub2api_external_id: str = ""
     sub2api_status: str = ""
 
 
@@ -117,14 +142,16 @@ STAGE_INPUT_SCHEMAS = {
     "register": RegisterInput,
     "payment_link": PaymentLinkInput,
     "payment": PaymentInput,
-    "oauth_codex": OAuthCodexInput,
-    "rt_keepalive": RtKeepaliveInput,
+    "chatgpt_session": ChatGPTSessionInput,
+    "openai_oauth": OpenAIOAuthInput,
+    "sub2api_sync": Sub2ApiSyncInput,
 }
 
 STAGE_OUTPUT_SCHEMAS = {
     "register": RegisterOutput,
     "payment_link": PaymentLinkOutput,
     "payment": PaymentOutput,
-    "oauth_codex": OAuthCodexOutput,
-    "rt_keepalive": RtKeepaliveOutput,
+    "chatgpt_session": ChatGPTSessionOutput,
+    "openai_oauth": OpenAIOAuthOutput,
+    "sub2api_sync": Sub2ApiSyncOutput,
 }

@@ -112,6 +112,22 @@ class AccessTokenOnlyRegistrationEngine:
             self._log(f"手机接码已开启: provider={provider.provider_name}")
         return provider
 
+    @staticmethod
+    def _is_email_consumed_error(message: str) -> bool:
+        text = str(message or "").lower()
+        return "user_already_exists" in text
+
+    def _settle_email_before_retry(self, email_addr: str, error_msg: str) -> None:
+        if not email_addr:
+            return
+        from backend.integrations.mail.pool import mark_consumed, requeue
+        if self._is_email_consumed_error(error_msg):
+            mark_consumed(email=email_addr, note="user_already_exists")
+            self._log(f"邮箱已标记消费（已存在账号）: {email_addr}")
+        else:
+            requeue(email=email_addr)
+            self._log(f"邮箱已退回池: {email_addr}")
+
     def _should_retry(self, message: str) -> bool:
         text = str(message or "").lower()
         retriable_markers = [
@@ -223,9 +239,12 @@ class AccessTokenOnlyRegistrationEngine:
                     if not success:
                         last_error = f"注册流失败: {msg}"
                         if attempt < self.max_retries - 1 and self._should_retry(msg):
+                            self._settle_email_before_retry(email_addr, msg)
                             self._log(f"注册流失败，准备整流程重试: {msg}")
                             continue
                         result.error_message = last_error
+                        if self._is_email_consumed_error(msg):
+                            self._mark_email_consumed_after_signup(result)
                         return result
 
                     self._mark_email_consumed_after_signup(result)
@@ -273,6 +292,7 @@ class AccessTokenOnlyRegistrationEngine:
                 except Exception as attempt_error:
                     last_error = str(attempt_error)
                     if attempt < self.max_retries - 1 and self._should_retry(last_error):
+                        self._settle_email_before_retry(email_addr, last_error)
                         self._log(f"本轮出现异常，准备整流程重试: {last_error}")
                         continue
                     raise

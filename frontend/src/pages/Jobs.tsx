@@ -25,8 +25,8 @@ interface AccountSummary {
   proxy_url: string
   has_access_token?: boolean
   has_refresh_token?: boolean
-  codex_token_has_refresh_token?: boolean
-  codex_token_alive?: boolean
+  refresh_token_has_token?: boolean
+  refresh_token_enabled?: boolean
   sub2api_status?: string | null
 }
 
@@ -377,7 +377,7 @@ export default function Jobs() {
       render: (_, row) => row.account ? (
         <Space direction="vertical" size={4}>
           <StatusTag status={row.account.status} />
-          <TokenBadges accessToken={row.account.has_access_token ? 'yes' : ''} refreshToken={row.account.has_refresh_token ? 'yes' : ''} codexRt={row.account.codex_token_has_refresh_token ? 'yes' : ''} />
+          <TokenBadges accessToken={row.account.has_access_token ? 'yes' : ''} refreshToken={(row.account.has_refresh_token || row.account.refresh_token_has_token) ? 'yes' : ''} />
           <Sub2ApiBadge status={row.account.sub2api_status} />
         </Space>
       ) : <Text type="secondary">-</Text>,
@@ -573,7 +573,7 @@ export default function Jobs() {
         dataSource={filteredRows}
         loading={loading}
         scroll={{ x: 1500 }}
-        pagination={{ pageSize: 20, showSizeChanger: false }}
+        pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], showTotal: (total) => `共 ${total} 条` }}
         onRow={(row) => ({ onDoubleClick: () => openDetail(row.pipeline.id) })}
       />
 

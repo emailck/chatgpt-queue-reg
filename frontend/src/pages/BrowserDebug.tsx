@@ -29,6 +29,7 @@ export default function BrowserDebug() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [loading, setLoading] = useState(false)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(18)
   const [form] = Form.useForm()
 
   const reload = useCallback(async () => {
@@ -136,8 +137,9 @@ export default function BrowserDebug() {
       <EntityGrid
         items={sessions}
         page={page}
-        pageSize={18}
-        onPageChange={setPage}
+        pageSize={pageSize}
+        onPageChange={(nextPage, nextPageSize) => { setPage(nextPage); setPageSize(nextPageSize) }}
+        showSizeChanger
         renderItem={(row) => (
           <EntityCard
             key={row.id}

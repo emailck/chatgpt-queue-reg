@@ -23,7 +23,7 @@ from backend.core.constants import JOB_STATUS_QUEUED, JOB_STATUS_RUNNING
 from backend.core.db import engine, session_scope
 from backend.core.queue import enqueue_job
 from backend.models.access_token import AccessTokenAccount
-from backend.models.codex_token import CodexToken
+from backend.models.openai_refresh_token import OpenAIRefreshToken
 from backend.models.job import Job
 
 INVALID_SUB2API_STATUSES = {"dead", "disabled", "banned", "invalid", "expired"}
@@ -50,8 +50,8 @@ def list_access_tokens(
         if pool == "at":
             stmt = stmt.where(AccessTokenAccount.access_token != "")
         rows = list(s.exec(stmt.order_by(AccessTokenAccount.id.desc()).limit(limit)).scalars())
-        codex_by_account = _codex_tokens_by_account(s, [int(r.chatgpt_account_id or 0) for r in rows])
-    items = [_with_codex_token(access_token_account_to_dict(r, include_secrets=include_secrets), codex_by_account.get(int(r.chatgpt_account_id or 0)), include_secrets=include_secrets) for r in rows]
+        refresh_tokens_by_account = _refresh_tokens_by_account(s, [int(r.chatgpt_account_id or 0) for r in rows])
+    items = [_with_refresh_token(access_token_account_to_dict(r, include_secrets=include_secrets), refresh_tokens_by_account.get(int(r.chatgpt_account_id or 0)), include_secrets=include_secrets) for r in rows]
     if pool == "rt":
         items = [item for item in items if item.get("has_refresh_token")]
     elif pool == "at":
@@ -85,17 +85,17 @@ def export_access_tokens(
         elif pool == "at":
             stmt = stmt.where(AccessTokenAccount.access_token != "")
         rows = list(s.exec(stmt.order_by(AccessTokenAccount.id.asc())).scalars())
-        codex_by_account = _codex_tokens_by_account(s, [int(r.chatgpt_account_id or 0) for r in rows])
+        refresh_tokens_by_account = _refresh_tokens_by_account(s, [int(r.chatgpt_account_id or 0) for r in rows])
 
     if pool in {"at", "rt"} and id_filter is None:
         rows = [
             row for row in rows
-            if _codex_token_is_usable(_codex_for_row(row, codex_by_account)) == (pool == "rt")
+            if _refresh_token_is_usable(_refresh_token_for_row(row, refresh_tokens_by_account)) == (pool == "rt")
         ]
 
     if fmt == "json":
         body = json.dumps(
-            [_with_codex_token(access_token_account_to_dict(r, include_secrets=True), codex_by_account.get(int(r.chatgpt_account_id or 0)), include_secrets=True) for r in rows],
+            [_with_refresh_token(access_token_account_to_dict(r, include_secrets=True), refresh_tokens_by_account.get(int(r.chatgpt_account_id or 0)), include_secrets=True) for r in rows],
             ensure_ascii=False,
             indent=2,
             default=str,
@@ -103,10 +103,10 @@ def export_access_tokens(
         return _stream(body, "application/json", "access-tokens.json")
 
     if fmt == "csv":
-        return _stream(_render_csv(rows, codex_by_account=codex_by_account), "text/csv; charset=utf-8", "access-tokens.csv")
+        return _stream(_render_csv(rows, refresh_tokens_by_account=refresh_tokens_by_account), "text/csv; charset=utf-8", "access-tokens.csv")
 
     return _stream(
-        _render_txt(rows, separator=separator, fields=fields, codex_by_account=codex_by_account),
+        _render_txt(rows, separator=separator, fields=fields, refresh_tokens_by_account=refresh_tokens_by_account),
         "text/plain; charset=utf-8",
         "access-tokens.txt",
     )
@@ -141,8 +141,8 @@ def get_access_token(at_id: int, include_secrets: bool = False):
         row = s.get(AccessTokenAccount, at_id)
         if row is None:
             raise HTTPException(status_code=404, detail="not found")
-        codex_token = _codex_tokens_by_account(s, [int(row.chatgpt_account_id or 0)]).get(int(row.chatgpt_account_id or 0))
-    return _with_codex_token(access_token_account_to_dict(row, include_secrets=include_secrets), codex_token, include_secrets=include_secrets)
+        refresh_token = _refresh_tokens_by_account(s, [int(row.chatgpt_account_id or 0)]).get(int(row.chatgpt_account_id or 0))
+    return _with_refresh_token(access_token_account_to_dict(row, include_secrets=include_secrets), refresh_token, include_secrets=include_secrets)
 
 
 @router.post("/api/access-tokens/{at_id}/refresh-token", tags=["access-tokens"])
@@ -154,13 +154,13 @@ def fetch_access_token_refresh_token(at_id: int):
         account_id = int(row.chatgpt_account_id or 0)
         if not account_id:
             raise HTTPException(status_code=409, detail="该 AT 行未关联 ChatGPT 账号，无法获取 RT")
-        codex_token = _codex_tokens_by_account(s, [account_id]).get(account_id)
-        if _codex_token_is_usable(codex_token):
+        refresh_token = _refresh_tokens_by_account(s, [account_id]).get(account_id)
+        if _refresh_token_is_usable(refresh_token):
             return {"job_id": None, "already_has_refresh_token": True, "already_running": False}
         running = s.exec(
             sa_select(Job)
             .where(Job.account_id == account_id)
-            .where(Job.type == "oauth_codex")
+            .where(Job.type == "openai_oauth")
             .where(Job.status.in_([JOB_STATUS_QUEUED, JOB_STATUS_RUNNING]))
         ).scalars().first()
         if running is not None:
@@ -172,7 +172,7 @@ def fetch_access_token_refresh_token(at_id: int):
         proxy_id = row.proxy_id
         proxy_url = row.proxy_url or ""
     job_id = enqueue_job(
-        type="oauth_codex",
+        type="openai_oauth",
         input={"account_id": account_id, "access_token_account_id": at_id},
         account_id=account_id,
         proxy_id=proxy_id,
@@ -193,8 +193,8 @@ def update_access_token(at_id: int, body: UpdateRequest):
         s.commit()
         s.refresh(row)
         account_id = int(row.chatgpt_account_id or 0)
-        codex_token = _codex_tokens_by_account(s, [account_id]).get(account_id)
-        return _with_codex_token(access_token_account_to_dict(row), codex_token)
+        refresh_token = _refresh_tokens_by_account(s, [account_id]).get(account_id)
+        return _with_refresh_token(access_token_account_to_dict(row), refresh_token)
 
 
 @router.delete("/api/access-tokens/{at_id}", tags=["access-tokens"])
@@ -251,18 +251,18 @@ CSV_FIELDS = (
 )
 
 
-def _codex_tokens_by_account(s: Session, account_ids: list[int]) -> dict[int, CodexToken]:
+def _refresh_tokens_by_account(s: Session, account_ids: list[int]) -> dict[int, OpenAIRefreshToken]:
     ids = [int(i or 0) for i in account_ids if int(i or 0)]
     if not ids:
         return {}
     rows = list(
         s.exec(
-            sa_select(CodexToken)
-            .where(CodexToken.account_id.in_(ids))
-            .order_by(CodexToken.id.desc())
+            sa_select(OpenAIRefreshToken)
+            .where(OpenAIRefreshToken.account_id.in_(ids))
+            .order_by(OpenAIRefreshToken.id.desc())
         ).scalars()
     )
-    latest: dict[int, CodexToken] = {}
+    latest: dict[int, OpenAIRefreshToken] = {}
     for row in rows:
         aid = int(row.account_id or 0)
         if aid and aid not in latest:
@@ -277,55 +277,55 @@ def _mask(value: str) -> str:
     return text if len(text) <= 24 else f"{text[:24]}..."
 
 
-def _codex_token_is_usable(codex_token: CodexToken | None) -> bool:
-    if codex_token is None or not codex_token.refresh_token:
+def _refresh_token_is_usable(refresh_token: OpenAIRefreshToken | None) -> bool:
+    if refresh_token is None or not refresh_token.refresh_token:
         return False
-    if not codex_token.alive:
+    if not refresh_token.enabled:
         return False
-    return str(codex_token.sub2api_status or "").strip().lower() not in INVALID_SUB2API_STATUSES
+    return str(refresh_token.sub2api_status or "").strip().lower() not in INVALID_SUB2API_STATUSES
 
 
-def _with_codex_token(item: dict[str, Any], codex_token: CodexToken | None, *, include_secrets: bool = False) -> dict[str, Any]:
-    if codex_token is None:
+def _with_refresh_token(item: dict[str, Any], refresh_token: OpenAIRefreshToken | None, *, include_secrets: bool = False) -> dict[str, Any]:
+    if refresh_token is None:
         item.update({
             "refresh_token": "",
             "has_refresh_token": False,
-            "codex_token_id": None,
-            "codex_token_alive": False,
-            "codex_token_has_refresh_token": False,
-            "codex_token_last_error": "",
-            "sub2api_external_id": "",
+            "refresh_token_id": None,
+            "refresh_token_enabled": False,
+            "refresh_token_has_token": False,
+            "refresh_token_last_error": "",
+            "sub2api_account_id": "",
             "sub2api_status": "",
             "sub2api_uploaded_at": None,
             "sub2api_status_checked_at": None,
         })
         return item
-    refresh_token = str(codex_token.refresh_token or "")
+    refresh_token_value = str(refresh_token.refresh_token or "")
     item.update({
-        "refresh_token": refresh_token if include_secrets else _mask(refresh_token),
-        "has_refresh_token": _codex_token_is_usable(codex_token),
-        "codex_token_id": codex_token.id,
-        "codex_token_alive": bool(codex_token.alive),
-        "codex_token_has_refresh_token": bool(refresh_token),
-        "codex_token_last_error": codex_token.last_error,
-        "sub2api_external_id": codex_token.sub2api_external_id,
-        "sub2api_status": codex_token.sub2api_status,
-        "sub2api_uploaded_at": codex_token.uploaded_at.isoformat() if codex_token.uploaded_at else None,
-        "sub2api_status_checked_at": codex_token.status_checked_at.isoformat() if codex_token.status_checked_at else None,
+        "refresh_token": refresh_token_value if include_secrets else _mask(refresh_token_value),
+        "has_refresh_token": _refresh_token_is_usable(refresh_token),
+        "refresh_token_id": refresh_token.id,
+        "refresh_token_enabled": bool(refresh_token.enabled),
+        "refresh_token_has_token": bool(refresh_token_value),
+        "refresh_token_last_error": refresh_token.last_error,
+        "sub2api_account_id": refresh_token.sub2api_account_id,
+        "sub2api_status": refresh_token.sub2api_status,
+        "sub2api_uploaded_at": refresh_token.uploaded_at.isoformat() if refresh_token.uploaded_at else None,
+        "sub2api_status_checked_at": refresh_token.status_checked_at.isoformat() if refresh_token.status_checked_at else None,
     })
     return item
 
 
-def _codex_for_row(row: AccessTokenAccount, codex_by_account: dict[int, CodexToken]) -> CodexToken | None:
-    return codex_by_account.get(int(row.chatgpt_account_id or 0))
+def _refresh_token_for_row(row: AccessTokenAccount, refresh_tokens_by_account: dict[int, OpenAIRefreshToken]) -> OpenAIRefreshToken | None:
+    return refresh_tokens_by_account.get(int(row.chatgpt_account_id or 0))
 
 
-def _render_csv(rows: list[AccessTokenAccount], *, codex_by_account: dict[int, CodexToken]) -> str:
+def _render_csv(rows: list[AccessTokenAccount], *, refresh_tokens_by_account: dict[int, OpenAIRefreshToken]) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(CSV_FIELDS)
     for row in rows:
-        codex_token = _codex_for_row(row, codex_by_account)
+        refresh_token = _refresh_token_for_row(row, refresh_tokens_by_account)
         writer.writerow([
             row.id,
             row.pipeline_id or "",
@@ -335,8 +335,8 @@ def _render_csv(rows: list[AccessTokenAccount], *, codex_by_account: dict[int, C
             row.account_id,
             row.workspace_id,
             row.access_token,
-            codex_token.refresh_token if codex_token else "",
-            codex_token.id_token if codex_token and codex_token.id_token else row.id_token,
+            refresh_token.refresh_token if refresh_token else "",
+            row.id_token,
             row.session_token,
             row.proxy_url,
             row.user_agent,
@@ -354,14 +354,14 @@ ALLOWED_TXT_FIELDS = {
     "workspace_id": lambda r, c: r.workspace_id,
     "access_token": lambda r, c: r.access_token,
     "refresh_token": lambda r, c: c.refresh_token if c else "",
-    "id_token": lambda r, c: c.id_token if c and c.id_token else r.id_token,
+    "id_token": lambda r, c: r.id_token,
     "session_token": lambda r, c: r.session_token,
     "proxy_url": lambda r, c: r.proxy_url,
     "user_agent": lambda r, c: r.user_agent,
 }
 
 
-def _render_txt(rows: list[AccessTokenAccount], *, separator: str, fields: str, codex_by_account: dict[int, CodexToken]) -> str:
+def _render_txt(rows: list[AccessTokenAccount], *, separator: str, fields: str, refresh_tokens_by_account: dict[int, OpenAIRefreshToken]) -> str:
     keys = [f.strip() for f in str(fields or "").split(",") if f.strip()]
     if not keys:
         keys = ["email", "password", "access_token", "refresh_token", "session_token"]
@@ -371,7 +371,7 @@ def _render_txt(rows: list[AccessTokenAccount], *, separator: str, fields: str, 
     sep = separator if separator else "----"
     lines: list[str] = []
     for row in rows:
-        codex_token = _codex_for_row(row, codex_by_account)
-        parts = [str(ALLOWED_TXT_FIELDS[k](row, codex_token) or "") for k in keys]
+        refresh_token = _refresh_token_for_row(row, refresh_tokens_by_account)
+        parts = [str(ALLOWED_TXT_FIELDS[k](row, refresh_token) or "") for k in keys]
         lines.append(sep.join(parts))
     return "\n".join(lines) + ("\n" if lines else "")

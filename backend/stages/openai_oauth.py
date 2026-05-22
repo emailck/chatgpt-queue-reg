@@ -1,54 +1,41 @@
-"""oauth_codex stage.
-
-Runs the OpenAI OAuth PKCE flow against an *already registered* ChatGPT
-account to obtain a Codex `refresh_token` (+ `access_token` / `id_token`),
-then upserts a local mirror row and uploads the RT to sub2api. sub2api owns
-RT rotation.
-
-Identity (proxy / UA / cookies / fingerprint) comes from the bound
-`chatgpt_accounts` row — see ARCHITECTURE.md §4.
-"""
+"""OpenAI OAuth refresh-token stage."""
 from __future__ import annotations
 
 import time
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Any
 
 from sqlmodel import Session
 
 from backend.core.db import engine, session_scope
 from backend.core.errors import JobCancelled
 from backend.core.job_context import JobContext
-from backend.core.json_utils import json_dumps, json_loads
 from backend.core.settings import settings
 from backend.core.stages import stage
 from backend.core.time_utils import utcnow
 from backend.models.account import ChatGPTAccount
-from backend.models.codex_token import CodexToken
-from backend.schemas.stage_io import OAuthCodexInput, OAuthCodexOutput
-
-
-PROBE_INTERVAL_HOURS = 24
+from backend.models.openai_refresh_token import OpenAIRefreshToken
+from backend.schemas.stage_io import OpenAIOAuthInput, OpenAIOAuthOutput
 
 
 @stage(
-    name="oauth_codex",
+    name="openai_oauth",
     requires_resources=[],
     optional_resources=["sms_pool", "proxy_pool"],
     default_concurrency=3,
-    input_schema=OAuthCodexInput,
-    output_schema=OAuthCodexOutput,
-    description="Run OpenAI OAuth PKCE on a registered account, obtain Codex RT/AT.",
+    input_schema=OpenAIOAuthInput,
+    output_schema=OpenAIOAuthOutput,
+    description="Run OpenAI OAuth PKCE on a registered account and obtain RT.",
 )
 def run(ctx: JobContext) -> None:
     account_id = ctx.account_id or int(ctx.input.get("account_id") or 0) or None
     if not account_id:
-        raise RuntimeError("oauth_codex stage requires account_id")
+        raise RuntimeError("openai_oauth stage requires account_id")
     ctx.attach_account(account_id)
 
     payload = dict(ctx.input or {})
     extra_config = dict(payload.get("extra_config") or {})
-    pool_config = _workpool_config("workpool.oauth_codex.")
+    pool_config = _workpool_config("workpool.openai_oauth.")
     merged_extra = {**settings.get_all(), **pool_config, **extra_config}
 
     with Session(engine) as s:
@@ -65,7 +52,7 @@ def run(ctx: JobContext) -> None:
     proxy_url = ctx.effective_proxy_url() or ""
 
     ctx.log(
-        "starting oauth_codex stage",
+        "starting openai_oauth stage",
         payload={
             "account_id": account_id,
             "email": email,
@@ -96,7 +83,6 @@ def run(ctx: JobContext) -> None:
         maximum=5,
     )
 
-    # Lazy import — pulls heavy modules.
     from backend.integrations.chatgpt.oauth import create_oauth_session
     from backend.integrations.chatgpt.oauth_protocol import (
         OAuthOtpAdapter,
@@ -155,21 +141,17 @@ def run(ctx: JobContext) -> None:
         raise RuntimeError(f"OAuth 获取 refresh_token 失败: {last_error}")
 
     token_id = _persist_refresh_token(account_id, token_data)
-    upload_result = _upload_refresh_token_to_sub2api(token_id, account_id, token_data, proxy_url=proxy_url)
-
     expires_in = int(token_data.get("expires_in") or 3600)
     ctx.update_result({
         "account_id": account_id,
-        "codex_token_id": token_id,
-        "codex_rt": str(token_data.get("refresh_token") or ""),
-        "codex_at": str(token_data.get("access_token") or ""),
+        "refresh_token_id": token_id,
+        "has_refresh_token": True,
         "expires_in": expires_in,
-        "sub2api_status": upload_result.get("status", ""),
-        "sub2api_external_id": upload_result.get("external_id", ""),
+        "sub2api_status": "pending_sync",
     })
     ctx.log(
-        "oauth_codex succeeded",
-        payload={"account_id": account_id, "expires_in": expires_in, "sub2api_status": upload_result.get("status", "")},
+        "openai_oauth succeeded",
+        payload={"account_id": account_id, "refresh_token_id": token_id, "expires_in": expires_in},
     )
 
 
@@ -228,14 +210,9 @@ def _read_int_config(
 
 
 def _persist_refresh_token(account_id: int, token_data: dict[str, Any]) -> int:
-    """Upsert a `codex_tokens` row for `account_id` from a fresh token response.
-
-    Sets RT/AT/id_token, expires_at = now + expires_in, schedules immediate
-    sub2api upload/sync, and resets failure counters.
-    """
     rt = str(token_data.get("refresh_token") or "").strip()
-    at = str(token_data.get("access_token") or "").strip()
-    id_token = str(token_data.get("id_token") or "").strip()
+    oauth_at = str(token_data.get("access_token") or "").strip()
+    oauth_id_token = str(token_data.get("id_token") or "").strip()
     expires_in = int(token_data.get("expires_in") or 3600)
     now = utcnow()
 
@@ -243,20 +220,20 @@ def _persist_refresh_token(account_id: int, token_data: dict[str, Any]) -> int:
         from sqlalchemy import select as sa_select
 
         existing = s.exec(
-            sa_select(CodexToken).where(CodexToken.account_id == int(account_id))
+            sa_select(OpenAIRefreshToken).where(OpenAIRefreshToken.account_id == int(account_id))
         ).scalars().first()
 
         if existing is None:
-            row = CodexToken(
+            row = OpenAIRefreshToken(
                 account_id=int(account_id),
                 refresh_token=rt,
-                access_token=at,
-                id_token=id_token,
-                expires_at=now + timedelta(seconds=expires_in),
-                next_refresh_at=now,
-                last_refreshed_at=None,
+                oauth_access_token=oauth_at,
+                oauth_id_token=oauth_id_token,
+                oauth_access_expires_at=now + timedelta(seconds=expires_in),
+                next_sync_at=now,
+                last_sync_at=None,
                 consecutive_failures=0,
-                alive=True,
+                enabled=True,
                 last_error="",
                 sub2api_status="pending_upload",
                 created_at=now,
@@ -268,15 +245,15 @@ def _persist_refresh_token(account_id: int, token_data: dict[str, Any]) -> int:
             return int(row.id or 0)
 
         existing.refresh_token = rt or existing.refresh_token
-        if at:
-            existing.access_token = at
-        if id_token:
-            existing.id_token = id_token
-        existing.expires_at = now + timedelta(seconds=expires_in)
-        existing.next_refresh_at = now
-        existing.last_refreshed_at = None
+        if oauth_at:
+            existing.oauth_access_token = oauth_at
+        if oauth_id_token:
+            existing.oauth_id_token = oauth_id_token
+        existing.oauth_access_expires_at = now + timedelta(seconds=expires_in)
+        existing.next_sync_at = now
+        existing.last_sync_at = None
         existing.consecutive_failures = 0
-        existing.alive = True
+        existing.enabled = True
         existing.last_error = ""
         existing.sub2api_status = "pending_upload"
         existing.updated_at = now
@@ -286,76 +263,7 @@ def _persist_refresh_token(account_id: int, token_data: dict[str, Any]) -> int:
         return int(existing.id or 0)
 
 
-def _upload_refresh_token_to_sub2api(token_id: int, account_id: int, token_data: dict[str, Any], *, proxy_url: str) -> dict[str, str]:
-    from backend.integrations.sub2api import Sub2ApiNotConfigured, get_sub2api_client
-
-    rt = str(token_data.get("refresh_token") or "").strip()
-    if not rt:
-        return {"status": "missing_refresh_token", "external_id": ""}
-    now = utcnow()
-    try:
-        resp = get_sub2api_client().upload_codex_token(
-            account_id=int(account_id),
-            refresh_token=rt,
-            access_token=str(token_data.get("access_token") or ""),
-            id_token=str(token_data.get("id_token") or ""),
-            expires_at=(now + timedelta(seconds=int(token_data.get("expires_in") or 3600))).isoformat(),
-            proxy_url=proxy_url or "",
-            metadata={"local_codex_token_id": token_id},
-        )
-        external_id = _extract_sub2api_external_id(resp) or str(resp.get("id") or resp.get("token_id") or "")
-        status = str(resp.get("status") or resp.get("state") or "uploaded")
-        with session_scope() as s:
-            row = s.get(CodexToken, token_id)
-            if row is not None:
-                row.sub2api_external_id = external_id
-                row.sub2api_status = status
-                row.sub2api_payload_json = json_dumps(resp)
-                row.uploaded_at = now
-                row.status_checked_at = now
-                row.next_refresh_at = now + timedelta(hours=PROBE_INTERVAL_HOURS)
-                row.last_error = ""
-                row.updated_at = now
-                s.add(row)
-        return {"status": status, "external_id": external_id}
-    except Sub2ApiNotConfigured as exc:
-        _mark_sub2api_upload_failed(token_id, str(exc), status="pending_upload")
-        return {"status": "pending_upload", "external_id": ""}
-    except Exception as exc:
-        _mark_sub2api_upload_failed(token_id, str(exc), status="upload_failed")
-        return {"status": "upload_failed", "external_id": ""}
-
-
-def _extract_sub2api_external_id(resp: dict[str, Any]) -> str:
-    for key in ("external_id", "sub2api_id", "id", "token_id"):
-        value = resp.get(key)
-        if value not in (None, ""):
-            return str(value)
-    data = resp.get("data")
-    if isinstance(data, dict):
-        return _extract_sub2api_external_id(data)
-    return ""
-
-
-def _mark_sub2api_upload_failed(token_id: int, error: str, *, status: str) -> None:
-    with session_scope() as s:
-        row = s.get(CodexToken, token_id)
-        if row is None:
-            return
-        row.sub2api_status = status
-        row.last_error = error
-        row.status_checked_at = utcnow()
-        row.updated_at = utcnow()
-        s.add(row)
-
-
 def _persist_refresh_token_error(account_id: int, error: str) -> None:
-    """Record an OAuth-codex failure on the existing `codex_tokens` row, if any.
-
-    We only update an existing row here; we don't create one with empty RT
-    because the row's `refresh_token` is mandatory for `rt_keepalive` to do
-    anything useful.
-    """
     if not account_id:
         return
     now = utcnow()
@@ -363,7 +271,7 @@ def _persist_refresh_token_error(account_id: int, error: str) -> None:
         from sqlalchemy import select as sa_select
 
         existing = s.exec(
-            sa_select(CodexToken).where(CodexToken.account_id == int(account_id))
+            sa_select(OpenAIRefreshToken).where(OpenAIRefreshToken.account_id == int(account_id))
         ).scalars().first()
         if existing is None:
             return

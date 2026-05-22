@@ -397,7 +397,11 @@ class ChatGPTClient:
         page_type = state.page_type or ""
         return (
             page_type in {"callback", "chatgpt_home", "oauth_callback"}
-            or ("chatgpt.com" in current_url and "redirect_uri" not in current_url)
+            or (
+                "chatgpt.com" in current_url
+                and "redirect_uri" not in current_url
+                and page_type != "external_url"
+            )
             or (
                 "chatgpt.com" in continue_url
                 and "redirect_uri" not in continue_url
@@ -621,6 +625,263 @@ class ChatGPTClient:
             return False, last_error
 
         return False, last_error or "/api/auth/session 未返回 accessToken"
+
+    def fetch_backend_me(self, access_token, max_attempts=2, retry_delay=1.0):
+        url = f"{self.BASE}/backend-api/me"
+        token = str(access_token or "").strip()
+        if not token:
+            return False, "missing access_token"
+        last_error = ""
+        for attempt in range(max(1, int(max_attempts or 1))):
+            try:
+                response = self._session_get(
+                    url,
+                    headers=self._headers(
+                        url,
+                        accept="application/json, text/plain, */*",
+                        referer=f"{self.BASE}/",
+                        content_type="application/json",
+                        fetch_site="same-origin",
+                        extra_headers={"Authorization": f"Bearer {token}"},
+                    ),
+                    timeout=30,
+                )
+            except Exception as exc:
+                last_error = f"/backend-api/me 请求异常: {exc}"
+                if attempt < max_attempts - 1:
+                    time.sleep(retry_delay)
+                    continue
+                return False, last_error
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                except Exception as exc:
+                    return False, f"/backend-api/me 返回非 JSON: {exc}"
+                return True, data if isinstance(data, dict) else {}
+            last_error = f"/backend-api/me -> HTTP {response.status_code}: {str(response.text or '')[:240]}"
+            if attempt < max_attempts - 1 and response.status_code >= 500:
+                time.sleep(retry_delay)
+                continue
+            return False, last_error
+        return False, last_error or "/backend-api/me 校验失败"
+
+    def _fetch_session_with_cookie_token(self, max_attempts=3):
+        ok, session_or_error = self.fetch_chatgpt_session(max_attempts=max_attempts)
+        if not ok:
+            return False, session_or_error
+        data = dict(session_or_error or {})
+        session_cookie = self.get_next_auth_session_token()
+        if session_cookie and not str(data.get("sessionToken") or "").strip():
+            data["sessionToken"] = session_cookie
+        return True, data
+
+    def relogin_existing_user(self, email, password="", otp_provider=None, max_steps=16):
+        self._enter_stage("login", f"email={email}")
+        if not email:
+            return False, "missing email"
+        if otp_provider is None and not password:
+            return False, "missing otp provider"
+        csrf_token = self.get_csrf_token()
+        if not csrf_token:
+            return False, "获取 CSRF token 失败"
+        authorize_url = self.signin(email, csrf_token)
+        if not authorize_url:
+            return False, "signin/openai 未返回 authorize URL"
+        final_url = self.authorize(authorize_url)
+        if not final_url:
+            return False, "authorize 跳转失败"
+        state = self._state_from_url(final_url)
+        otp_sent_at = 0.0
+        self._log(f"登录状态起点: {describe_flow_state(state)}")
+        seen = {}
+        for _ in range(max(1, int(max_steps or 1))):
+            signature = self._state_signature(state)
+            seen[signature] = seen.get(signature, 0) + 1
+            if seen[signature] > 3:
+                return False, f"登录状态卡住: {describe_flow_state(state)}"
+            if self._is_registration_complete_state(state):
+                self.last_registration_state = state
+                return self._fetch_session_with_cookie_token(max_attempts=3)
+            if self._state_is_login_start(state):
+                ok, next_state = self.authorize_continue_login(email, state, return_state=True)
+                if not ok:
+                    return False, f"登录邮箱提交失败: {next_state}"
+                state = next_state
+                self._log(f"登录状态: {describe_flow_state(state)}")
+                continue
+            if self._state_is_login_password(state):
+                if otp_provider is not None:
+                    ok, next_state = self.request_login_email_otp(state, return_state=True)
+                    if not ok:
+                        return False, f"登录邮箱验证码发送失败: {next_state}"
+                    otp_sent_at = time.time()
+                    state = next_state
+                    self._log(f"登录状态: {describe_flow_state(state)}")
+                    continue
+                ok, next_state = self.verify_login_password(password, state, return_state=True)
+                if not ok:
+                    return False, f"登录密码验证失败: {next_state}"
+                state = next_state
+                self._log(f"登录状态: {describe_flow_state(state)}")
+                continue
+            if self._state_is_email_otp(state):
+                if otp_provider is None:
+                    return False, "登录需要邮箱验证码，但未提供邮箱取码服务"
+                if not otp_sent_at:
+                    otp_sent_at = time.time() - 30
+                code = self._get_login_otp_code(otp_provider, email, timeout=300, otp_sent_at=otp_sent_at)
+                if not code:
+                    return False, "登录邮箱验证码获取失败"
+                ok, next_state = self.verify_email_otp(code, return_state=True)
+                if not ok:
+                    return False, f"登录邮箱验证码验证失败: {next_state}"
+                state = next_state
+                self._log(f"登录状态: {describe_flow_state(state)}")
+                continue
+            if self._state_requires_navigation(state):
+                ok, next_state = self._follow_flow_state(state, referer=state.current_url or f"{self.AUTH}/log-in")
+                if not ok:
+                    return False, f"登录跳转失败: {next_state}"
+                state = next_state
+                self._log(f"登录状态: {describe_flow_state(state)}")
+                continue
+            if self._state_is_add_phone(state):
+                return False, "登录需要手机验证"
+            return False, f"未支持的登录状态: {describe_flow_state(state)}"
+        return False, "登录状态机超出最大步数"
+
+    def _protocol_sentinel_token(self, flow):
+        return build_sentinel_token(
+            self.session,
+            self.device_id,
+            flow=flow,
+            user_agent=self.ua,
+            sec_ch_ua=self.sec_ch_ua,
+            impersonate=self.impersonate,
+            platform=self._fingerprint.platform,
+            is_firefox=self.is_firefox,
+            viewport_width=self.viewport_width,
+            viewport_height=self.viewport_height,
+            logger=lambda msg: self._log(msg),
+        )
+
+    def authorize_continue_login(self, email, state, return_state=False):
+        url = f"{self.AUTH}/api/accounts/authorize/continue"
+        sentinel_token = self._protocol_sentinel_token("authorize_continue")
+        headers = self._headers(
+            url,
+            accept="application/json",
+            referer=state.current_url or state.continue_url or f"{self.AUTH}/log-in",
+            origin=self.AUTH,
+            content_type="application/json",
+            fetch_site="same-origin",
+            extra_headers={
+                "oai-device-id": self.device_id,
+                "openai-sentinel-token": sentinel_token,
+            },
+        )
+        headers.update(generate_datadog_trace())
+        try:
+            response = self._session_post(
+                url,
+                json={"username": {"kind": "email", "value": email}, "screen_hint": "login"},
+                headers=headers,
+                allow_redirects=False,
+                timeout=45,
+            )
+        except Exception as exc:
+            return False, str(exc)
+        self._log(f"authorize/continue -> {response.status_code}")
+        if response.status_code != 200:
+            return False, f"HTTP {response.status_code}: {response.text[:240]}"
+        try:
+            next_state = self._state_from_payload(response.json(), current_url=str(response.url) or url)
+        except Exception as exc:
+            return False, f"authorize/continue 返回非 JSON: {exc}"
+        return (True, next_state) if return_state else (True, "ok")
+
+    def request_login_email_otp(self, state, return_state=False):
+        url = f"{self.AUTH}/api/accounts/email-otp/send"
+        headers = self._headers(
+            url,
+            accept="application/json",
+            referer=state.current_url or state.continue_url or f"{self.AUTH}/log-in/password",
+            origin=self.AUTH,
+            content_type="application/json",
+            fetch_site="same-origin",
+            extra_headers={"oai-device-id": self.device_id},
+        )
+        headers.update(generate_datadog_trace())
+        try:
+            response = self._session_get(url, headers=headers, allow_redirects=False, timeout=45)
+        except Exception as exc:
+            return False, str(exc)
+        self._log(f"email-otp/send -> {response.status_code}")
+        if response.status_code != 200:
+            return False, f"HTTP {response.status_code}: {response.text[:240]}"
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+        next_state = self._state_from_payload(payload if isinstance(payload, dict) else {}, current_url=str(response.url) or f"{self.AUTH}/email-verification")
+        if not self._state_is_email_otp(next_state):
+            next_state = self._state_from_url(f"{self.AUTH}/email-verification")
+        return (True, next_state) if return_state else (True, "ok")
+
+    @staticmethod
+    def _get_login_otp_code(otp_provider, email, *, timeout, otp_sent_at):
+        wait_fn = getattr(otp_provider, "wait_for_verification_code", None)
+        if callable(wait_fn):
+            return wait_fn(email, timeout=timeout, otp_sent_at=otp_sent_at)
+        get_fn = getattr(otp_provider, "get_verification_code", None)
+        if callable(get_fn):
+            return get_fn(email=email, timeout=timeout, otp_sent_at=otp_sent_at)
+        return ""
+
+    def verify_login_password(self, password, state, return_state=False):
+        url = f"{self.AUTH}/api/accounts/password/verify"
+        sentinel_token = self._protocol_sentinel_token("password_verify")
+        headers = self._headers(
+            url,
+            accept="application/json",
+            referer=state.current_url or state.continue_url or f"{self.AUTH}/log-in/password",
+            origin=self.AUTH,
+            content_type="application/json",
+            fetch_site="same-origin",
+            extra_headers={
+                "oai-device-id": self.device_id,
+                "openai-sentinel-token": sentinel_token,
+            },
+        )
+        headers.update(generate_datadog_trace())
+        try:
+            response = self._session_post(
+                url,
+                json={"password": password},
+                headers=headers,
+                allow_redirects=False,
+                timeout=45,
+            )
+        except Exception as exc:
+            return False, str(exc)
+        self._log(f"password/verify -> {response.status_code}")
+        if response.status_code != 200:
+            return False, f"HTTP {response.status_code}: {response.text[:240]}"
+        try:
+            next_state = self._state_from_payload(response.json(), current_url=str(response.url) or url)
+        except Exception as exc:
+            return False, f"password/verify 返回非 JSON: {exc}"
+        return (True, next_state) if return_state else (True, "ok")
+
+    @staticmethod
+    def _state_is_login_start(state: FlowState):
+        target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
+        return ("log_in" in target or "log-in" in target) and "password" not in target
+
+    @staticmethod
+    def _state_is_login_password(state: FlowState):
+        target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
+        return "login_password" in target or "log-in/password" in target
 
     def _callback_landed_enough_for_session(self) -> bool:
         """Check whether the ChatGPT session landed despite a flaky callback response."""

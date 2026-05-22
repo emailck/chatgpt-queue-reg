@@ -2,8 +2,9 @@ export const STAGE_LABELS: Record<string, string> = {
   register: '注册',
   payment_link: '生成长链',
   payment: '付款',
-  oauth_codex: '获取 Codex RT',
-  rt_keepalive: 'RT 保活',
+  chatgpt_session: 'ChatGPT Session',
+  sub2api_sync: 'sub2api 同步',
+  openai_oauth: 'OpenAI OAuth RT',
 }
 
 export function stageLabel(stage?: string | null): string {

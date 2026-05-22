@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Form, Input, Popconfirm, Switch, Table, Tag, Typography, message } from 'antd'
+import { Alert, Button, Form, Input, Popconfirm, Select, Switch, Table, Tag, Typography, message } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined, ThunderboltOutlined, UploadOutlined } from '@ant-design/icons'
 
@@ -28,20 +28,27 @@ export default function Proxies() {
   const [bulkResult, setBulkResult] = useState<{ added: number; skipped: number } | null>(null)
   const [bulkLoading, setBulkLoading] = useState(false)
   const [selected, setSelected] = useState<React.Key[]>([])
+  const [regionFilter, setRegionFilter] = useState<string | undefined>()
+  const [regions, setRegions] = useState<string[]>([])
   const [form] = Form.useForm()
   const [bulkForm] = Form.useForm()
 
   const reload = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await apiFetch<Proxy[]>('/proxies')
+      const query = regionFilter ? `?region=${encodeURIComponent(regionFilter)}&limit=2000` : '?limit=2000'
+      const [data, regionData] = await Promise.all([
+        apiFetch<Proxy[]>(`/proxies${query}`),
+        apiFetch<string[]>('/proxies/regions').catch(() => []),
+      ])
       setRows(data)
+      setRegions(regionData)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载失败')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [regionFilter])
 
   useEffect(() => {
     const initial = setTimeout(reload, 0)
@@ -195,8 +202,8 @@ export default function Proxies() {
 
   return (
     <PageScaffold
-      title="代理"
-      description="代理资源用表格管理：区域、启用状态、成功/失败计数和最近使用时间集中展示。"
+      title="代理池"
+      description="资源池 / 代理：用表格管理区域、启用状态、成功/失败计数和最近使用时间。"
       actions={<Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>}
     >
       <SummaryGrid>
@@ -214,6 +221,15 @@ export default function Proxies() {
         actions={(
           <CardToolbar>
             <SelectionSummary count={selected.length} />
+            <Select
+              allowClear
+              showSearch
+              placeholder="Region 筛选"
+              value={regionFilter}
+              onChange={(value) => { setRegionFilter(value); setSelected([]) }}
+              options={regions.map((region) => ({ value: region, label: region }))}
+              style={{ width: 180 }}
+            />
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新增</Button>
             <Button icon={<UploadOutlined />} onClick={() => setBulkOpen(true)}>批量导入</Button>
             <Button icon={<ThunderboltOutlined />} onClick={checkAll}>检测全部</Button>
@@ -231,7 +247,7 @@ export default function Proxies() {
         dataSource={rows}
         loading={loading}
         scroll={{ x: 980 }}
-        pagination={{ pageSize: 20, showSizeChanger: false }}
+        pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], showTotal: (total) => `共 ${total} 条` }}
         rowSelection={{ selectedRowKeys: selected, onChange: setSelected }}
       />
 

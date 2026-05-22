@@ -20,8 +20,9 @@ const STOP_OPTIONS = [
   { value: 'register', label: '注册后停止' },
   { value: 'payment_link', label: '长链后停止' },
   { value: 'payment', label: '付款模块后停止' },
-  { value: 'oauth_codex', label: 'OAuth Codex 后停止' },
-  { value: 'rt_keepalive', label: 'RT 保活后停止' },
+  { value: 'chatgpt_session', label: 'Session 标准化后停止' },
+  { value: 'sub2api_sync', label: 'sub2api 同步后停止' },
+  { value: 'openai_oauth', label: 'OpenAI OAuth RT 后停止' },
 ]
 
 function pipelinePresetLabel(preset: string): string {
@@ -88,6 +89,7 @@ export default function Pipelines() {
   const [logJobId, setLogJobId] = useState<number | null>(null)
   const [selected, setSelected] = useState<React.Key[]>([])
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(18)
 
   const openCreate = useCallback(() => {
     form.resetFields()
@@ -227,7 +229,7 @@ export default function Pipelines() {
   return (
     <PageScaffold
       title="任务队列"
-      description="默认创建完整链路 register → payment_link → payment → oauth_codex → rt_keepalive，也可以在任一模块边界停止。"
+      description="默认创建完整链路 register → payment_link → payment → chatgpt_session → sub2api_sync，也可以在任一模块边界停止。"
       actions={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建完整链路</Button>}
     >
       <SummaryGrid>
@@ -255,8 +257,9 @@ export default function Pipelines() {
       <EntityGrid
         items={pipelines}
         page={page}
-        pageSize={18}
-        onPageChange={setPage}
+        pageSize={pageSize}
+        onPageChange={(nextPage, nextPageSize) => { setPage(nextPage); setPageSize(nextPageSize) }}
+        showSizeChanger
         renderItem={(pipeline) => (
           <EntityCard
             key={pipeline.id}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from sqlmodel import Session
@@ -14,7 +15,7 @@ from backend.core.constants import (
 from backend.core.db import engine, session_scope
 from backend.core.job_context import JobContext
 from backend.core.json_utils import json_loads
-from backend.core.pools.base import AcquireOutcome
+from backend.core.pools.base import AcquireOutcome, ResourceUnavailable
 from backend.core.settings import settings
 from backend.core.stages import stage
 from backend.core.time_utils import utcnow
@@ -74,23 +75,37 @@ def run(ctx: JobContext) -> None:
         or fresh_checkout_cfg.get("payment_proxy")
         or ""
     )
-    payment_proxy = None
-    payment_proxy_url = explicit_payment_proxy
-    if not payment_proxy_url:
+    max_payment_proxy_switches = _read_int_config(
+        merged_extra,
+        "workpool.payment.max_proxy_switches",
+        default=3,
+        minimum=0,
+        maximum=20,
+    )
+    paypal_mode = _normalize_paypal_mode(merged_extra.get("workpool.payment.paypal_mode"))
+    excluded_payment_proxy_ids: set[int] = set()
+    excluded_payment_proxy_urls: set[str] = set()
+
+    def _acquire_payment_proxy():
+        if explicit_payment_proxy:
+            return None, explicit_payment_proxy, payment_region
         if not payment_region:
             raise RuntimeError("payment stage requires payment_proxy_region/region")
-        payment_proxy = ctx.acquire(
+        proxy = ctx.acquire(
             "proxy_pool",
             hint={
                 "region": payment_region,
                 "exclude_proxy_id": identity.proxy_id if identity else None,
                 "exclude_url": identity.proxy_url if identity else "",
+                "exclude_proxy_ids": list(excluded_payment_proxy_ids),
+                "exclude_urls": list(excluded_payment_proxy_urls),
             },
             auto_outcome_on_success=AcquireOutcome.REUSABLE.value,
             auto_outcome_on_failure=AcquireOutcome.FAILED.value,
         )
-        payment_proxy_url = str((payment_proxy.payload or {}).get("url") or "")
-    payment_proxy_actual_region = str((payment_proxy.payload or {}).get("region") or "") if payment_proxy else payment_region
+        return proxy, str((proxy.payload or {}).get("url") or ""), str((proxy.payload or {}).get("region") or "")
+
+    payment_proxy, payment_proxy_url, payment_proxy_actual_region = _acquire_payment_proxy()
 
     paypal_cfg = _section_config(
         merged_extra,
@@ -153,10 +168,16 @@ def run(ctx: JobContext) -> None:
         flat_map={
             "captcha_api_key": "api_key",
             "captcha_api_url": "api_url",
+            "captcha_provider": "provider",
+            "captcha_timeout": "timeout",
+            "captcha_poll_interval": "poll_interval",
+            "hcaptcha_site_key": "hcaptcha_site_key",
+            "hcaptcha_website_url": "website_url",
         },
     )
     if captcha_cfg and "captcha" not in paypal_cfg:
         paypal_cfg["captcha"] = captcha_cfg
+    paypal_cfg["_paypal_mode"] = paypal_mode
 
     paypal_number = None
     configured_phone = str(
@@ -166,16 +187,14 @@ def run(ctx: JobContext) -> None:
         or ""
     ).strip()
     configured_smsurl = str(paypal_cfg.get("smsurl") or merged_extra.get("paypal_smsurl") or "").strip()
+    paypal_cfg["_job_id"] = int(ctx.job_id or 0)
     if configured_phone:
         paypal_cfg["phone"] = configured_phone
         paypal_cfg["smsurl"] = configured_smsurl
     else:
-        paypal_number = ctx.acquire(
-            "paypal_number_pool",
-            auto_outcome_on_success=AcquireOutcome.CONSUMED.value,
-            auto_outcome_on_failure=AcquireOutcome.FAILED.value,
-        )
+        paypal_number = _wait_for_paypal_number(ctx, merged_extra)
         paypal_cfg["phone"] = str((paypal_number.payload or {}).get("phone") or "")
+        paypal_cfg["smsurl"] = str((paypal_number.payload or {}).get("smsurl") or "")
         paypal_cfg["_number_id"] = int((paypal_number.payload or {}).get("id") or 0)
 
     if fresh_plan_cfg:
@@ -222,6 +241,7 @@ def run(ctx: JobContext) -> None:
             "payment_proxy_region": payment_region,
             "payment_proxy_actual_region": payment_proxy_actual_region,
             "payment_proxy_explicit": bool(explicit_payment_proxy),
+            "paypal_mode": paypal_mode,
             "paypal_has_cookies": bool(paypal_cfg.get("cookies") or paypal_cfg.get("cookie_header")),
             "paypal_number_id": (paypal_number.payload or {}).get("id") if paypal_number else None,
             "paypal_has_phone": bool(paypal_cfg.get("phone")),
@@ -238,20 +258,67 @@ def run(ctx: JobContext) -> None:
     try:
         from backend.integrations.chatgpt.paypal_http import run_paypal_http_payment
 
-        result = run_paypal_http_payment(
-            account=account_adapter,
-            checkout_url=checkout_url,
-            checkout_session_id=checkout_session_id,
-            paypal=paypal_cfg,
-            billing=billing_cfg,
-            runtime=runtime_cfg,
-            stripe=stripe_cfg,
-            proxy_url=payment_proxy_url,
-            chatgpt_proxy_url=ctx.effective_proxy_url() or "",
-            log=_log,
-            check_cancelled=ctx.check_cancelled,
-        )
+        result: dict[str, Any] | None = None
+        last_retryable_error: Exception | None = None
+        proxy_switches = 0
+        while result is None:
+            for attempt in range(3):
+                if attempt:
+                    ctx.log(
+                        f"paypal_http network retry {attempt}/2 on current payment proxy",
+                        level="warning",
+                        payload={
+                            "payment_proxy_id": _resource_proxy_id(payment_proxy),
+                            "payment_proxy_region": payment_region,
+                            "payment_proxy_actual_region": payment_proxy_actual_region,
+                        },
+                    )
+                try:
+                    result = run_paypal_http_payment(
+                        account=account_adapter,
+                        checkout_url=checkout_url,
+                        checkout_session_id=checkout_session_id,
+                        paypal=paypal_cfg,
+                        billing=billing_cfg,
+                        runtime=runtime_cfg,
+                        stripe=stripe_cfg,
+                        proxy_url=payment_proxy_url,
+                        chatgpt_proxy_url=ctx.effective_proxy_url() or "",
+                        log=_log,
+                        check_cancelled=ctx.check_cancelled,
+                    )
+                    break
+                except Exception as exc:
+                    if not _is_payment_retryable_network_error(exc):
+                        raise
+                    last_retryable_error = exc
+                    if attempt < 2 and not _requires_payment_proxy_rotation(exc):
+                        continue
+                    break
+            if result is not None:
+                break
+            if explicit_payment_proxy or proxy_switches >= max_payment_proxy_switches:
+                raise last_retryable_error or RuntimeError("payment paypal_http network retry failed")
+            proxy_switches += 1
+            if payment_proxy is not None:
+                excluded_payment_proxy_ids.add(_resource_proxy_id(payment_proxy))
+                excluded_payment_proxy_urls.add(str((payment_proxy.payload or {}).get("url") or ""))
+                ctx.release(payment_proxy, outcome=AcquireOutcome.FAILED, reason="payment paypal_http network error")
+            elif payment_proxy_url:
+                excluded_payment_proxy_urls.add(payment_proxy_url)
+            ctx.log(
+                "paypal_http network error after retries; switching payment proxy",
+                level="warning",
+                payload={
+                    "payment_proxy_region": payment_region,
+                    "excluded_proxy_ids": sorted(item for item in excluded_payment_proxy_ids if item),
+                },
+            )
+            payment_proxy, payment_proxy_url, payment_proxy_actual_region = _acquire_payment_proxy()
     except Exception as exc:
+        if paypal_number is not None:
+            outcome = AcquireOutcome.BANNED if _is_paypal_number_restricted_error(exc) else AcquireOutcome.FAILED
+            ctx.release(paypal_number, outcome=outcome, reason=str(exc)[:500])
         with session_scope() as s:
             row = s.get(PaymentLink, payment_link_id)
             if row is not None:
@@ -263,7 +330,7 @@ def run(ctx: JobContext) -> None:
         raise
 
     state = str(result.get("state") or "")
-    link_status = PAYMENT_LINK_STATUS_PAID_UNKNOWN if state == "succeeded" else PAYMENT_LINK_STATUS_EMPTY_PAYMENT_PENDING
+    link_status = PAYMENT_LINK_STATUS_PAID_UNKNOWN if state in {"succeeded", "paypal_authorized"} else PAYMENT_LINK_STATUS_EMPTY_PAYMENT_PENDING
     with session_scope() as s:
         row = s.get(PaymentLink, payment_link_id)
         if row is not None:
@@ -271,6 +338,15 @@ def run(ctx: JobContext) -> None:
             row.error = ""
             row.updated_at = utcnow()
             s.add(row)
+        if state == "succeeded" and plan in {"plus", "team"}:
+            account = s.get(ChatGPTAccount, account_id)
+            if account is not None:
+                account.plan_type = plan
+                account.updated_at = utcnow()
+                s.add(account)
+
+    if paypal_number is not None:
+        ctx.release(paypal_number, outcome=AcquireOutcome.CONSUMED, reason="payment finished")
 
     ctx.update_result({
         "state": state,
@@ -289,6 +365,115 @@ def run(ctx: JobContext) -> None:
         "paypal_final_url": result.get("paypal_final_url") or "",
     })
     ctx.log(f"paypal_http payment finished state={state}")
+
+
+def _is_payment_retryable_network_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return (
+        "curl: (28)" in text
+        or "curl: (35)" in text
+        or "operation timed out" in text
+        or "read timed out" in text
+        or "connect timed out" in text
+        or "timed out after" in text
+        or "tls connect error" in text
+        or "sslerror" in text
+        or "openssl_internal" in text
+        or "connection reset" in text
+        or "connection aborted" in text
+        or "remote disconnected" in text
+        or "ns_error_net_interrupt" in text
+        or "net::err_" in text
+        or "page.goto" in text
+        or _requires_payment_proxy_rotation(exc)
+    )
+
+
+def _requires_payment_proxy_rotation(exc: Exception) -> bool:
+    return "payment_proxy_rotation_required" in str(exc or "").lower()
+
+
+def _is_paypal_number_restricted_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return "restricted_user" in text or "account is limited" in text or "your account is limited" in text
+
+
+def _normalize_paypal_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower().replace("-", "_")
+    if mode in {"pure", "pure_protocol", "protocol"}:
+        return "pure_protocol"
+    return "hybrid"
+
+
+def _read_int_config(values: dict[str, Any], key: str, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(values.get(key))
+    except Exception:
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _wait_for_paypal_number(ctx: JobContext, config: dict[str, Any]):
+    timeout_seconds = _read_int_config(
+        config,
+        "paypal_number_pool_wait_timeout_seconds",
+        default=1800,
+        minimum=0,
+        maximum=86400,
+    )
+    interval_seconds = _read_int_config(
+        config,
+        "paypal_number_pool_wait_interval_seconds",
+        default=10,
+        minimum=1,
+        maximum=300,
+    )
+    deadline = time.time() + timeout_seconds if timeout_seconds else 0
+    logged_wait = False
+    while True:
+        ctx.check_cancelled()
+        try:
+            return ctx.acquire(
+                "paypal_number_pool",
+                auto_outcome_on_success=AcquireOutcome.CONSUMED.value,
+                auto_outcome_on_failure=AcquireOutcome.FAILED.value,
+            )
+        except ResourceUnavailable as exc:
+            if getattr(exc, "pool", "") != "paypal_number_pool" or "pool empty" not in str(exc).lower():
+                raise
+            if timeout_seconds and time.time() >= deadline:
+                raise RuntimeError(f"paypal_number_pool empty after waiting {timeout_seconds}s") from exc
+            if not logged_wait:
+                ctx.log(
+                    "paypal_number_pool empty; waiting for available number",
+                    level="warning",
+                    payload={"wait_interval_seconds": interval_seconds, "wait_timeout_seconds": timeout_seconds},
+                )
+                logged_wait = True
+            time.sleep(interval_seconds)
+
+
+def _paypal_number_otp_started(resource: Any) -> bool:
+    if resource is None:
+        return False
+    try:
+        number_id = int(resource.id)
+    except Exception:
+        return False
+    from backend.models.paypal_number import PayPalNumber
+
+    with session_scope() as s:
+        row = s.get(PayPalNumber, number_id)
+        return bool(row and "otp_started" in {item.strip() for item in str(row.note or "").split(",") if item.strip()})
+
+
+def _resource_proxy_id(resource: Any) -> int:
+    if resource is None:
+        return 0
+    try:
+        return int((resource.payload or {}).get("proxy_id") or 0)
+    except Exception:
+        return 0
 
 
 class _AccountAdapter:

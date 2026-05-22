@@ -14,7 +14,7 @@ can support arbitrary stage chains and arbitrary cut-off points without
 adding new pipeline types.
 
 Carry-over fields between stages (whitelist; see ARCHITECTURE.md §3.2):
-  account_id, payment_link_id, email_address, proxy_id, proxy_url, codex_rt, codex_at
+  account_id, payment_link_id, email_address, proxy_id, proxy_url, session/sub2api/codex token fields
 """
 from __future__ import annotations
 
@@ -52,17 +52,20 @@ class PipelineRetryError(Exception):
 
 # ---- presets ---------------------------------------------------------------
 
-FULL_CHAIN_STAGES: tuple[str, ...] = ("register", "payment_link", "payment", "oauth_codex", "rt_keepalive")
+FULL_CHAIN_STAGES: tuple[str, ...] = ("register", "payment_link", "payment", "chatgpt_session", "sub2api_sync")
 DEFAULT_PRESET = "full_chain"
 
 PRESETS: dict[str, tuple[str, ...]] = {
-    DEFAULT_PRESET:               FULL_CHAIN_STAGES,
-    "register_only":             ("register",),
-    "register_with_codex_rt":    ("register", "oauth_codex"),
-    "account_paid":              ("register", "payment_link", "payment"),
-    "account_paid_with_codex_rt": ("register", "payment_link", "payment", "oauth_codex"),
-    "link_only":                 ("register", "payment_link"),
-    "codex_rt_only":             ("oauth_codex",),
+    DEFAULT_PRESET:                         FULL_CHAIN_STAGES,
+    "register_only":                       ("register",),
+    "register_with_sub2api":               ("register", "chatgpt_session", "sub2api_sync"),
+    "account_paid":                        ("register", "payment_link", "payment"),
+    "account_paid_with_sub2api":           ("register", "payment_link", "payment", "chatgpt_session", "sub2api_sync"),
+    "link_only":                           ("register", "payment_link"),
+    "sub2api_only":                        ("sub2api_sync",),
+    "register_with_refresh_token":         ("register", "chatgpt_session", "openai_oauth", "sub2api_sync"),
+    "account_paid_with_refresh_token":     ("register", "payment_link", "payment", "chatgpt_session", "openai_oauth", "sub2api_sync"),
+    "refresh_token_only":                  ("chatgpt_session", "openai_oauth", "sub2api_sync"),
 }
 
 
@@ -72,8 +75,17 @@ CARRY_OVER_KEYS: tuple[str, ...] = (
     "email_address",
     "proxy_id",
     "proxy_url",
-    "codex_rt",
-    "codex_at",
+    "refresh_token_id",
+    "has_refresh_token",
+    "id_token",
+    "session_token",
+    "session_expires_at",
+    "session_refresh_status",
+    "chatgpt_account_id",
+    "chatgpt_user_id",
+    "plan_type",
+    "sub2api_account_id",
+    "sub2api_status",
 )
 
 

@@ -20,6 +20,10 @@ from .runtime import (
 )
 
 
+PAYPAL_HCAPTCHA_SITE_KEY = "bf07db68-5c2e-42e8-8779-ea8384890eea"
+YES_CAPTCHA_API_URL = "https://api.yescaptcha.com"
+
+
 def paypal_full_login_http(
     http: Any,
     approve_html: str,
@@ -126,7 +130,12 @@ def _submit_hcaptcha_if_required(
     needs_hcaptcha = "hcaptcha" in html.lower() or bool(first_match([r'name="_requestId"\s+value="([^"]+)"'], html))
     if not needs_hcaptcha:
         return pwd_resp
-    captcha_token = solve_paypal_hcaptcha(paypal_cfg, log)
+    site_key = _extract_hcaptcha_site_key(html)
+    if not site_key:
+        emit(log, "paypal_http: hcaptcha marker without sitekey in login response; skipping solver", level="warning")
+        return pwd_resp
+    challenge_url = str(getattr(pwd_resp, "url", "") or approve_url)
+    captcha_token = solve_paypal_hcaptcha(paypal_cfg, log, website_url=challenge_url, site_key=site_key)
     if not captcha_token:
         raise PayPalHttpError("PayPal 需要 hCaptcha，但未得到验证码 token")
     request_id = first_match([r'name="_requestId"\s+value="([^"]+)"'], html)
@@ -236,42 +245,105 @@ def _answer_email_otp_if_required(
     http.get(f"https://www.paypal.com/signin/return?flowFrom=anw-stepup&ctxId={ctx_id}", allow_redirects=True, timeout=30)
 
 
-def solve_paypal_hcaptcha(paypal_cfg: dict[str, Any], log: LogFn | None) -> str:
-    token = str(paypal_cfg.get("hcaptcha_token") or paypal_cfg.get("captcha_token") or "").strip()
+def _captcha_section(paypal_cfg: dict[str, Any]) -> dict[str, Any]:
+    captcha = paypal_cfg.get("captcha") or {}
+    return captcha if isinstance(captcha, dict) else {}
+
+
+def _extract_hcaptcha_site_key(html: str) -> str:
+    return first_match([
+        r'data-sitekey=["\']([^"\']+)["\']',
+        r'["\']sitekey["\']\s*:\s*["\']([^"\']+)["\']',
+        r'["\']siteKey["\']\s*:\s*["\']([^"\']+)["\']',
+        r'["\']websiteKey["\']\s*:\s*["\']([^"\']+)["\']',
+    ], html) or ""
+
+
+def _captcha_int(paypal_cfg: dict[str, Any], key: str, default: int) -> int:
+    captcha = _captcha_section(paypal_cfg)
+    try:
+        return int(paypal_cfg.get(f"captcha_{key}") or captcha.get(key) or default)
+    except Exception:
+        return default
+
+
+def _captcha_solution_token(payload: dict[str, Any]) -> str:
+    solution = payload.get("solution") or {}
+    if isinstance(solution, str):
+        return solution.strip()
+    if isinstance(solution, dict):
+        for key in ("gRecaptchaResponse", "token", "hCaptchaResponse"):
+            value = str(solution.get(key) or "").strip()
+            if value:
+                return value
+    return str(payload.get("token") or "").strip()
+
+
+def solve_paypal_hcaptcha(
+    paypal_cfg: dict[str, Any],
+    log: LogFn | None,
+    website_url: str = "",
+    site_key: str = "",
+    rqdata: str = "",
+) -> str:
+    captcha = _captcha_section(paypal_cfg)
+    token = str(
+        paypal_cfg.get("hcaptcha_token")
+        or paypal_cfg.get("captcha_token")
+        or captcha.get("token")
+        or captcha.get("hcaptcha_token")
+        or ""
+    ).strip()
     if token:
         return token
-    api_key = str(paypal_cfg.get("captcha_api_key") or (paypal_cfg.get("captcha") or {}).get("api_key") or "").strip()
-    api_url = str(paypal_cfg.get("captcha_api_url") or (paypal_cfg.get("captcha") or {}).get("api_url") or os.getenv("CTF_CAPTCHA_API_URL") or "").rstrip("/")
+
+    api_key = str(paypal_cfg.get("captcha_api_key") or captcha.get("api_key") or "").strip()
+    provider = str(paypal_cfg.get("captcha_provider") or captcha.get("provider") or "").strip().lower()
+    api_url = str(
+        paypal_cfg.get("captcha_api_url")
+        or captcha.get("api_url")
+        or os.getenv("CTF_CAPTCHA_API_URL")
+        or (YES_CAPTCHA_API_URL if api_key and (not provider or provider == "yescaptcha") else "")
+    ).rstrip("/")
     if not api_key or not api_url:
         return ""
-    site_key = str(paypal_cfg.get("hcaptcha_site_key") or "bf07db68-5c2e-42e8-8779-ea8384890eea")
+
+    site_key = str(site_key or paypal_cfg.get("hcaptcha_site_key") or captcha.get("hcaptcha_site_key") or PAYPAL_HCAPTCHA_SITE_KEY).strip()
+    website_url = str(website_url or paypal_cfg.get("hcaptcha_website_url") or captcha.get("website_url") or "https://www.paypal.com/signin").strip()
+    rqdata = str(rqdata or paypal_cfg.get("hcaptcha_rqdata") or captcha.get("rqdata") or captcha.get("hcaptcha_rqdata") or "").strip()
+    task: dict[str, Any] = {
+        "type": "HCaptchaTaskProxyless",
+        "websiteURL": website_url,
+        "websiteKey": site_key,
+        "isEnterprise": True,
+        "userAgent": USER_AGENT,
+    }
+    if rqdata:
+        task["enterprisePayload"] = {"rqdata": rqdata}
     create_resp = std_requests.post(
         f"{api_url}/createTask",
-        json={
-            "clientKey": api_key,
-            "task": {
-                "type": "HCaptchaTaskProxyless",
-                "websiteURL": "https://www.paypal.com/signin",
-                "websiteKey": site_key,
-                "isEnterprise": True,
-                "userAgent": USER_AGENT,
-            },
-        },
+        json={"clientKey": api_key, "task": task},
         timeout=30,
     )
-    task_id = (create_resp.json() or {}).get("taskId")
-    if not task_id:
+    create_payload = create_resp.json() or {}
+    if create_payload.get("errorId"):
+        emit(log, f"paypal_http: hcaptcha provider error={create_payload.get('errorCode') or ''} {create_payload.get('errorDescription') or ''}".strip(), level="warning")
         return ""
-    deadline = time.time() + int(paypal_cfg.get("captcha_timeout") or 120)
+    task_id = create_payload.get("taskId")
+    if not task_id:
+        emit(log, f"paypal_http: hcaptcha provider missing taskId: {create_payload}", level="warning")
+        return ""
+
+    deadline = time.time() + _captcha_int(paypal_cfg, "timeout", 120)
+    poll_interval = max(1, _captcha_int(paypal_cfg, "poll_interval", 5))
     while time.time() < deadline:
-        time.sleep(5)
+        time.sleep(poll_interval)
         poll_resp = std_requests.post(f"{api_url}/getTaskResult", json={"clientKey": api_key, "taskId": task_id}, timeout=20)
         payload = poll_resp.json() or {}
         if payload.get("status") == "ready":
-            solution = payload.get("solution") or {}
-            return str(solution.get("gRecaptchaResponse") or solution.get("token") or "")
+            return _captcha_solution_token(payload)
         if payload.get("errorId"):
-            emit(log, f"paypal_http: hcaptcha provider error={payload.get('errorDescription')}", level="warning")
+            emit(log, f"paypal_http: hcaptcha provider error={payload.get('errorCode') or ''} {payload.get('errorDescription') or ''}".strip(), level="warning")
             return ""
     return ""
 

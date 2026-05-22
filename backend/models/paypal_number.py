@@ -34,6 +34,7 @@ class PayPalNumber(SQLModel, table=True):
 
     status: str = Field(default=PAYPAL_NUMBER_STATUS_AVAILABLE, index=True)
     use_count: int = 0
+    otp_failure_count: int = 0
     last_used_at: Optional[datetime] = None
     last_error: str = ""
     bound_job_id: Optional[int] = Field(default=None, index=True)
