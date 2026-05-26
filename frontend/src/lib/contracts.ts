@@ -144,6 +144,14 @@ export interface JobRetryResponse {
   stage: string
 }
 
+export interface JobBatchRetryResponse {
+  retried: number
+  retried_jobs: JobRetryResponse[]
+  skipped: Array<{ id: number; reason: string }>
+  not_found: number[]
+  total_requested: number
+}
+
 export interface JobEvent {
   id: number
   job_id: number

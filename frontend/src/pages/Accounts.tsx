@@ -11,6 +11,21 @@ import { API_BASE, apiFetch, formatDateTime } from '@/lib/api'
 const { Text } = Typography
 
 type SoldFilter = 'all' | 'unsold' | 'sold'
+type Sub2ApiStatusFilter = 'all' | 'active' | 'error' | 'disabled' | 'rate_limited' | 'temp_unschedulable' | 'unschedulable' | 'pending_sync' | 'sync_failed' | 'status_check_failed' | 'banned'
+
+const SUB2API_STATUS_OPTIONS: { value: Sub2ApiStatusFilter; label: string }[] = [
+  { value: 'all', label: 'sub2api：全部' },
+  { value: 'active', label: 'active' },
+  { value: 'error', label: 'error' },
+  { value: 'disabled', label: 'disabled' },
+  { value: 'rate_limited', label: 'rate_limited' },
+  { value: 'temp_unschedulable', label: 'temp_unschedulable' },
+  { value: 'unschedulable', label: 'unschedulable' },
+  { value: 'pending_sync', label: '待同步' },
+  { value: 'sync_failed', label: '同步失败' },
+  { value: 'status_check_failed', label: '状态检查失败' },
+  { value: 'banned', label: 'banned' },
+]
 
 function sub2apiError(value: string) {
   const text = String(value || '').trim()
@@ -76,7 +91,9 @@ export default function Accounts() {
   const [emailHistoryLoading, setEmailHistoryLoading] = useState(false)
   const [selected, setSelected] = useState<React.Key[]>([])
   const [soldFilter, setSoldFilter] = useState<SoldFilter>('all')
+  const [sub2apiStatusFilter, setSub2ApiStatusFilter] = useState<Sub2ApiStatusFilter>('all')
   const [exportingSold, setExportingSold] = useState(false)
+  const [exportingAlreadySold, setExportingAlreadySold] = useState(false)
   const [refreshingSub2ApiStatus, setRefreshingSub2ApiStatus] = useState(false)
   const [refreshingAccessToken, setRefreshingAccessToken] = useState(false)
 
@@ -85,6 +102,7 @@ export default function Accounts() {
     try {
       const params = new URLSearchParams({ paid_only: 'true', limit: '300' })
       if (soldFilter !== 'all') params.set('sold', soldFilter === 'sold' ? 'true' : 'false')
+      if (sub2apiStatusFilter !== 'all') params.set('sub2api_status', sub2apiStatusFilter)
       const data = await apiFetch<Account[]>(`/accounts?${params.toString()}`)
       setRows(data)
     } catch (err) {
@@ -92,7 +110,7 @@ export default function Accounts() {
     } finally {
       setLoading(false)
     }
-  }, [soldFilter])
+  }, [sub2apiStatusFilter, soldFilter])
 
   useEffect(() => {
     const initial = setTimeout(reload, 0)
@@ -111,6 +129,13 @@ export default function Accounts() {
     failed: rows.filter((row) => row.sub2api_status === 'sync_failed' || !!sub2apiError(row.sub2api_last_error)).length,
     relogin: rows.filter((row) => row.sub2api_relogin_required).length,
   }), [rows])
+
+  const selectedRows = useMemo(() => {
+    const ids = new Set(selected.map((id) => Number(id)))
+    return rows.filter((row) => ids.has(row.id))
+  }, [rows, selected])
+  const canExportAndMarkSold = selected.length > 0 && selectedRows.length === selected.length && selectedRows.every((row) => !row.sold)
+  const canExportAlreadySold = selected.length > 0 && selectedRows.length === selected.length && selectedRows.every((row) => row.sold)
 
   const showEmailHistory = async (account: Account) => {
     setEmailModalAccount(account)
@@ -212,42 +237,67 @@ export default function Accounts() {
     }
   }
 
+  const downloadSub2ApiExport = async (payload: Record<string, unknown>, filename: string) => {
+    const response = await fetch(`${API_BASE}/accounts/sub2api-export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      const text = await response.text()
+      let detail = text || response.statusText
+      try {
+        const data = JSON.parse(text)
+        detail = String(data?.detail || detail)
+      } catch {
+        // keep raw detail
+      }
+      throw new Error(detail)
+    }
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  }
+
   const exportSelectedSub2Api = async () => {
     if (!selected.length) return
     setExportingSold(true)
     try {
-      const response = await fetch(`${API_BASE}/accounts/sub2api-export`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: selected.map((id) => Number(id)), mark_sold: true }),
-      })
-      if (!response.ok) {
-        const text = await response.text()
-        let detail = text || response.statusText
-        try {
-          const data = JSON.parse(text)
-          detail = String(data?.detail || detail)
-        } catch {
-          // keep raw detail
-        }
-        throw new Error(detail)
-      }
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = 'plus-sub2api-accounts.json'
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      URL.revokeObjectURL(url)
-      message.success(`已导出并标记已售 ${selected.length} 个账号`)
+      await downloadSub2ApiExport(
+        { ids: selected.map((id) => Number(id)), mark_sold: true },
+        'plus-sub2api-accounts.json',
+      )
+      message.success(`已导出并标记已售 ${selectedRows.length} 个账号`)
       setSelected([])
       reload()
     } catch (err) {
       message.error(err instanceof Error ? err.message : '导出失败')
     } finally {
       setExportingSold(false)
+    }
+  }
+
+  const exportAlreadySoldSub2Api = async () => {
+    if (!selected.length) return
+    setExportingAlreadySold(true)
+    try {
+      await downloadSub2ApiExport(
+        { ids: selected.map((id) => Number(id)), mark_sold: false, include_already_sold: true, sold_only: true },
+        'sold-plus-sub2api-accounts.json',
+      )
+      message.success(`已导出已售账号 ${selectedRows.length} 个`)
+      setSelected([])
+      reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '导出已售账号失败')
+    } finally {
+      setExportingAlreadySold(false)
     }
   }
 
@@ -428,7 +478,7 @@ export default function Accounts() {
 
       <ActionCard
         title="Plus 池操作"
-        description="列表只包含 Plus 账号；导出会生成 sub2api-data 文件，并将 sub2api 账号迁移到已售出分组后本地标记已售。"
+        description="列表只包含 Plus 账号；未售导出会迁移到 sub2api 已售出分组并标记已售，已售导出只生成文件、不迁移分组。"
         actions={(
           <CardToolbar>
             <SelectionSummary count={selected.length} />
@@ -438,11 +488,20 @@ export default function Accounts() {
               style={{ width: 132 }}
               options={[{ value: 'all', label: '全部' }, { value: 'unsold', label: '可售' }, { value: 'sold', label: '已售出' }]}
             />
+            <Select<Sub2ApiStatusFilter>
+              value={sub2apiStatusFilter}
+              onChange={(value) => { setSub2ApiStatusFilter(value); setSelected([]) }}
+              style={{ width: 132 }}
+              options={SUB2API_STATUS_OPTIONS}
+            />
             <Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>
             <Button icon={<CloudSyncOutlined />} loading={refreshingSub2ApiStatus} disabled={!selected.length} onClick={() => refreshSub2ApiStatus(selected.map((id) => Number(id)))}>刷新 sub2api 状态</Button>
             <Button icon={<ReloadOutlined />} loading={refreshingAccessToken} disabled={!selected.length} onClick={() => refreshAccessToken(selected.map((id) => Number(id)))}>重新获取 AT</Button>
-            <Popconfirm title={`导出选中的 ${selected.length} 个账号并迁移到 sub2api 已售出分组?`} onConfirm={exportSelectedSub2Api} disabled={!selected.length}>
-              <Button icon={<CloudDownloadOutlined />} type="primary" loading={exportingSold} disabled={!selected.length}>导出 sub2api 并标记已售</Button>
+            <Popconfirm title={`导出选中的 ${selectedRows.length} 个未售账号并迁移到 sub2api 已售出分组?`} onConfirm={exportSelectedSub2Api} disabled={!canExportAndMarkSold}>
+              <Button icon={<CloudDownloadOutlined />} type="primary" loading={exportingSold} disabled={!canExportAndMarkSold}>导出 sub2api 并标记已售</Button>
+            </Popconfirm>
+            <Popconfirm title={`导出选中的 ${selectedRows.length} 个已售账号，不迁移 sub2api 分组?`} onConfirm={exportAlreadySoldSub2Api} disabled={!canExportAlreadySold}>
+              <Button icon={<CloudDownloadOutlined />} loading={exportingAlreadySold} disabled={!canExportAlreadySold}>导出已售 sub2api</Button>
             </Popconfirm>
             <Popconfirm title={`确认删除选中的 ${selected.length} 个账号?`} onConfirm={batchDelete} disabled={!selected.length}>
               <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>批量删除</Button>

@@ -203,14 +203,14 @@ def retry_failed_pipeline_job(job_id: int) -> dict[str, Any]:
             raise PipelineRetryError(404, f"job {job_id} not found")
         if job.pipeline_id is None:
             raise PipelineRetryError(409, "standalone jobs cannot be retried")
-        if job.status != JOB_STATUS_FAILED:
-            raise PipelineRetryError(409, f"job is not failed (status={job.status})")
+        if job.status not in {JOB_STATUS_FAILED, JOB_STATUS_INTERRUPTED}:
+            raise PipelineRetryError(409, f"job is not retryable (status={job.status})")
 
         pipeline = s.get(Pipeline, job.pipeline_id)
         if pipeline is None:
             raise PipelineRetryError(404, f"pipeline {job.pipeline_id} not found")
-        if pipeline.status != JOB_STATUS_FAILED:
-            raise PipelineRetryError(409, f"pipeline is not failed (status={pipeline.status})")
+        if pipeline.status not in {JOB_STATUS_FAILED, JOB_STATUS_INTERRUPTED}:
+            raise PipelineRetryError(409, f"pipeline is not retryable (status={pipeline.status})")
 
         stage = str(job.type or "")
         if stage == "register":
@@ -306,7 +306,7 @@ def retry_failed_pipeline_job(job_id: int) -> dict[str, Any]:
         pipeline_row = s.get(Pipeline, pipeline_id)
         if pipeline_row is None:
             raise PipelineRetryError(404, f"pipeline {pipeline_id} disappeared")
-        if pipeline_row.status != JOB_STATUS_FAILED:
+        if pipeline_row.status not in {JOB_STATUS_FAILED, JOB_STATUS_INTERRUPTED}:
             raise PipelineRetryError(409, f"pipeline status changed to {pipeline_row.status}")
         pipeline_row.status = JOB_STATUS_QUEUED
         pipeline_row.current_stage = stage

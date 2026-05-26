@@ -35,19 +35,17 @@ export function Sub2ApiBadge({ status }: { status?: string | null }) {
   const value = String(status || '').trim().toLowerCase()
   if (!value) return <Tag>未同步</Tag>
   const meta: Record<string, { color: string; label: string }> = {
-    success: { color: 'green', label: '同步成功' },
-    synced: { color: 'green', label: '已同步' },
-    active: { color: 'green', label: '可用' },
-    alive: { color: 'green', label: '可用' },
-    ok: { color: 'green', label: '可用' },
+    active: { color: 'green', label: 'active' },
+    error: { color: 'red', label: 'error' },
+    disabled: { color: 'orange', label: 'disabled' },
+    rate_limited: { color: 'orange', label: 'rate_limited' },
+    temp_unschedulable: { color: 'orange', label: 'temp_unschedulable' },
+    unschedulable: { color: 'orange', label: 'unschedulable' },
     pending_sync: { color: 'gold', label: '待同步' },
+    pending_upload: { color: 'gold', label: '待同步' },
     sync_failed: { color: 'red', label: '同步失败' },
-    relogin_required: { color: 'red', label: '需重登' },
-    dead: { color: 'red', label: '失效' },
-    disabled: { color: 'orange', label: '禁用' },
-    banned: { color: 'red', label: '封禁' },
-    invalid: { color: 'red', label: '无效' },
-    expired: { color: 'red', label: '过期' },
+    status_check_failed: { color: 'red', label: '状态检查失败' },
+    banned: { color: 'red', label: 'banned' },
   }
   const config = meta[value] || { color: 'default', label: value }
   return <Tag color={config.color}>{config.label}</Tag>
@@ -60,7 +58,7 @@ export function ProgressLine({ current, total, status }: { current: number; tota
 
 export function ErrorCallout({ error }: { error?: string | null }) {
   const value = String(error || '').trim()
-  if (!value || ['success', 'ok', 'synced', 'active', 'alive'].includes(value.toLowerCase())) return null
+  if (!value || value.toLowerCase() === 'active') return null
   return <div className="error-callout"><Text type="danger">{value}</Text></div>
 }
 

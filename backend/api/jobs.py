@@ -350,6 +350,31 @@ def retry_job_endpoint(job_id: int):
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
+@router.post("/api/jobs/batch-retry", tags=["jobs"])
+def batch_retry_jobs(body: IdsRequest):
+    ids = list(dict.fromkeys(int(i) for i in body.ids or []))
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids 不能为空")
+    retried: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    not_found: list[int] = []
+    for jid in ids:
+        try:
+            retried.append(retry_failed_pipeline_job(jid))
+        except PipelineRetryError as exc:
+            if exc.status_code == 404:
+                not_found.append(jid)
+            else:
+                skipped.append({"id": jid, "reason": exc.detail})
+    return {
+        "retried": len(retried),
+        "retried_jobs": retried,
+        "skipped": skipped,
+        "not_found": not_found,
+        "total_requested": len(ids),
+    }
+
+
 @router.delete("/api/jobs/{job_id}", tags=["jobs"])
 def delete_job(job_id: int):
     with session_scope() as s:

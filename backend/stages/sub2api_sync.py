@@ -27,7 +27,7 @@ from backend.schemas.stage_io import Sub2ApiSyncInput, Sub2ApiSyncOutput
 
 STATUS_SYNC_INTERVAL_HOURS = 24
 FAILURE_BACKOFF_HOURS = 1
-INVALID_SUB2API_STATUSES = {"dead", "disabled", "banned", "invalid", "expired"}
+INVALID_SUB2API_STATUSES = {"disabled", "error", "banned"}
 RELOGIN_REQUIRED_PREFIX = "queue_relogin_required:"
 
 
@@ -78,7 +78,12 @@ def run(ctx) -> None:
     try:
         if mode in {"", "auto", "openai", "session", "web_session"}:
             payload, auth_mode, credential_fingerprint = _build_openai_import_payload(account_snapshot, token_snapshot)
-            sync_result = _sync_openai_account(payload, auth_mode=auth_mode, credential_fingerprint=credential_fingerprint)
+            sync_result = _sync_openai_account(
+                payload,
+                auth_mode=auth_mode,
+                credential_fingerprint=credential_fingerprint,
+                reset_remote_status=_truthy(ctx.input.get("reset_remote_status")),
+            )
         else:
             raise RuntimeError(f"unsupported sub2api_sync mode: {mode}")
     except Sub2ApiNotConfigured as exc:
@@ -114,7 +119,13 @@ def run(ctx) -> None:
 # ---- sync paths ------------------------------------------------------------
 
 
-def _sync_openai_account(payload: dict[str, Any], *, auth_mode: str, credential_fingerprint: str) -> dict[str, Any]:
+def _sync_openai_account(
+    payload: dict[str, Any],
+    *,
+    auth_mode: str,
+    credential_fingerprint: str,
+    reset_remote_status: bool = False,
+) -> dict[str, Any]:
     client = get_sub2api_client()
     account_doc = _first_payload_account(payload)
     account_id = int(payload.get("queue_account_id") or 0)
@@ -134,6 +145,10 @@ def _sync_openai_account(payload: dict[str, Any], *, auth_mode: str, credential_
         if not sub2api_account_id:
             raise RuntimeError("sub2api import completed but account id could not be resolved")
 
+    reset_resp: dict[str, Any] = {}
+    if reset_remote_status:
+        reset_resp = client.reset_openai_account_status(sub2api_account_id)
+
     status_resp = client.get_openai_account_status(sub2api_account_id)
     exported_resp: dict[str, Any] = {}
     try:
@@ -150,6 +165,7 @@ def _sync_openai_account(payload: dict[str, Any], *, auth_mode: str, credential_
         "action": action,
         "import_or_update": sync_resp,
         "status": status_resp,
+        "reset_status": reset_resp,
         "export": exported_resp,
     }
     _record_success(

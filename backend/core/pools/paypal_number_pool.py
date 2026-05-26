@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
@@ -22,6 +24,7 @@ from backend.models.paypal_number import (
 
 PAYPAL_NUMBER_COOLDOWN_SETTING = "paypal_number_cooldown_seconds"
 PAYPAL_NUMBER_COOLDOWN_DEFAULT = 300
+PAYPAL_OTP_RE = re.compile(r"PayPal\s*:\s*(\d{6})\s+is\s+your\s+security\s+code\b", re.I)
 
 
 def get_cooldown_seconds() -> int:
@@ -162,6 +165,10 @@ class PayPalNumberPool:
             row.updated_at = row.last_used_at
             s.add(row)
 
+    def begin_otp_session(self, number_id: int, *, job_id: int = 0) -> str:
+        smsurl = self._smsurl_for_number(number_id, job_id=job_id)
+        return _sms_gateway_text(smsurl)
+
     def fetch_otp(
         self,
         number_id: int,
@@ -177,23 +184,11 @@ class PayPalNumberPool:
         This is the single source of truth for OTP retrieval — payment modules
         should call this instead of polling smsurl directly.
         """
-        import json
-        import re
         import time
 
-        import requests as _requests
-
         self.mark_otp_started(number_id, job_id=job_id)
-
-        with Session(engine) as s:
-            row = s.get(PayPalNumber, number_id)
-            if row is None:
-                raise RuntimeError(f"PayPalNumber {number_id} not found")
-            if job_id and int(row.bound_job_id or 0) != int(job_id):
-                raise RuntimeError(f"paypal_number lease lost number_id={number_id} bound_job_id={row.bound_job_id} job_id={job_id}")
-            smsurl = str(row.smsurl or "").strip()
-            if not smsurl:
-                raise RuntimeError(f"PayPalNumber {number_id} has no smsurl")
+        smsurl = self._smsurl_for_number(number_id, job_id=job_id)
+        baseline = baseline_text or ""
 
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -201,30 +196,30 @@ class PayPalNumberPool:
                 check_cancelled()
             self._raise_if_lease_lost(number_id, job_id)
             try:
-                resp = _requests.get(smsurl, timeout=15)
-                text = resp.text or ""
-                try:
-                    payload = resp.json()
-                    text += " " + json.dumps(payload, ensure_ascii=False)
-                except Exception:
-                    pass
-                if baseline_text and text.strip() == baseline_text.strip():
+                text = _sms_gateway_text(smsurl)
+                if baseline and text.strip() == baseline.strip():
                     time.sleep(3)
                     continue
-                parts = text.split("|", 2)
-                if len(parts) >= 2 and parts[0].strip().lower() == "no":
-                    time.sleep(3)
-                    continue
-                search_text = parts[1] if len(parts) >= 2 else text
-                for match in re.finditer(r"\b(\d{4,8})\b", search_text):
-                    token = match.group(1)
-                    if len(token) == expected_length:
-                        return token
+                token = _extract_paypal_otp(text, expected_length=expected_length, baseline_text=baseline)
+                if token:
+                    return token
             except Exception:
                 pass
             time.sleep(3)
 
         raise RuntimeError(f"OTP 获取超时 ({timeout}s) number_id={number_id} expected_length={expected_length}")
+
+    def _smsurl_for_number(self, number_id: int, *, job_id: int = 0) -> str:
+        with Session(engine) as s:
+            row = s.get(PayPalNumber, int(number_id or 0))
+            if row is None:
+                raise RuntimeError(f"PayPalNumber {number_id} not found")
+            if job_id and int(row.bound_job_id or 0) != int(job_id):
+                raise RuntimeError(f"paypal_number lease lost number_id={number_id} bound_job_id={row.bound_job_id} job_id={job_id}")
+            smsurl = str(row.smsurl or "").strip()
+            if not smsurl:
+                raise RuntimeError(f"PayPalNumber {number_id} has no smsurl")
+            return smsurl
 
     def _raise_if_lease_lost(self, number_id: int, job_id: int = 0) -> None:
         if not job_id:
@@ -253,6 +248,45 @@ class PayPalNumberPool:
         ):
             out[status] = sum(1 for row in rows if row.status == status)
         return out
+
+
+def _sms_gateway_text(smsurl: str) -> str:
+    if not smsurl:
+        return ""
+    import requests as _requests
+
+    resp = _requests.get(smsurl, timeout=15)
+    text = resp.text or ""
+    try:
+        payload = resp.json()
+        text += " " + json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        pass
+    return text
+
+
+def _extract_paypal_otp(text: str, *, expected_length: int = 6, baseline_text: str = "") -> str:
+    search_text = _new_sms_text(text, baseline_text)
+    parts = search_text.split("|", 2)
+    if len(parts) >= 2 and parts[0].strip().lower() == "no":
+        return ""
+    for match in PAYPAL_OTP_RE.finditer(search_text):
+        token = match.group(1)
+        if len(token) == expected_length:
+            return token
+    return ""
+
+
+def _new_sms_text(text: str, baseline_text: str) -> str:
+    text = str(text or "")
+    baseline_text = str(baseline_text or "")
+    if not baseline_text:
+        return text
+    if text == baseline_text:
+        return ""
+    if text.startswith(baseline_text):
+        return text[len(baseline_text):]
+    return text
 
 
 def _resource_job_id(resource: Any) -> int:

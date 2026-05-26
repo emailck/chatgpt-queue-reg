@@ -343,6 +343,7 @@ def _wait_for_signup_page(
                 time.sleep(3)
             continue
         if "paypal.com" in cur and "/checkoutweb/signup" not in cur:
+            _remove_paypal_fake_captcha_elements(page)
             _raise_if_paypal_challenge_blocked(page, log, challenge_state)
             if _solve_real_hcaptcha_if_present(page, paypal_cfg or {}, log):
                 time.sleep(2)
@@ -1050,12 +1051,28 @@ _FIELD_SELECTORS = {
 
 
 def _remove_signup_fake_captcha_elements(page: Any) -> None:
-    """Remove fake verification overlays only on PayPal signup."""
+    _remove_paypal_fake_captcha_elements(page)
+
+
+def _remove_paypal_fake_captcha_elements(page: Any) -> None:
     try:
         page.evaluate("""() => {
-            if (window.__ppaf_signup_fake_captcha_watcher) return;
+            if (window.__ppaf_fake_captcha_watcher) return;
+            function allowedPage() {
+                const path = location.pathname || '';
+                if (path.includes('/auth/validatecaptcha') || path.includes('/checkoutweb/genericerror')) return false;
+                return path.includes('/checkoutweb/signup') || path.includes('/webapps/hermes') || path.includes('/agreements/approve') || path.includes('/signin');
+            }
+            function visible(el) {
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                const s = getComputedStyle(el);
+                return r.width > 10 && r.height > 10 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+            }
             function skipCaptcha() {
-                if (!location.pathname.includes('/checkoutweb/signup')) return;
+                if (!allowedPage()) return;
+                const text = (document.body && document.body.innerText || '');
+                if (/Security Challenge|security check|unusual activity|verify your identity|请验证|請驗證|人机验证|人機驗證/i.test(text)) return;
                 const sels = [
                     '#captchaComponent', '.captcha-overlay', '.captcha-container',
                     '.appChallengeNS', '#g-anomalydetection-div',
@@ -1066,13 +1083,15 @@ def _remove_signup_fake_captcha_elements(page: Any) -> None:
                     document.querySelectorAll(sel).forEach(el => el.remove());
                 }
                 document.querySelectorAll('iframe').forEach(f => {
-                    if (/recaptcha|captcha|challenge/i.test((f.src||'')+(f.title||''))) f.remove();
+                    const hay = (f.src || '') + ' ' + (f.title || '') + ' ' + (f.id || '') + ' ' + (f.className || '');
+                    if (/recaptcha|captcha|challenge/i.test(hay)) f.remove();
                 });
                 document.querySelectorAll('div').forEach(d => {
                     const cs = getComputedStyle(d);
+                    const hay = (d.className || '') + ' ' + (d.id || '') + ' ' + (d.getAttribute('data-testid') || '');
                     if (cs.position === 'fixed' && /visible/i.test(cs.visibility) &&
                         parseInt(cs.zIndex || '0') > 1000000 &&
-                        /captcha|challenge/i.test((d.className || '') + ' ' + (d.id || ''))) {
+                        /captcha|challenge/i.test(hay)) {
                         d.remove();
                     }
                 });
@@ -1091,7 +1110,7 @@ def _remove_signup_fake_captcha_elements(page: Any) -> None:
                 { childList: true, subtree: true }
             );
             setInterval(schedule, 3000);
-            window.__ppaf_signup_fake_captcha_watcher = true;
+            window.__ppaf_fake_captcha_watcher = true;
         }""")
     except Exception:
         pass
@@ -1626,6 +1645,12 @@ def _submit_and_handle_otp(
     log: LogFn | None,
     check_cancelled: CheckCancelledFn | None = None,
 ) -> bool:
+    number_id = int(paypal_cfg.get("_number_id") or 0)
+    job_id = int(paypal_cfg.get("_job_id") or 0)
+    otp_baseline = ""
+    if number_id:
+        from backend.core.pools.paypal_number_pool import paypal_number_pool
+        otp_baseline = paypal_number_pool.begin_otp_session(number_id, job_id=job_id)
     otp_state = _install_otp_graphql_watch(page, log)
     emit(log, "paypal_http: browser submitting signup form")
     _click_submit(page)
@@ -1647,14 +1672,14 @@ def _submit_and_handle_otp(
     expected_length = input_count if input_count > 1 else 6
     emit(log, f"paypal_http: browser OTP detected inputs={input_count} expectedLength={expected_length}")
 
-    number_id = int(paypal_cfg.get("_number_id") or 0)
     if number_id:
         from backend.core.pools.paypal_number_pool import paypal_number_pool
         otp = paypal_number_pool.fetch_otp(
             number_id, expected_length=expected_length,
             timeout=int(paypal_cfg.get("otp_timeout") or 90),
             check_cancelled=check_cancelled,
-            job_id=int(paypal_cfg.get("_job_id") or 0),
+            baseline_text=otp_baseline,
+            job_id=job_id,
         )
     else:
         otp = _fetch_otp_with_length_check(
@@ -2379,6 +2404,7 @@ def _wait_for_stripe_return(
             raise PayPalHttpError("browser: still on PayPal signup while waiting for Stripe return")
         try:
             if "paypal.com" in cur and "/checkoutweb/signup" not in cur:
+                _remove_paypal_fake_captcha_elements(page)
                 _raise_if_paypal_challenge_blocked(page, log, challenge_state)
                 if _solve_real_hcaptcha_if_present(page, paypal_cfg or {}, log):
                     time.sleep(2)

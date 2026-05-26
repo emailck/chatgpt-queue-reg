@@ -432,6 +432,10 @@ class ChatGPTClient:
         target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
         return "add_phone" in target or "add-phone" in target or "phone-verification" in target
 
+    def _state_is_identity_verification(self, state: FlowState):
+        target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
+        return "identity_verification" in target or "identity-verification" in target
+
     def _state_requires_navigation(self, state: FlowState):
         if (state.method or "GET").upper() != "GET":
             return False
@@ -1791,6 +1795,11 @@ class ChatGPTClient:
                 state = next_state
                 self.last_registration_state = state
                 continue
+
+            if self._state_is_identity_verification(state):
+                detail = describe_flow_state(state)
+                self._log(f"identity_verification 直接判失败: {detail}")
+                return False, f"identity_verification: {detail}"
 
             if (
                 (not register_submitted)

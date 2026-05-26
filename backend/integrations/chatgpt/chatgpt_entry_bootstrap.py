@@ -8,6 +8,7 @@ behavior.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 
@@ -23,6 +24,10 @@ from .fingerprint import normalize_impersonate
 
 CHATGPT_BASE = "https://chatgpt.com"
 DEFAULT_COUNTRY_CODE = "JP"
+COUNTRY_CODE_HINT_RE = re.compile(
+    r'["\']?country_code_hint["\']?\s*(?::|,)\s*["\']([A-Za-z0-9]{2,4})["\']',
+    re.I,
+)
 NAVIGATION_ACCEPT = (
     "text/html,application/xhtml+xml,application/xml;q=0.9,"
     "image/avif,image/webp,*/*;q=0.8"
@@ -67,7 +72,7 @@ def bootstrap_chatgpt_entry(
 
     homepage_url = f"{CHATGPT_BASE}/"
     _visit_homepage(client, homepage_url, ua, sec, imp)
-    _run_backend_anon_prewarm(
+    prewarm_country = _run_backend_anon_prewarm(
         client,
         device_id=device_id,
         user_agent=ua,
@@ -81,7 +86,18 @@ def bootstrap_chatgpt_entry(
     authorize_url = _request_signin(client, email, token, device_id, ua, sec, imp)
     if not authorize_url:
         return ""
-    return _follow_authorize(client, authorize_url, ua, sec, imp)
+    final_url = _follow_authorize(client, authorize_url, ua, sec, imp)
+    auth_country = _resolve_country_code(client, prewarm_country)
+    if auth_country and auth_country != prewarm_country:
+        _request_country_pricing_config(
+            client,
+            auth_country,
+            device_id=device_id,
+            user_agent=ua,
+            sec_ch_ua=sec,
+            impersonate=imp,
+        )
+    return final_url
 
 
 def _ensure_oai_session_id(client) -> str:
@@ -174,7 +190,7 @@ def _run_backend_anon_prewarm(
     sec_ch_ua: str | None,
     impersonate: str | None,
     country_code: str,
-) -> None:
+) -> str:
     country = _resolve_country_code(client, country_code)
     steps = [
         ("GET", lambda _country: f"{CHATGPT_BASE}/backend-anon/accounts/check/{ACCOUNTS_CHECK_VERSION}?timezone_offset_min={_timezone_offset_min()}"),
@@ -235,6 +251,7 @@ def _run_backend_anon_prewarm(
                 )
         except Exception as exc:
             client._log(f"ChatGPT entry: 预热异常 {method} {url}: {exc}")
+    return country or DEFAULT_COUNTRY_CODE
 
 
 def _backend_anon_headers(
@@ -408,12 +425,55 @@ def _follow_authorize(
                 timeout=30,
             ),
         )
+        country = _extract_country_code_hint_from_auth_html(getattr(response, "text", ""))
+        if country:
+            _cache_country_code(client, country)
+            client._log(f"ChatGPT entry: auth country_code_hint={country} cached")
         final_url = str(getattr(response, "url", "") or authorize_url)
         client._log(f"ChatGPT entry: authorize 最终跳转 {final_url[:160]}")
         return final_url
     except Exception as exc:
         client._log(f"ChatGPT entry: authorize 异常: {exc}")
         return authorize_url
+
+
+def _request_country_pricing_config(
+    client,
+    country_code: str,
+    *,
+    device_id: str,
+    user_agent: str,
+    sec_ch_ua: str | None,
+    impersonate: str | None,
+) -> None:
+    country = _normalize_country_code(country_code)
+    if not country:
+        return
+    url = f"{CHATGPT_BASE}/backend-anon/checkout_pricing_config/configs/{country}"
+    try:
+        headers = _backend_anon_headers(
+            client,
+            url,
+            method="GET",
+            device_id=device_id,
+            user_agent=user_agent,
+            sec_ch_ua=sec_ch_ua,
+        )
+        response = client._session_get(
+            url,
+            **_request_kwargs(impersonate, headers=headers, timeout=30),
+        )
+        _sync_versions(client, response)
+        try:
+            update_x_oai_is_from_response(client.session, response.headers)
+        except Exception:
+            pass
+        client._log(
+            f"ChatGPT entry: GET /backend-anon/checkout_pricing_config/configs/{country} -> "
+            f"{getattr(response, 'status_code', '-')}"
+        )
+    except Exception as exc:
+        client._log(f"ChatGPT entry: country pricing config 异常 {country}: {exc}")
 
 
 def _accept_language(client) -> str:
@@ -465,6 +525,23 @@ def _cache_country_code(client, country_code: str) -> None:
         setattr(session, "chatgpt_country_code", country)
     except Exception:
         pass
+
+
+def _extract_country_code_hint_from_auth_html(html: str | None) -> str:
+    text = str(html or "")
+    if not text:
+        return ""
+    for match in COUNTRY_CODE_HINT_RE.finditer(text):
+        country = _normalize_country_code(match.group(1))
+        if country:
+            return country
+    compact = text.replace('\\"', '"').replace("\\'", "'")
+    if compact != text:
+        for match in COUNTRY_CODE_HINT_RE.finditer(compact):
+            country = _normalize_country_code(match.group(1))
+            if country:
+                return country
+    return ""
 
 
 def _extract_country_code_from_me_response(response) -> str:

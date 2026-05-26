@@ -8,13 +8,14 @@ import { StatusTag } from '@/components/StatusTag'
 import { ActionCard, CardToolbar, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
 import { CopyableText, ErrorCallout, LinkedIdBadges, Sub2ApiBadge, TokenBadges } from '@/components/ui/DomainBits'
 import { apiFetch, formatDateTime, formatDuration } from '@/lib/api'
-import type { Job, JobRetryResponse, Pipeline, PipelineDetail } from '@/lib/contracts'
+import type { Job, JobBatchRetryResponse, JobRetryResponse, Pipeline, PipelineDetail } from '@/lib/contracts'
 import { stageLabel } from '@/lib/contracts'
 
 const { Text } = Typography
 
 const ACTIVE_STATUSES = new Set(['created', 'queued', 'running'])
 const FAILED_STATUSES = new Set(['failed', 'interrupted', 'cancelled'])
+const RETRYABLE_STATUSES = new Set(['failed', 'interrupted'])
 
 interface AccountSummary {
   id: number
@@ -203,6 +204,8 @@ export default function Jobs() {
   const [selectedLogJobId, setSelectedLogJobId] = useState<number | null>(null)
   const [retryingJobId, setRetryingJobId] = useState<number | null>(null)
   const [stoppingJobId, setStoppingJobId] = useState<number | null>(null)
+  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([])
+  const [batchRetrying, setBatchRetrying] = useState(false)
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -255,6 +258,20 @@ export default function Jobs() {
     })
   }, [query, rows, stageFilter, statusFilter])
 
+  const canRetryRow = useCallback((row: JobTrackerRow): boolean => {
+    const job = row.currentJob
+    if (!job || !RETRYABLE_STATUSES.has(job.status) || !RETRYABLE_STATUSES.has(row.pipeline.status)) return false
+    if (row.pipeline.current_stage !== job.type) return false
+    const registerIdx = (row.pipeline.stages || []).indexOf('register')
+    const stageIdx = (row.pipeline.stages || []).indexOf(job.type)
+    return registerIdx >= 0 && stageIdx > registerIdx
+  }, [])
+
+  const retryableSelectedRows = useMemo(() => {
+    const selected = new Set(selectedRowKeys)
+    return filteredRows.filter((row) => selected.has(row.key) && canRetryRow(row))
+  }, [canRetryRow, filteredRows, selectedRowKeys])
+
   const stageOptions = useMemo(() => stageOptionsFromRows(rows), [rows])
 
   const summary = useMemo(() => ({
@@ -299,6 +316,33 @@ export default function Jobs() {
       setRetryingJobId(null)
     }
   }, [openDetail, reload])
+
+  const batchRetryJobs = useCallback(async () => {
+    const ids = retryableSelectedRows.map((row) => row.currentJob?.id).filter((id): id is number => Boolean(id))
+    if (!ids.length) {
+      message.warning('请选择可重试的失败 Job')
+      return
+    }
+    setBatchRetrying(true)
+    try {
+      const resp = await apiFetch<JobBatchRetryResponse>('/jobs/batch-retry', {
+        method: 'POST',
+        body: JSON.stringify({ ids }),
+      })
+      const skipped = (resp.skipped?.length || 0) + (resp.not_found?.length || 0)
+      if (resp.retried) {
+        message.success(`已批量重试 ${resp.retried} 个 Job${skipped ? `，跳过 ${skipped} 个` : ''}`)
+      } else {
+        message.warning(`没有 Job 被重试${skipped ? `，跳过 ${skipped} 个` : ''}`)
+      }
+      setSelectedRowKeys([])
+      await reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '批量重试失败')
+    } finally {
+      setBatchRetrying(false)
+    }
+  }, [reload, retryableSelectedRows])
 
   const forceStopJob = useCallback(async (jobId: number, pipelineId: number) => {
     setStoppingJobId(jobId)
@@ -494,9 +538,10 @@ export default function Jobs() {
         const registerIdx = (detailPipeline?.stages || []).indexOf('register')
         const canRetry = Boolean(
           row.job &&
-          row.job.status === 'failed' &&
-          detailPipeline?.status === 'failed' &&
-          detailPipeline?.current_stage === row.stage &&
+          RETRYABLE_STATUSES.has(row.job.status) &&
+          detailPipeline &&
+          RETRYABLE_STATUSES.has(detailPipeline.status) &&
+          detailPipeline.current_stage === row.stage &&
           registerIdx >= 0 &&
           row.index > registerIdx,
         )
@@ -560,6 +605,15 @@ export default function Jobs() {
             <Input prefix={<SearchOutlined />} allowClear placeholder="搜索邮箱 / ID / stage" value={query} onChange={(evt) => setQuery(evt.target.value)} style={{ width: 220 }} />
             <Select allowClear placeholder="Pipeline 状态" value={statusFilter} onChange={setStatusFilter} style={{ width: 160 }} options={['created', 'queued', 'running', 'succeeded', 'failed', 'cancelled', 'interrupted'].map((value) => ({ value, label: value }))} />
             <Select allowClear placeholder="当前池" value={stageFilter} onChange={setStageFilter} style={{ width: 190 }} options={stageOptions} />
+            <Button
+              type="primary"
+              ghost
+              disabled={!retryableSelectedRows.length}
+              loading={batchRetrying}
+              onClick={batchRetryJobs}
+            >
+              批量重试{retryableSelectedRows.length ? ` (${retryableSelectedRows.length})` : ''}
+            </Button>
             <Button onClick={() => { setQuery(''); setStatusFilter(undefined); setStageFilter(undefined) }}>清空筛选</Button>
             <Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>
           </CardToolbar>
@@ -572,6 +626,11 @@ export default function Jobs() {
         columns={tableColumns}
         dataSource={filteredRows}
         loading={loading}
+        rowSelection={{
+          selectedRowKeys,
+          onChange: (keys) => setSelectedRowKeys(keys.map(String)),
+          getCheckboxProps: (row) => ({ disabled: !canRetryRow(row) }),
+        }}
         scroll={{ x: 1500 }}
         pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100, 200], showTotal: (total) => `共 ${total} 条` }}
         onRow={(row) => ({ onDoubleClick: () => openDetail(row.pipeline.id) })}

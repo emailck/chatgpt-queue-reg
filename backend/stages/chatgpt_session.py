@@ -8,7 +8,13 @@ from typing import Any
 from sqlalchemy import select as sa_select
 from sqlmodel import Session
 
-from backend.core.constants import ACCOUNT_STATUS_BANNED, JOB_STATUS_QUEUED, JOB_STATUS_RUNNING
+from backend.core.constants import (
+    ACCOUNT_STATUS_FAILED,
+    ACCOUNT_STATUS_PAYMENT_LINK_READY,
+    ACCOUNT_STATUS_REGISTERED,
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_RUNNING,
+)
 from backend.core.db import engine, session_scope
 from backend.core.json_utils import json_dumps, json_loads
 from backend.core.proxy import build_requests_proxy_config
@@ -20,6 +26,8 @@ from backend.integrations.chatgpt.fingerprint import BrowserFingerprint
 from backend.integrations.chatgpt.utils import decode_jwt_payload, seed_oai_device_cookie
 from backend.models.account import ChatGPTAccount
 from backend.models.job import Job
+from backend.models.openai_refresh_token import OpenAIRefreshToken
+from backend.models.sub2api_binding import Sub2ApiAccountBinding
 from backend.schemas.stage_io import ChatGPTSessionInput, ChatGPTSessionOutput
 
 
@@ -153,7 +161,7 @@ def _maybe_enqueue_sub2api_sync(ctx: Any, account_id: int, snapshot: dict[str, A
 
     job_id = enqueue_job(
         type="sub2api_sync",
-        input={"account_id": account_id, "force_upload": True},
+        input={"account_id": account_id, "force_upload": True, "reset_remote_status": True},
         account_id=account_id,
         proxy_id=snapshot.get("proxy_id"),
         proxy_url=str(snapshot.get("proxy_url") or ""),
@@ -336,6 +344,7 @@ def _persist_session_data(
         row.session_expires_at = expires_at
         row.session_refresh_status = status
         row.last_session_refresh_at = now
+        _mark_account_session_usable(row)
         row.last_error = ""
         if plan_type:
             row.plan_type = plan_type
@@ -354,6 +363,13 @@ def _persist_session_data(
         s.commit()
         s.refresh(row)
         return _account_snapshot(row)
+
+
+def _mark_account_session_usable(row: ChatGPTAccount) -> None:
+    if row.status == ACCOUNT_STATUS_PAYMENT_LINK_READY:
+        return
+    if row.status in {"", ACCOUNT_STATUS_FAILED}:
+        row.status = ACCOUNT_STATUS_REGISTERED
 
 
 def _validate_access_token(client: Any, access_token: str, ctx: Any, *, label: str) -> tuple[bool, dict[str, Any] | str]:
@@ -375,6 +391,7 @@ def _record_session_valid(account_id: int, me_data: dict[str, Any], status: str)
         plan_type = _plan_from_me(me_data)
         row.session_refresh_status = status
         row.last_session_refresh_at = now
+        _mark_account_session_usable(row)
         row.last_error = ""
         if plan_type:
             row.plan_type = plan_type
@@ -439,17 +456,50 @@ def _is_deactivated_error(error: Any) -> bool:
 
 
 def _record_session_failure(account_id: int, error: str) -> None:
+    now = utcnow()
     with session_scope() as s:
         row = s.get(ChatGPTAccount, account_id)
         if row is None:
             return
         row.session_refresh_status = "failed"
-        row.last_session_refresh_at = utcnow()
+        row.last_session_refresh_at = now
         row.last_error = str(error or "")
         if _is_deactivated_error(error):
-            row.status = ACCOUNT_STATUS_BANNED
-        row.updated_at = utcnow()
+            row.last_error = f"account_deactivated: {row.last_error}"
+            _record_deactivated_sub2api_status(s, account_id, row.last_error, now=now)
+        row.updated_at = now
         s.add(row)
+
+
+def _record_deactivated_sub2api_status(s: Session, account_id: int, error: str, *, now: datetime) -> None:
+    binding = s.exec(
+        sa_select(Sub2ApiAccountBinding)
+        .where(Sub2ApiAccountBinding.chatgpt_account_id == int(account_id))
+        .where(Sub2ApiAccountBinding.platform == "openai")
+        .order_by(Sub2ApiAccountBinding.id.desc())
+    ).scalars().first()
+    if binding is None:
+        binding = Sub2ApiAccountBinding(
+            chatgpt_account_id=int(account_id),
+            platform="openai",
+            created_at=now,
+        )
+    binding.status = "banned"
+    binding.schedulable = False
+    binding.relogin_required = False
+    binding.last_error = str(error or "account_deactivated")
+    binding.last_status_check_at = now
+    binding.updated_at = now
+    s.add(binding)
+
+    refresh_token = s.exec(sa_select(OpenAIRefreshToken).where(OpenAIRefreshToken.account_id == int(account_id))).scalars().first()
+    if refresh_token is not None:
+        refresh_token.sub2api_status = "banned"
+        refresh_token.enabled = False
+        refresh_token.last_error = str(error or "account_deactivated")
+        refresh_token.status_checked_at = now
+        refresh_token.updated_at = now
+        s.add(refresh_token)
 
 
 def _expires_soon(value: datetime | None, refresh_before_seconds: int) -> bool:

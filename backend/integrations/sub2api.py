@@ -123,6 +123,20 @@ class Sub2ApiClient:
         path = self.account_update_path.format(account_id=account_id)
         return self._request("PUT", path, json=payload)
 
+    def clear_openai_account_error(self, account_id: str) -> dict[str, Any]:
+        self.ensure_configured()
+        path = f"{self.account_status_path.format(account_id=account_id).rstrip('/')}/clear-error"
+        return self._request("POST", path)
+
+    def set_openai_account_schedulable(self, account_id: str, schedulable: bool) -> dict[str, Any]:
+        self.ensure_configured()
+        path = f"{self.account_status_path.format(account_id=account_id).rstrip('/')}/schedulable"
+        return self._request("POST", path, json={"schedulable": bool(schedulable)})
+
+    def reset_openai_account_status(self, account_id: str) -> dict[str, Any]:
+        self.clear_openai_account_error(account_id)
+        return self.set_openai_account_schedulable(account_id, True)
+
     def move_openai_account_to_group(self, account_id: str, group_id: int) -> dict[str, Any]:
         if not int(group_id or 0):
             return {}

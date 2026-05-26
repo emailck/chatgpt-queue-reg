@@ -28,7 +28,7 @@ from backend.models.payment import PaymentLink
 from backend.models.pipeline import Pipeline
 from backend.models.sub2api_binding import Sub2ApiAccountBinding
 
-INVALID_SUB2API_STATUSES = {"dead", "disabled", "banned", "invalid", "expired"}
+INVALID_SUB2API_STATUSES = {"disabled", "error", "banned"}
 
 router = APIRouter()
 
@@ -62,6 +62,7 @@ class Sub2ApiExportRequest(BaseModel):
     ids: list[int]
     mark_sold: bool = True
     include_already_sold: bool = False
+    sold_only: bool = False
 
 
 class IdsRequest(BaseModel):
@@ -73,6 +74,7 @@ def list_accounts(
     status: Optional[str] = None,
     paid_only: bool = False,
     sold: Optional[bool] = None,
+    sub2api_status: Optional[str] = None,
     limit: int = Query(200, ge=1, le=500),
 ):
     with Session(engine) as s:
@@ -99,6 +101,15 @@ def list_accounts(
         account_ids = [int(row.id or 0) for row in rows]
         refresh_tokens = _refresh_tokens_by_account(s, account_ids)
         sub2api_bindings = _sub2api_bindings_by_account(s, account_ids)
+        if sub2api_status:
+            rows = [
+                row for row in rows
+                if _matches_sub2api_status_filter(
+                    sub2api_bindings.get(int(row.id or 0)),
+                    refresh_tokens.get(int(row.id or 0)),
+                    sub2api_status,
+                )
+            ]
     return [
         _with_sub2api_binding(
             _with_refresh_token(
@@ -259,6 +270,10 @@ def export_sub2api_accounts(body: Sub2ApiExportRequest):
         already_sold = [aid for aid in ids if rows_by_id[aid].sold]
         if already_sold and not body.include_already_sold:
             raise HTTPException(status_code=409, detail={"already_sold": already_sold})
+        if body.sold_only:
+            not_sold = [aid for aid in ids if not rows_by_id[aid].sold]
+            if not_sold:
+                raise HTTPException(status_code=409, detail={"not_sold": not_sold})
         refresh_tokens = _refresh_tokens_by_account(s, ids)
         sub2api_bindings = _sub2api_bindings_by_account(s, ids)
         from backend.stages.sub2api_sync import _build_openai_import_payload, _exported_at, _first_payload_account, _snapshot_account, _snapshot_refresh_token
@@ -659,6 +674,26 @@ def _refresh_token_is_usable(refresh_token: OpenAIRefreshToken | None) -> bool:
     if not refresh_token.enabled:
         return False
     return str(refresh_token.sub2api_status or "").strip().lower() not in INVALID_SUB2API_STATUSES
+
+
+def _matches_sub2api_status_filter(
+    binding: Sub2ApiAccountBinding | None,
+    refresh_token: OpenAIRefreshToken | None,
+    expected: str,
+) -> bool:
+    expected_value = str(expected or "").strip().lower()
+    actual = _effective_sub2api_status(binding, refresh_token)
+    if expected_value == "pending_sync":
+        return actual in {"pending_sync", "pending_upload", ""}
+    return actual == expected_value
+
+
+def _effective_sub2api_status(binding: Sub2ApiAccountBinding | None, refresh_token: OpenAIRefreshToken | None) -> str:
+    if binding is not None and str(binding.status or "").strip():
+        return str(binding.status or "").strip().lower()
+    if refresh_token is not None and str(refresh_token.sub2api_status or "").strip():
+        return str(refresh_token.sub2api_status or "").strip().lower()
+    return ""
 
 
 def _with_refresh_token(item: dict[str, Any], refresh_token: OpenAIRefreshToken | None) -> dict[str, Any]:

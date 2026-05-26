@@ -110,6 +110,7 @@ class Sub2ApiSyncInput(StageInput):
     refresh_token_id: Optional[int] = None
     sub2api_account_id: str = ""
     force_upload: bool = False
+    reset_remote_status: bool = False
     mode: str = "auto"
     extra_config: dict[str, Any] = Field(default_factory=dict)
 

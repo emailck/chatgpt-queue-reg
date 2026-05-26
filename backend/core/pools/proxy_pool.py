@@ -5,6 +5,7 @@ region-specific proxy and exclude the account-bound proxy.
 """
 from __future__ import annotations
 
+import random
 from typing import Any, Optional
 
 from sqlmodel import Session, select
@@ -60,11 +61,7 @@ class ProxyResourcePool:
             rows = list(s.exec(stmt).all())
             if not rows:
                 return None
-            rows.sort(
-                key=lambda p: p.success_count / max(p.success_count + p.fail_count, 1),
-                reverse=True,
-            )
-            row = rows[0]
+            row = rows[0] if requested_proxy_id else _choose_rotating_proxy(rows)
         return self._resource_from_values(
             proxy_id=row.id,
             url=row.url,
@@ -112,6 +109,16 @@ class ProxyResourcePool:
             "enabled": sum(1 for r in rows if r.enabled),
             "disabled": sum(1 for r in rows if not r.enabled),
         }
+
+
+def _choose_rotating_proxy(rows: list[Proxy]) -> Proxy:
+    never_used = [row for row in rows if row.last_used_at is None]
+    if never_used:
+        return random.choice(never_used)
+
+    ordered = sorted(rows, key=lambda row: row.last_used_at)
+    window = ordered[: min(len(ordered), 10)]
+    return random.choice(window)
 
 
 proxy_pool = ProxyResourcePool()

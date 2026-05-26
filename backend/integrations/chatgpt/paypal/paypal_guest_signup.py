@@ -244,7 +244,7 @@ def paypal_guest_signup_authorize_pure_protocol(
     if runtime_ctx.get("paypal_address_autocomplete"):
         _paypal_address_autocomplete(http, signup_url, paypal_cfg, runtime_ctx, country, lang, ec_token)
 
-    sms_baseline = _sms_gateway_text(smsurl)
+    sms_baseline = _paypal_number_sms_baseline(paypal_cfg, smsurl, number_id)
     if sms_baseline:
         emit(log, f"paypal_http: pure_protocol sms baseline captured length={len(sms_baseline)}")
 
@@ -380,6 +380,13 @@ def paypal_guest_signup_authorize_pure_protocol(
 
     emit(log, f"paypal_http: pure_protocol hermes authorize {hermes_url[:120]}")
     return authorize_from_hermes_fn(http, hermes_url, ba_token, log)
+
+
+def _paypal_number_sms_baseline(paypal_cfg: dict[str, Any], smsurl: str, number_id: int) -> str:
+    if number_id:
+        from backend.core.pools.paypal_number_pool import paypal_number_pool
+        return paypal_number_pool.begin_otp_session(number_id, job_id=int(paypal_cfg.get("_job_id") or 0))
+    return _sms_gateway_text(smsurl)
 
 
 def _fetch_phone_otp(
