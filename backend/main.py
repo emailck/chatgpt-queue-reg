@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope, Receive, Send
 
 from backend.api.accounts import router as accounts_router
 from backend.api.access_tokens import router as access_tokens_router
@@ -20,6 +20,7 @@ from backend.api.emails import router as emails_router
 from backend.api.jobs import router as jobs_router
 from backend.api.payments import router as payments_router
 from backend.api.paypal_numbers import router as paypal_numbers_router
+from backend.api.pipeline_configs import router as pipeline_configs_router
 from backend.api.pools import router as pools_router
 from backend.api.proxies import router as proxies_router
 from backend.api.settings import router as settings_router
@@ -71,6 +72,7 @@ app.include_router(emails_router)
 app.include_router(proxies_router)
 app.include_router(cards_router)
 app.include_router(paypal_numbers_router)
+app.include_router(pipeline_configs_router)
 app.include_router(sms_router)
 app.include_router(refresh_tokens_router)
 app.include_router(pools_router)
@@ -85,11 +87,48 @@ def healthz():
 
 _static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 if os.path.isdir(_static_dir):
-    app.mount(
-        "/assets",
-        StaticFiles(directory=os.path.join(_static_dir, "assets")),
-        name="assets",
-    )
+    _ASSET_MIME_MAP = {
+        ".js": "application/javascript; charset=utf-8",
+        ".mjs": "application/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".svg": "image/svg+xml",
+        ".json": "application/json",
+        ".woff2": "font/woff2",
+        ".woff": "font/woff",
+        ".ico": "image/x-icon",
+        ".webp": "image/webp",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".html": "text/html; charset=utf-8",
+    }
+
+    _assets_dir = os.path.join(_static_dir, "assets")
+
+    async def _serve_assets(scope: Scope, receive: Receive, send: Send) -> None:
+        """Custom ASGI app serving /assets/* with correct MIME types.
+
+        Avoids StaticFiles which may serve .js as text/plain on Windows.
+        """
+        rel = scope["path"][len("/assets/"):]
+        # Basic traversal guard
+        safe = os.path.normpath(rel).lstrip(os.sep).replace("\\", "/")
+        if ".." in safe or safe.startswith("/"):
+            resp = JSONResponse({"detail": "Not Found"}, status_code=404)
+            await resp(scope, receive, send)
+            return
+        file_path = os.path.join(_assets_dir, safe)
+        if not os.path.isfile(file_path):
+            resp = JSONResponse({"detail": "Not Found"}, status_code=404)
+            await resp(scope, receive, send)
+            return
+        _, ext = os.path.splitext(file_path)
+        media_type = _ASSET_MIME_MAP.get(ext.lower(), "application/octet-stream")
+        resp = FileResponse(file_path, media_type=media_type)
+        await resp(scope, receive, send)
+
+    app.mount("/assets", _serve_assets, name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):

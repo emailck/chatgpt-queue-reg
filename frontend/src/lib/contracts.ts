@@ -5,6 +5,7 @@ export const STAGE_LABELS: Record<string, string> = {
   chatgpt_session: 'ChatGPT Session',
   sub2api_sync: 'sub2api 同步',
   openai_oauth: 'OpenAI OAuth RT',
+  sso_oauth: 'SSO OAuth RT',
 }
 
 export function stageLabel(stage?: string | null): string {

@@ -6,4 +6,5 @@ from . import payment_link  # noqa: F401
 from . import payment  # noqa: F401
 from . import chatgpt_session  # noqa: F401
 from . import openai_oauth  # noqa: F401
+from . import sso_oauth  # noqa: F401
 from . import sub2api_sync  # noqa: F401

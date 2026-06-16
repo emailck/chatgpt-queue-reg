@@ -155,6 +155,18 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       { key: 'workpool.openai_oauth.phone_verification_poll_timeout_seconds', label: '等待短信秒数', type: 'number', placeholder: '180' },
     ],
   },
+  sso_oauth: {
+    id: 'workpool.sso_oauth',
+    title: 'WorkPool: sso_oauth 配置',
+    description: 'SSO OAuth 通过外部 IdP (auth.oai-gpt.com) 登录获取 RT。不需要邮箱OTP/密码。',
+    fields: [
+      { key: 'worker_concurrency.sso_oauth', label: 'sso_oauth 并发', type: 'number', placeholder: '默认 3' },
+      { key: 'workpool.sso_oauth.sso_email_domain', label: 'SSO 邮箱域名', placeholder: '例: aicoco.xyz，随机用户名+此域名' },
+      { key: 'workpool.sso_oauth.sso_invite_code', label: 'SSO 邀请码', placeholder: '邀请码，用于 auth.oai-gpt.com 注册' },
+      { key: 'workpool.sso_oauth.sso_connection_id', label: 'SSO Connection ID', placeholder: 'conn_xxx，留空自动检测' },
+      { key: 'workpool.sso_oauth.sso_provider', label: 'SSO Provider', type: 'number', placeholder: '默认 2 (WorkOS)' },
+    ],
+  },
 }
 
 export const RESOURCEPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {

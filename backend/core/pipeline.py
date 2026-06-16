@@ -64,8 +64,10 @@ PRESETS: dict[str, tuple[str, ...]] = {
     "link_only":                           ("register", "payment_link"),
     "sub2api_only":                        ("sub2api_sync",),
     "register_with_refresh_token":         ("register", "chatgpt_session", "openai_oauth", "sub2api_sync"),
+    "register_with_sso_rt":                ("register", "chatgpt_session", "sso_oauth", "sub2api_sync"),
     "account_paid_with_refresh_token":     ("register", "payment_link", "payment", "chatgpt_session", "openai_oauth", "sub2api_sync"),
     "refresh_token_only":                  ("chatgpt_session", "openai_oauth", "sub2api_sync"),
+    "sso_rt_only":                         ("chatgpt_session", "sso_oauth", "sub2api_sync"),
 }
 
 

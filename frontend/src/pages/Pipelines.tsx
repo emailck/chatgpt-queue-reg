@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormInstance } from 'antd'
-import { Button, Col, Form, InputNumber, Popconfirm, Progress, Row, Select, Space, Tag, Typography, message } from 'antd'
+import { Button, Col, Form, Input, InputNumber, Popconfirm, Progress, Radio, Row, Select, Space, Tag, Typography, message } from 'antd'
 import { BugOutlined, DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import { JobLogPanel } from '@/components/JobLogPanel'
@@ -23,6 +23,27 @@ const STOP_OPTIONS = [
   { value: 'chatgpt_session', label: 'Session 标准化后停止' },
   { value: 'sub2api_sync', label: 'sub2api 同步后停止' },
   { value: 'openai_oauth', label: 'OpenAI OAuth RT 后停止' },
+  { value: 'sso_oauth', label: 'SSO OAuth RT 后停止' },
+]
+
+const STAGE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'register', label: '注册' },
+  { value: 'payment_link', label: '生成长链' },
+  { value: 'payment', label: '付款' },
+  { value: 'chatgpt_session', label: 'ChatGPT Session' },
+  { value: 'openai_oauth', label: 'OpenAI OAuth RT' },
+  { value: 'sso_oauth', label: 'SSO OAuth RT' },
+  { value: 'sub2api_sync', label: 'sub2api 同步' },
+]
+
+const PRESET_OPTIONS: { value: string; label: string }[] = [
+  { value: 'full_chain', label: '完整链路 register→payment_link→payment→chatgpt_session→sub2api_sync' },
+  { value: 'register_only', label: '仅注册 register' },
+  { value: 'register_with_refresh_token', label: '注册+RT register→chatgpt_session→openai_oauth→sub2api_sync' },
+  { value: 'account_paid', label: '全自动付费 register→payment_link→payment' },
+  { value: 'account_paid_with_refresh_token', label: '付费+RT 全部6步' },
+  { value: 'link_only', label: '只到长链 register→payment_link' },
+  { value: 'refresh_token_only', label: '已有号补RT chatgpt_session→openai_oauth→sub2api_sync' },
 ]
 
 function pipelinePresetLabel(preset: string): string {
@@ -201,11 +222,24 @@ export default function Pipelines() {
 
   const submitCreate = async () => {
     const values = await form.validateFields()
+    const mode = String(values.mode || 'preset')
     const stopAfter = String(values.stop_after || '')
-    const body = {
+    const body: Record<string, unknown> = {
       count: Number(values.count || 1),
-      preset: FULL_CHAIN_PRESET,
-      stop_after: stopAfter || undefined,
+    }
+
+    if (mode === 'custom') {
+      const stages = (values.stages as string[]) || []
+      if (!stages.length) {
+        message.warning('请至少选择一个阶段')
+        return
+      }
+      body.stages = stages
+      body.stop_after = stopAfter || undefined
+    } else {
+      const preset = String(values.preset || 'full_chain')
+      body.preset = preset
+      body.stop_after = stopAfter || undefined
     }
 
     try {
@@ -213,7 +247,8 @@ export default function Pipelines() {
         '/pipelines',
         { method: 'POST', body: JSON.stringify(body) },
       )
-      message.success(`已创建 ${resp.pipeline_ids.length} 条完整链路 pipeline`)
+      const label = mode === 'custom' ? '自定义' : '预设'
+      message.success(`已创建 ${resp.pipeline_ids.length} 条${label} pipeline`)
       setCreateOpen(false)
       form.resetFields()
       reload()
@@ -230,7 +265,7 @@ export default function Pipelines() {
     <PageScaffold
       title="任务队列"
       description="默认创建完整链路 register → payment_link → payment → chatgpt_session → sub2api_sync，也可以在任一模块边界停止。"
-      actions={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建完整链路</Button>}
+      actions={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建链路</Button>}
     >
       <SummaryGrid>
         <StatCard label="Pipeline" value={pipelines.length} hint="最近 200 条" tone="primary" />
@@ -242,7 +277,7 @@ export default function Pipelines() {
 
       <ActionCard
         title="链路操作"
-        description="任务创建只表达数量、完整链路和停止点；代理、接码、支付等参数在各 WorkPool / ResourcePool 卡片配置。"
+        description="选择预设链路或自定义阶段组合创建 Pipeline。代理、接码、支付等参数在各 WorkPool / ResourcePool 卡片配置。"
         actions={(
           <CardToolbar>
             <SelectionSummary count={selected.length} />
@@ -306,7 +341,7 @@ export default function Pipelines() {
         )}
       />
 
-      <PopupCard open={createOpen} onCancel={() => setCreateOpen(false)} title="创建完整链路 pipeline" onOk={submitCreate} okText="创建" width={560}>
+      <PopupCard open={createOpen} onCancel={() => setCreateOpen(false)} title="创建 pipeline" onOk={submitCreate} okText="创建" width={600}>
         <CreateForm form={form} />
       </PopupCard>
 
@@ -377,31 +412,142 @@ export default function Pipelines() {
 }
 
 function CreateForm({ form }: { form: FormInstance }) {
+  const [mode, setMode] = useState<string>('preset')
+  const [savedConfigs, setSavedConfigs] = useState<{ id: number; name: string; stages: string[]; stop_after: string }[]>([])
+  const [saveName, setSaveName] = useState('')
+  const [loadingConfigs, setLoadingConfigs] = useState(false)
+
+  const loadConfigs = useCallback(async () => {
+    setLoadingConfigs(true)
+    try {
+      const data = await apiFetch<{ id: number; name: string; stages: string[]; stop_after: string }[]>('/pipeline-configs')
+      setSavedConfigs(data || [])
+    } catch { /* ignore */ }
+    finally { setLoadingConfigs(false) }
+  }, [])
+
+  useEffect(() => { loadConfigs() }, [loadConfigs])
+
+  const handleSave = async () => {
+    const name = saveName.trim()
+    if (!name) { message.warning('请输入配置名称'); return }
+    const currentStages = form.getFieldValue('stages') as string[] || []
+    if (!currentStages.length) { message.warning('请选择至少一个阶段'); return }
+    try {
+      await apiFetch('/pipeline-configs', { method: 'POST', body: JSON.stringify({ name, stages: currentStages, stop_after: form.getFieldValue('stop_after') || '' }) })
+      message.success(`已保存 "${name}"`)
+      setSaveName('')
+      loadConfigs()
+    } catch (err) { message.error(err instanceof Error ? err.message : '保存失败') }
+  }
+
+  const handleDelete = async (id: number, name: string) => {
+    try {
+      await apiFetch(`/pipeline-configs/${id}`, { method: 'DELETE' })
+      message.success(`已删除 "${name}"`)
+      loadConfigs()
+    } catch (err) { message.error(err instanceof Error ? err.message : '删除失败') }
+  }
+
+  const applyConfig = (cfg: { stages: string[]; stop_after: string }) => {
+    setMode('custom')
+    form.setFieldsValue({ mode: 'custom', stages: cfg.stages, stop_after: cfg.stop_after || '' })
+  }
+
   return (
     <Form
       form={form}
       layout="vertical"
-      initialValues={{
-        count: 1,
-        stop_after: '',
-      }}
+      initialValues={{ count: 1, mode: 'preset', preset: 'full_chain', stages: [], stop_after: '' }}
       autoComplete="off"
     >
       <Row gutter={16}>
-        <Col span={12}>
+        <Col span={8}>
           <Form.Item label="数量" name="count" rules={[{ required: true }]}>
             <InputNumber min={1} max={200} style={{ width: '100%' }} />
           </Form.Item>
         </Col>
-        <Col span={12}>
-          <Form.Item label="链路">
-            <Tag color="blue">完整链路</Tag>
+        <Col span={16}>
+          <Form.Item label="创建模式" name="mode">
+            <Radio.Group
+              optionType="button" buttonStyle="solid"
+              onChange={(e) => { setMode(e.target.value); form.setFieldsValue({ stages: [], stop_after: '' }) }}
+            >
+              <Radio.Button value="preset">预设链路</Radio.Button>
+              <Radio.Button value="custom">自定义阶段</Radio.Button>
+            </Radio.Group>
           </Form.Item>
         </Col>
       </Row>
-      <Form.Item label="运行到哪一步停止" name="stop_after" tooltip="模块参数在各 WorkPool / ResourcePool 配置里维护">
-        <Select options={STOP_OPTIONS} />
-      </Form.Item>
+
+      {mode === 'preset' ? (
+        <>
+          <Form.Item label="预设链路" name="preset" rules={[{ required: true }]}>
+            <Select options={PRESET_OPTIONS} />
+          </Form.Item>
+          <Form.Item label="运行到哪一步停止" name="stop_after">
+            <Select options={STOP_OPTIONS} allowClear placeholder="跑完全部" />
+          </Form.Item>
+        </>
+      ) : (
+        <>
+          {/* Saved configs selector + management */}
+          <Form.Item label="已保存的配置">
+            <Space style={{ width: '100%' }} direction="vertical" size={6}>
+              <Select
+                loading={loadingConfigs}
+                placeholder={savedConfigs.length ? `选择配置 (${savedConfigs.length}个)` : '暂无保存的配置'}
+                allowClear
+                value={undefined}
+                onChange={(val: number) => {
+                  const cfg = savedConfigs.find((c) => c.id === val)
+                  if (cfg) applyConfig(cfg)
+                }}
+                options={savedConfigs.map((c) => ({
+                  value: c.id,
+                  label: `${c.name} — ${c.stages.join(' → ')}${c.stop_after ? ` [停:${c.stop_after}]` : ''}`,
+                }))}
+              />
+              {savedConfigs.length > 0 && (
+                <Space wrap size={[4, 4]}>
+                  {savedConfigs.map((c) => (
+                    <Popconfirm key={c.id} title={`删除 "${c.name}"？`} onConfirm={() => handleDelete(c.id, c.name)}>
+                      <Tag closable color="blue" onClose={(e) => { e.preventDefault() }}
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => applyConfig(c)}
+                      >
+                        {c.name}
+                      </Tag>
+                    </Popconfirm>
+                  ))}
+                </Space>
+              )}
+            </Space>
+          </Form.Item>
+
+          <Form.Item
+            label="选择阶段（按顺序执行）"
+            name="stages"
+            rules={[{ required: true, type: 'array', min: 1, message: '至少选择一个阶段' }]}
+          >
+            <Select mode="multiple" options={STAGE_OPTIONS} placeholder="拖拽排序或点击添加阶段..." style={{ width: '100%' }} />
+          </Form.Item>
+
+          <Form.Item label="运行到哪一步停止（可选）" name="stop_after">
+            <Select options={STOP_OPTIONS.filter((o) => o.value !== '')} allowClear placeholder="执行全部" />
+          </Form.Item>
+
+          <Form.Item label="保存为配置模板">
+            <Space>
+              <Input placeholder="输入配置名称..." value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+                style={{ width: 200 }} onPressEnter={handleSave}
+              />
+              <Button icon={<PlusOutlined />} onClick={handleSave}>保存</Button>
+            </Space>
+          </Form.Item>
+        </>
+      )}
     </Form>
   )
 }

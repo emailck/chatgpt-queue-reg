@@ -29,6 +29,7 @@ ALLOWED_STAGE_NAMES: tuple[str, ...] = (
     "payment",
     "chatgpt_session",
     "openai_oauth",
+    "sso_oauth",
     "sub2api_sync",
 )
 ALLOWED_STAGE_SET = set(ALLOWED_STAGE_NAMES)

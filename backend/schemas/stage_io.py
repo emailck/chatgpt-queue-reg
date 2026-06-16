@@ -145,6 +145,7 @@ STAGE_INPUT_SCHEMAS = {
     "payment": PaymentInput,
     "chatgpt_session": ChatGPTSessionInput,
     "openai_oauth": OpenAIOAuthInput,
+    "sso_oauth": OpenAIOAuthInput,
     "sub2api_sync": Sub2ApiSyncInput,
 }
 
@@ -154,5 +155,6 @@ STAGE_OUTPUT_SCHEMAS = {
     "payment": PaymentOutput,
     "chatgpt_session": ChatGPTSessionOutput,
     "openai_oauth": OpenAIOAuthOutput,
+    "sso_oauth": OpenAIOAuthOutput,
     "sub2api_sync": Sub2ApiSyncOutput,
 }

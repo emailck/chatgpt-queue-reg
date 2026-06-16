@@ -281,13 +281,14 @@ class ChatGPTClient:
         for attempt in range(1, max_retries + 2):
             try:
                 headers = kwargs.get("headers") or {}
+                fp = describe_request_fingerprint(
+                    user_agent=headers.get('User-Agent') or headers.get('user-agent') or self.ua,
+                    sec_ch_ua=headers.get('sec-ch-ua') or headers.get('Sec-Ch-Ua') or self.sec_ch_ua,
+                    impersonate=self.impersonate,
+                )
                 self._log(
                     f"HTTP {str(method).upper()} {str(url)} "
-                    f"{describe_request_fingerprint(
-                        user_agent=headers.get('User-Agent') or headers.get('user-agent') or self.ua,
-                        sec_ch_ua=headers.get('sec-ch-ua') or headers.get('Sec-Ch-Ua') or self.sec_ch_ua,
-                        impersonate=self.impersonate,
-                    )}"
+                    f"{fp}"
                 )
                 response = getattr(self.session, method)(url, **kwargs)
                 try:
