@@ -94,6 +94,7 @@ export default function Accounts() {
   const [sub2apiStatusFilter, setSub2ApiStatusFilter] = useState<Sub2ApiStatusFilter>('all')
   const [exportingSold, setExportingSold] = useState(false)
   const [exportingAlreadySold, setExportingAlreadySold] = useState(false)
+  const [exportingRT, setExportingRT] = useState(false)
   const [refreshingSub2ApiStatus, setRefreshingSub2ApiStatus] = useState(false)
   const [refreshingAccessToken, setRefreshingAccessToken] = useState(false)
 
@@ -143,6 +144,29 @@ export default function Accounts() {
   }, [rows, selected])
   const canExportAndMarkSold = selected.length > 0 && selectedRows.length === selected.length && selectedRows.every((row) => !row.sold)
   const canExportAlreadySold = selected.length > 0 && selectedRows.length === selected.length && selectedRows.every((row) => row.sold)
+
+  const exportRTs = async () => {
+    if (!selected.length) return
+    setExportingRT(true)
+    try {
+      const res = await apiFetch<{ text: string }>('/accounts/export/tokens', {
+        method: 'POST',
+        body: JSON.stringify({ ids: selected.map((id) => Number(id)) }),
+      })
+      const blob = new Blob([res.text], { type: 'text/plain' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'sso-rt.txt'
+      a.click()
+      URL.revokeObjectURL(url)
+      message.success(`已导出 ${selected.length} 个账号的 RT`)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '导出失败')
+    } finally {
+      setExportingRT(false)
+    }
+  }
 
   const showEmailHistory = async (account: Account) => {
     setEmailModalAccount(account)
@@ -504,6 +528,7 @@ export default function Accounts() {
             <Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>
             <Button icon={<CloudSyncOutlined />} loading={refreshingSub2ApiStatus} disabled={!selected.length} onClick={() => refreshSub2ApiStatus(selected.map((id) => Number(id)))}>刷新 sub2api 状态</Button>
             <Button icon={<ReloadOutlined />} loading={refreshingAccessToken} disabled={!selected.length} onClick={() => refreshAccessToken(selected.map((id) => Number(id)))}>重新获取 AT</Button>
+            <Button icon={<CloudDownloadOutlined />} loading={exportingRT} disabled={!selected.length} onClick={exportRTs}>导出 RT</Button>
             <Popconfirm title={`导出选中的 ${selectedRows.length} 个未售账号并迁移到 sub2api 已售出分组?`} onConfirm={exportSelectedSub2Api} disabled={!canExportAndMarkSold}>
               <Button icon={<CloudDownloadOutlined />} type="primary" loading={exportingSold} disabled={!canExportAndMarkSold}>导出 sub2api 并标记已售</Button>
             </Popconfirm>

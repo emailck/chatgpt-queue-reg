@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.types import Scope, Receive, Send
 
 from backend.api.accounts import router as accounts_router
+from backend.api.accounts_export import router as accounts_export_router
 from backend.api.access_tokens import router as access_tokens_router
 from backend.api.auth import router as auth_router
 from backend.api.browser_debug import router as browser_debug_router
@@ -66,6 +67,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(jobs_router)
 app.include_router(accounts_router)
+app.include_router(accounts_export_router)
 app.include_router(access_tokens_router)
 app.include_router(payments_router)
 app.include_router(emails_router)
