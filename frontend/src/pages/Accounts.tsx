@@ -10,7 +10,7 @@ import { API_BASE, apiFetch, formatDateTime } from '@/lib/api'
 
 const { Text } = Typography
 
-type SoldFilter = 'all' | 'unsold' | 'sold'
+type SoldFilter = 'all' | 'unsold' | 'sold' | 'sso'
 type Sub2ApiStatusFilter = 'all' | 'active' | 'error' | 'disabled' | 'rate_limited' | 'temp_unschedulable' | 'unschedulable' | 'pending_sync' | 'sync_failed' | 'status_check_failed' | 'banned'
 
 const SUB2API_STATUS_OPTIONS: { value: Sub2ApiStatusFilter; label: string }[] = [
@@ -100,8 +100,15 @@ export default function Accounts() {
   const reload = useCallback(async () => {
     setLoading(true)
     try {
-      const params = new URLSearchParams({ paid_only: 'true', limit: '300' })
-      if (soldFilter !== 'all') params.set('sold', soldFilter === 'sold' ? 'true' : 'false')
+      const params = new URLSearchParams({ limit: '300' })
+      if (soldFilter === 'sso') {
+        params.set('paid_only', 'false')
+      } else if (soldFilter === 'all') {
+        params.set('paid_only', 'true')
+      } else {
+        params.set('paid_only', 'true')
+        params.set('sold', soldFilter === 'sold' ? 'true' : 'false')
+      }
       if (sub2apiStatusFilter !== 'all') params.set('sub2api_status', sub2apiStatusFilter)
       const data = await apiFetch<Account[]>(`/accounts?${params.toString()}`)
       setRows(data)
@@ -486,7 +493,7 @@ export default function Accounts() {
               value={soldFilter}
               onChange={(value) => { setSoldFilter(value); setSelected([]) }}
               style={{ width: 132 }}
-              options={[{ value: 'all', label: '全部' }, { value: 'unsold', label: '可售' }, { value: 'sold', label: '已售出' }]}
+              options={[{ value: 'all', label: '全部' }, { value: 'unsold', label: '可售' }, { value: 'sold', label: '已售出' }, { value: 'sso', label: 'SSO' }]}
             />
             <Select<Sub2ApiStatusFilter>
               value={sub2apiStatusFilter}
