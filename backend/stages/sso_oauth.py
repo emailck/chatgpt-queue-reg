@@ -176,7 +176,7 @@ def run(ctx: JobContext) -> None:
         "access_token": token_data.get("access_token", ""),
         "id_token": token_data.get("id_token", ""),
         "chatgpt_account_id": chatgpt_account_id,
-        "sub2api_status": "pending_sync",
+        "sub2api_status": "disabled",
     })
     ctx.log("sso_oauth succeeded", payload={
         "account_id": account_id,
@@ -1105,7 +1105,7 @@ def _persist_refresh_token(account_id: int, token_data: dict[str, Any]) -> int:
                 consecutive_failures=0,
                 enabled=True,
                 last_error="",
-                sub2api_status="pending_upload",
+                sub2api_status="disabled",
                 created_at=now,
                 updated_at=now,
             )

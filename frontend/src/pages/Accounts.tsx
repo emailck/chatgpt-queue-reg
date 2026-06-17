@@ -527,7 +527,7 @@ export default function Accounts() {
             />
             <Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>刷新</Button>
             <Button icon={<CloudSyncOutlined />} loading={refreshingSub2ApiStatus} disabled={!selected.length} onClick={() => refreshSub2ApiStatus(selected.map((id) => Number(id)))}>刷新 sub2api 状态</Button>
-            <Button icon={<ReloadOutlined />} loading={refreshingAccessToken} disabled={!selected.length} onClick={() => refreshAccessToken(selected.map((id) => Number(id)))}>重新获取 AT</Button>
+            {soldFilter !== 'sso' && <Button icon={<ReloadOutlined />} loading={refreshingAccessToken} disabled={!selected.length} onClick={() => refreshAccessToken(selected.map((id) => Number(id)))}>重新获取 AT</Button>}
             <Button icon={<CloudDownloadOutlined />} loading={exportingRT} disabled={!selected.length} onClick={exportRTs}>导出 RT</Button>
             <Popconfirm title={`导出选中的 ${selectedRows.length} 个未售账号并迁移到 sub2api 已售出分组?`} onConfirm={exportSelectedSub2Api} disabled={!canExportAndMarkSold}>
               <Button icon={<CloudDownloadOutlined />} type="primary" loading={exportingSold} disabled={!canExportAndMarkSold}>导出 sub2api 并标记已售</Button>
