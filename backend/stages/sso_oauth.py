@@ -141,7 +141,17 @@ def run(ctx: JobContext) -> None:
         raise RuntimeError(f"SSO OAuth 获取 refresh_token 失败: {last_error}")
 
     expires_in = int(token_data.get("expires_in") or 3600)
+    access_token = str(token_data.get("access_token") or "")
+
+    # Auto-discover account_id from access_token (fetch user info)
     account_id = int(payload.get("account_id") or ctx.account_id or 0)
+    if not account_id and access_token:
+        try:
+            account_id = _find_or_create_account_from_token(access_token, merged_extra)
+            ctx.log("sso_oauth auto-discovered account", payload={"account_id": account_id})
+        except Exception as exc:
+            _emit_log(f"SSO OAuth: auto account discovery failed: {exc}", level="warning")
+
     refresh_token_id = None
     if account_id:
         refresh_token_id = _persist_refresh_token(account_id, token_data)
@@ -966,6 +976,49 @@ def _read_int_config(values: dict[str, Any], primary_key: str, *, default: int, 
 
 def utcnow():
     return __import__("datetime").datetime.now(timezone.utc)
+
+
+def _find_or_create_account_from_token(access_token: str, config: dict[str, Any]) -> int:
+    """Use the access_token to fetch user info, find or create a ChatGPTAccount."""
+    import curl_cffi
+    from backend.models.account import ChatGPTAccount
+    from backend.core.db import session_scope
+    from sqlalchemy import select as sa_select
+
+    user_info_url = "https://chatgpt.com/backend-api/me"
+    ua = config.get("user_agent") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+    resp = curl_cffi.requests.get(
+        user_info_url,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "User-Agent": ua,
+            "Accept": "application/json",
+        },
+        impersonate="chrome142",
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"GET /me failed: HTTP {resp.status_code}")
+    user = resp.json()
+    email = str(user.get("email") or user.get("user", {}).get("email") or "").strip().lower()
+    if not email:
+        raise RuntimeError("no email in /me response")
+
+    now = utcnow()
+    with session_scope() as s:
+        existing = s.exec(sa_select(ChatGPTAccount).where(ChatGPTAccount.email == email)).scalars().first()
+        if existing:
+            return int(existing.id or 0)
+        account = ChatGPTAccount(
+            email=email,
+            status="active",
+            created_at=now,
+            updated_at=now,
+        )
+        s.add(account)
+        s.commit()
+        s.refresh(account)
+        return int(account.id or 0)
 
 
 def _persist_refresh_token(account_id: int, token_data: dict[str, Any]) -> int:
