@@ -43,6 +43,7 @@ def create_oauth_session(config: dict[str, Any] | None = None) -> OAuthSession:
     client_id = str(oauth_config.get("client_id") or values.get("oauth_client_id") or OAUTH_CLIENT_ID).strip()
     redirect_uri = str(oauth_config.get("redirect_uri") or values.get("oauth_redirect_uri") or OAUTH_REDIRECT_URI).strip()
     scope = str(oauth_config.get("scope") or values.get("oauth_scope") or OAUTH_SCOPE).strip()
+    codex_cli_simplified = str(values.get("codex_cli_simplified_flow") or "true").strip()
     params = {
         "client_id": client_id,
         "response_type": "code",
@@ -53,7 +54,7 @@ def create_oauth_session(config: dict[str, Any] | None = None) -> OAuthSession:
         "code_challenge_method": "S256",
         "prompt": "login",
         "id_token_add_organizations": "true",
-        "codex_cli_simplified_flow": "true",
+        "codex_cli_simplified_flow": codex_cli_simplified,
     }
     return OAuthSession(
         auth_url=f"{AUTHORIZE_URL}?{urlencode(params)}",
