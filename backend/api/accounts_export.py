@@ -13,12 +13,11 @@ async def export_tokens(payload: dict):
         raise HTTPException(400, "no account ids")
 
     from sqlalchemy import select as sa_select
-    from backend.core.db import engine
+    from backend.core.db import session_scope
     from backend.models.account import ChatGPTAccount
     from backend.models.openai_refresh_token import OpenAIRefreshToken
-    from sqlalchemy.orm import Session
 
-    with Session(engine) as s:
+    with session_scope() as s:
         items = []
         for aid in ids:
             account = s.get(ChatGPTAccount, aid)
