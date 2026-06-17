@@ -10,6 +10,7 @@ import json as _json
 import re
 import time
 import uuid
+from datetime import timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -140,7 +141,15 @@ def run(ctx: JobContext) -> None:
         raise RuntimeError(f"SSO OAuth 获取 refresh_token 失败: {last_error}")
 
     expires_in = int(token_data.get("expires_in") or 3600)
+    account_id = int(payload.get("account_id") or extra_config.get("account_id") or 0)
+    refresh_token_id = None
+    if account_id:
+        refresh_token_id = _persist_refresh_token(account_id, token_data)
+        ctx.log("sso_oauth persisted to account pool", payload={"account_id": account_id, "token_id": refresh_token_id})
+
     ctx.update_result({
+        "account_id": account_id or None,
+        "refresh_token_id": refresh_token_id,
         "has_refresh_token": True,
         "expires_in": expires_in,
         "refresh_token": token_data.get("refresh_token", ""),
@@ -148,6 +157,7 @@ def run(ctx: JobContext) -> None:
         "sub2api_status": "pending_sync",
     })
     ctx.log("sso_oauth succeeded", payload={
+        "account_id": account_id,
         "refresh_token": str(token_data.get("refresh_token", ""))[:20] + "...",
         "expires_in": expires_in,
     })
@@ -952,3 +962,61 @@ def _read_int_config(values: dict[str, Any], primary_key: str, *, default: int, 
     except Exception:
         parsed = default
     return max(minimum, min(parsed, maximum))
+
+
+def utcnow():
+    return __import__("datetime").datetime.now(timezone.utc)
+
+
+def _persist_refresh_token(account_id: int, token_data: dict[str, Any]) -> int:
+    """Persist refresh_token to openai_refresh_tokens table (mirrors openai_oauth)."""
+    from backend.core.db import session_scope
+    from backend.models.openai_refresh_token import OpenAIRefreshToken
+
+    rt = str(token_data.get("refresh_token") or "").strip()
+    oauth_at = str(token_data.get("access_token") or "").strip()
+    oauth_id_token = str(token_data.get("id_token") or "").strip()
+    expires_in = int(token_data.get("expires_in") or 3600)
+    now = utcnow()
+
+    with session_scope() as s:
+        from sqlalchemy import select as sa_select
+
+        existing = s.exec(
+            sa_select(OpenAIRefreshToken).where(OpenAIRefreshToken.account_id == int(account_id))
+        ).scalars().first()
+
+        if existing is None:
+            row = OpenAIRefreshToken(
+                account_id=int(account_id),
+                refresh_token=rt,
+                oauth_access_token=oauth_at,
+                oauth_id_token=oauth_id_token,
+                oauth_access_expires_at=now + timedelta(seconds=expires_in),
+                next_sync_at=now,
+                last_sync_at=None,
+                consecutive_failures=0,
+                enabled=True,
+                last_error="",
+                sub2api_status="pending_upload",
+                created_at=now,
+                updated_at=now,
+            )
+            s.add(row)
+            s.commit()
+            s.refresh(row)
+            return int(row.id or 0)
+
+        existing.refresh_token = rt or existing.refresh_token
+        if oauth_at:
+            existing.oauth_access_token = oauth_at
+        if oauth_id_token:
+            existing.oauth_id_token = oauth_id_token
+        existing.oauth_access_expires_at = now + timedelta(seconds=expires_in)
+        existing.consecutive_failures = 0
+        existing.last_error = ""
+        existing.enabled = True
+        existing.updated_at = now
+        s.add(existing)
+        s.commit()
+        return int(existing.id or 0)

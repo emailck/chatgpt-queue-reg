@@ -165,6 +165,7 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       { key: 'workpool.sso_oauth.sso_invite_code', label: 'SSO 邀请码', placeholder: '邀请码，用于 auth.oai-gpt.com 注册' },
       { key: 'workpool.sso_oauth.sso_connection_id', label: 'SSO Connection ID', placeholder: 'conn_xxx，留空自动检测' },
       { key: 'workpool.sso_oauth.sso_provider', label: 'SSO Provider', type: 'number', placeholder: '默认 2 (WorkOS)' },
+      { key: 'workpool.sso_oauth.account_id', label: '账号 ID (可选)', type: 'number', placeholder: '指定账号ID，RT会存入该账号的token池' },
     ],
   },
 }
