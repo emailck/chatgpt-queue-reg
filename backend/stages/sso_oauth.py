@@ -141,7 +141,7 @@ def run(ctx: JobContext) -> None:
         raise RuntimeError(f"SSO OAuth 获取 refresh_token 失败: {last_error}")
 
     expires_in = int(token_data.get("expires_in") or 3600)
-    account_id = int(payload.get("account_id") or extra_config.get("account_id") or 0)
+    account_id = int(payload.get("account_id") or ctx.account_id or 0)
     refresh_token_id = None
     if account_id:
         refresh_token_id = _persist_refresh_token(account_id, token_data)
