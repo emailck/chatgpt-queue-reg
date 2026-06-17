@@ -157,6 +157,16 @@ def run(ctx: JobContext) -> None:
         refresh_token_id = _persist_refresh_token(account_id, token_data)
         ctx.log("sso_oauth persisted to account pool", payload={"account_id": account_id, "token_id": refresh_token_id})
 
+    # Extract chatgpt_account_id from id_token for display
+    chatgpt_account_id = ""
+    id_token = str(token_data.get("id_token") or "")
+    if id_token:
+        try:
+            oai_auth = _decode_jwt_payload(id_token).get("https://api.openai.com/auth") or {}
+            chatgpt_account_id = str(oai_auth.get("chatgpt_account_id") or "")
+        except Exception:
+            pass
+
     ctx.update_result({
         "account_id": account_id or None,
         "refresh_token_id": refresh_token_id,
@@ -165,6 +175,7 @@ def run(ctx: JobContext) -> None:
         "refresh_token": token_data.get("refresh_token", ""),
         "access_token": token_data.get("access_token", ""),
         "id_token": token_data.get("id_token", ""),
+        "chatgpt_account_id": chatgpt_account_id,
         "sub2api_status": "pending_sync",
     })
     ctx.log("sso_oauth succeeded", payload={
@@ -980,22 +991,38 @@ def utcnow():
 
 
 def _find_or_create_account_from_token(token_data: dict[str, Any], config: dict[str, Any]) -> int:
-    """Decode id_token JWT to get user info, find or create a ChatGPTAccount."""
+    """Decode id_token JWT to extract chatgpt_account_id and email.
+
+    id_token payload structure:
+      {
+        "https://api.openai.com/auth": {
+          "chatgpt_account_id": "user-xxx",
+          ...
+        },
+        "email": "...",
+        ...
+      }
+    """
     from backend.models.account import ChatGPTAccount
     from backend.core.db import session_scope
     from sqlalchemy import select as sa_select
 
-    # 1. Decode id_token JWT to get email + sub (OpenAI user ID)
     id_token = str(token_data.get("id_token") or "")
+    oai_auth: dict[str, Any] = {}
     email = ""
+
     if id_token:
         try:
             payload = _decode_jwt_payload(id_token)
-            email = str(payload.get("email") or payload.get("https://api.openai.com/email") or "").strip().lower()
+            oai_auth = payload.get("https://api.openai.com/auth") or {}
+            email = str(payload.get("email") or "").strip().lower()
         except Exception:
             pass
 
-    # 2. If id_token has no email, fall back to /me API
+    chatgpt_account_id = str(oai_auth.get("chatgpt_account_id") or "").strip()
+    user_id = str(oai_auth.get("user_id") or "").strip()
+
+    # Fallback to /me API if id_token has no email
     access_token = str(token_data.get("access_token") or "")
     if not email and access_token:
         import curl_cffi
@@ -1016,8 +1043,23 @@ def _find_or_create_account_from_token(token_data: dict[str, Any], config: dict[
     with session_scope() as s:
         existing = s.exec(sa_select(ChatGPTAccount).where(ChatGPTAccount.email == email)).scalars().first()
         if existing:
+            if chatgpt_account_id:
+                existing.chatgpt_account_id = str(chatgpt_account_id)
+            if user_id:
+                existing.chatgpt_user_id = str(user_id)
+            existing.updated_at = now
+            s.add(existing)
+            s.commit()
             return int(existing.id or 0)
-        account = ChatGPTAccount(email=email, status="active", created_at=now, updated_at=now)
+
+        account = ChatGPTAccount(
+            email=email,
+            chatgpt_account_id=str(chatgpt_account_id) if chatgpt_account_id else None,
+            chatgpt_user_id=str(user_id) if user_id else None,
+            status="active",
+            created_at=now,
+            updated_at=now,
+        )
         s.add(account)
         s.commit()
         s.refresh(account)
