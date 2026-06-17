@@ -28,8 +28,9 @@ async def export_tokens(payload: dict):
                 sa_select(OpenAIRefreshToken).where(OpenAIRefreshToken.account_id == aid)
                 .order_by(OpenAIRefreshToken.id.desc()).limit(1)
             ).scalars().first()
-            line = f"{account.email}----"
-            if rt:
-                line += f"{rt.refresh_token}----{rt.oauth_access_token}"
-            lines.append(line)
+            email = str(account.email or "")
+            account_id = str(account.account_id or "")
+            refresh_token = str(rt.refresh_token) if rt else ""
+            access_token = str(rt.oauth_access_token) if rt else ""
+            lines.append(f"{email}----{account_id}----{refresh_token}----{access_token}")
         return {"text": "\n".join(lines), "filename": "sso-accounts.txt"}
