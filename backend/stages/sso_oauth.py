@@ -1044,9 +1044,7 @@ def _find_or_create_account_from_token(token_data: dict[str, Any], config: dict[
         existing = s.exec(sa_select(ChatGPTAccount).where(ChatGPTAccount.email == email)).scalars().first()
         if existing:
             if chatgpt_account_id:
-                existing.chatgpt_account_id = str(chatgpt_account_id)
-            if user_id:
-                existing.chatgpt_user_id = str(user_id)
+                existing.account_id = str(chatgpt_account_id)
             existing.updated_at = now
             s.add(existing)
             s.commit()
@@ -1054,8 +1052,7 @@ def _find_or_create_account_from_token(token_data: dict[str, Any], config: dict[
 
         account = ChatGPTAccount(
             email=email,
-            chatgpt_account_id=str(chatgpt_account_id) if chatgpt_account_id else None,
-            chatgpt_user_id=str(user_id) if user_id else None,
+            account_id=str(chatgpt_account_id) if chatgpt_account_id else None,
             status="active",
             created_at=now,
             updated_at=now,
