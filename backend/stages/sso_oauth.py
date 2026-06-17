@@ -164,6 +164,7 @@ def run(ctx: JobContext) -> None:
         "expires_in": expires_in,
         "refresh_token": token_data.get("refresh_token", ""),
         "access_token": token_data.get("access_token", ""),
+        "id_token": token_data.get("id_token", ""),
         "sub2api_status": "pending_sync",
     })
     ctx.log("sso_oauth succeeded", payload={
