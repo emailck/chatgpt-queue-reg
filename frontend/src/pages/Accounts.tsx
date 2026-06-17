@@ -153,11 +153,11 @@ export default function Accounts() {
         method: 'POST',
         body: JSON.stringify({ ids: selected.map((id) => Number(id)) }),
       })
-      const blob = new Blob([res.text], { type: 'text/plain' })
+      const blob = new Blob([res.text], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = 'sso-rt.txt'
+      a.download = 'sso-accounts.json'
       a.click()
       URL.revokeObjectURL(url)
       message.success(`已导出 ${selected.length} 个账号的 RT`)
