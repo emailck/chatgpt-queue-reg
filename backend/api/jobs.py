@@ -59,6 +59,30 @@ class CreatePipelineRequest(BaseModel):
     stages: Optional[list[str]] = None
     stop_after: Optional[str] = None
     count: int = Field(default=1, ge=1, le=200)
+    stage_inputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    # Convenience top-level fields for single-stage/manual WorkPools such as
+    # codex_invitation. These are persisted into pipeline.input_json and
+    # forwarded to stages whose input contract includes them.
+    email_id: Optional[int] = None
+    email: Optional[str] = None
+    inviter_account_id: Optional[int] = None
+    inviter_email: Optional[str] = None
+    inviter_list: Optional[str] = None
+    inviter_emails: Optional[str] = None
+    inviter_account_ids: Optional[str] = None
+    invite_count_per_inviter: Optional[int] = None
+    activate_after_invite: Optional[bool] = None
+    source_id: Optional[int] = None
+    source_type: Optional[str] = None
+    invite_count: Optional[int] = None
+    prefix_len: Optional[int] = None
+    domain: Optional[str] = None
+    emails: Optional[list[str]] = None
+    access_token: Optional[str] = None
+    chatgpt_account_id: Optional[str] = None
+    codex_account_id: Optional[str] = None
+    dry_run: Optional[bool] = None
 
 
 class JobEnqueueRequest(BaseModel):
@@ -97,14 +121,51 @@ def create_pipeline_endpoint(body: CreatePipelineRequest):
         )
 
     resolved_preset = body.preset or ("" if body.stages else DEFAULT_PRESET)
+    request_payload: dict[str, Any] = {}
+    for key in (
+        "email_id",
+        "email",
+        "inviter_account_id",
+        "inviter_email",
+        "inviter_list",
+        "inviter_emails",
+        "inviter_account_ids",
+        "invite_count_per_inviter",
+        "activate_after_invite",
+        "source_id",
+        "source_type",
+        "invite_count",
+        "prefix_len",
+        "domain",
+        "emails",
+        "access_token",
+        "chatgpt_account_id",
+        "codex_account_id",
+        "dry_run",
+    ):
+        value = getattr(body, key)
+        if value not in (None, "", []):
+            request_payload[key] = value
+    stage_inputs = dict(body.stage_inputs or {})
+    if request_payload and "codex_invitation" in stages:
+        stage_inputs["codex_invitation"] = {
+            **request_payload,
+            **dict(stage_inputs.get("codex_invitation") or {}),
+        }
+    if request_payload and "codex_batch_invite" in stages:
+        stage_inputs["codex_batch_invite"] = {
+            **request_payload,
+            **dict(stage_inputs.get("codex_batch_invite") or {}),
+        }
     pipeline_ids: list[int] = []
     for _ in range(body.count):
         pid = create_pipeline(
             stages=list(stages),
             preset=resolved_preset,
             stop_after=body.stop_after or "",
-            stage_inputs={},
+            stage_inputs=stage_inputs,
             resource_bindings={},
+            request_payload=request_payload,
         )
         pipeline_ids.append(pid)
 

@@ -24,6 +24,8 @@ const STOP_OPTIONS = [
   { value: 'sub2api_sync', label: 'sub2api 同步后停止' },
   { value: 'openai_oauth', label: 'OpenAI OAuth RT 后停止' },
   { value: 'sso_oauth', label: 'SSO OAuth RT 后停止' },
+  { value: 'codex_invitation', label: 'Codex 邀请后停止' },
+  { value: 'active', label: 'Codex 激活后停止' },
 ]
 
 const STAGE_OPTIONS: { value: string; label: string }[] = [
@@ -33,6 +35,9 @@ const STAGE_OPTIONS: { value: string; label: string }[] = [
   { value: 'chatgpt_session', label: 'ChatGPT Session' },
   { value: 'openai_oauth', label: 'OpenAI OAuth RT' },
   { value: 'sso_oauth', label: 'SSO OAuth RT' },
+  { value: 'codex_invitation', label: 'Codex 邀请' },
+  { value: 'codex_batch_invite', label: '批量 Codex 邀请' },
+  { value: 'active', label: 'Codex 激活' },
   { value: 'sub2api_sync', label: 'sub2api 同步' },
 ]
 
@@ -44,6 +49,10 @@ const PRESET_OPTIONS: { value: string; label: string }[] = [
   { value: 'account_paid_with_refresh_token', label: '付费+RT 全部6步' },
   { value: 'link_only', label: '只到长链 register→payment_link' },
   { value: 'refresh_token_only', label: '已有号补RT chatgpt_session→openai_oauth→sub2api_sync' },
+  { value: 'codex_invitation_only', label: 'Codex 邀请 codex_invitation' },
+  { value: 'codex_invite_sso_active', label: 'Codex 邀请+SSO+激活 codex_invitation→sso_oauth→active' },
+  { value: 'codex_batch_invite_active', label: '批量 Codex 邀请→统一激活 codex_batch_invite' },
+  { value: 'active_only', label: '仅 Codex 激活 active' },
 ]
 
 function pipelinePresetLabel(preset: string): string {
@@ -99,6 +108,40 @@ interface Job {
 interface PipelineDetail {
   pipeline: Pipeline
   jobs: Job[]
+}
+
+function resultText(value: unknown): string {
+  if (Array.isArray(value)) return value.map((item) => String(item || '').trim()).filter(Boolean).join(', ')
+  if (value === undefined || value === null) return ''
+  return String(value || '').trim()
+}
+
+function jobResultHighlights(job: Job): { label: string; value: string }[] {
+  const result = job.result || {}
+  const rows: { label: string; value: string }[] = []
+  const add = (label: string, key: string) => {
+    const value = resultText(result[key])
+    if (value) rows.push({ label, value })
+  }
+  if (job.type === 'codex_invitation') {
+    add('受邀邮箱', 'invited_email')
+    add('SSO邮箱', 'sso_email')
+    add('全部邀请邮箱', 'emails')
+    add('邀请母号', 'source_email')
+  } else if (job.type === 'codex_batch_invite') {
+    add('全部受邀邮箱', 'invited_emails')
+    add('激活子流程', 'activation_pipeline_ids')
+    add('失败数量', 'failed_count')
+  } else if (job.type === 'sso_oauth') {
+    add('SSO邮箱', 'sso_email')
+    add('ChatGPT Account', 'chatgpt_account_id')
+    add('RT ID', 'refresh_token_id')
+  } else if (job.type === 'active') {
+    add('激活邮箱', 'email')
+    add('ChatGPT Account', 'chatgpt_account_id')
+    add('激活结果', 'activated')
+  }
+  return rows
 }
 
 export default function Pipelines() {
@@ -240,6 +283,36 @@ export default function Pipelines() {
       const preset = String(values.preset || 'full_chain')
       body.preset = preset
       body.stop_after = stopAfter || undefined
+    }
+
+    const includesCodex = mode === 'custom'
+      ? Array.isArray(body.stages) && (body.stages.includes('codex_invitation') || body.stages.includes('codex_batch_invite'))
+      : body.preset === 'codex_invitation_only' || body.preset === 'codex_invite_sso_active' || body.preset === 'codex_batch_invite_active'
+    if (includesCodex) {
+      const codexFields = [
+        'email_id',
+        'email',
+        'inviter_account_id',
+        'inviter_email',
+        'inviter_list',
+        'inviter_emails',
+        'inviter_account_ids',
+        'invite_count_per_inviter',
+        'activate_after_invite',
+        'source_type',
+        'invite_count',
+        'prefix_len',
+        'domain',
+        'access_token',
+        'chatgpt_account_id',
+        'dry_run',
+      ]
+      for (const key of codexFields) {
+        const value = values[key]
+        if (value !== undefined && value !== null && value !== '') {
+          body[key] = value
+        }
+      }
     }
 
     try {
@@ -395,6 +468,13 @@ export default function Pipelines() {
                       <KeyValue label="Stage" value={stageLabel(job.type)} />
                       <KeyValue label="耗时" value={formatDuration(job.started_at, job.finished_at)} />
                     </KeyValueGrid>
+                    {jobResultHighlights(job).length > 0 && (
+                      <KeyValueGrid>
+                        {jobResultHighlights(job).map((item) => (
+                          <KeyValue key={item.label} label={item.label} value={<CopyableText value={item.value} label={item.label} />} />
+                        ))}
+                      </KeyValueGrid>
+                    )}
                     <ErrorCallout error={job.error} />
                   </Space>
                 </EntityCard>
@@ -416,6 +496,15 @@ function CreateForm({ form }: { form: FormInstance }) {
   const [savedConfigs, setSavedConfigs] = useState<{ id: number; name: string; stages: string[]; stop_after: string }[]>([])
   const [saveName, setSaveName] = useState('')
   const [loadingConfigs, setLoadingConfigs] = useState(false)
+  const selectedMode = Form.useWatch('mode', form) || mode
+  const selectedPreset = Form.useWatch('preset', form)
+  const selectedStages = Form.useWatch('stages', form) as string[] | undefined
+  const showCodexFields = selectedMode === 'preset'
+    ? selectedPreset === 'codex_invitation_only' || selectedPreset === 'codex_invite_sso_active'
+    : Array.isArray(selectedStages) && selectedStages.includes('codex_invitation')
+  const showBatchCodexFields = selectedMode === 'preset'
+    ? selectedPreset === 'codex_batch_invite_active'
+    : Array.isArray(selectedStages) && selectedStages.includes('codex_batch_invite')
 
   const loadConfigs = useCallback(async () => {
     setLoadingConfigs(true)
@@ -458,7 +547,7 @@ function CreateForm({ form }: { form: FormInstance }) {
     <Form
       form={form}
       layout="vertical"
-      initialValues={{ count: 1, mode: 'preset', preset: 'full_chain', stages: [], stop_after: '' }}
+      initialValues={{ count: 1, mode: 'preset', preset: 'full_chain', stages: [], stop_after: '', source_type: 'auto', invite_count: 1, prefix_len: 20, dry_run: false, invite_count_per_inviter: 5, activate_after_invite: true }}
       autoComplete="off"
     >
       <Row gutter={16}>
@@ -480,7 +569,7 @@ function CreateForm({ form }: { form: FormInstance }) {
         </Col>
       </Row>
 
-      {mode === 'preset' ? (
+      {selectedMode === 'preset' ? (
         <>
           <Form.Item label="预设链路" name="preset" rules={[{ required: true }]}>
             <Select options={PRESET_OPTIONS} />
@@ -545,6 +634,114 @@ function CreateForm({ form }: { form: FormInstance }) {
               />
               <Button icon={<PlusOutlined />} onClick={handleSave}>保存</Button>
             </Space>
+          </Form.Item>
+        </>
+      )}
+
+      {showBatchCodexFields && (
+        <>
+          <ActionCard
+            title="批量 Codex 邀请参数"
+            description="一次输入多个邀请母号；每个母号最多邀请 5 个。所有母号邀请完成后，系统会自动为所有受邀邮箱创建 sso_oauth → active 子流程。"
+          />
+          <Form.Item label="邀请母号列表" name="inviter_list" rules={[{ required: true, message: '请输入至少一个邀请母号' }]}>
+            <Input.TextArea rows={5} placeholder={"每行一个母号邮箱或账号ID，例如:\njr3q7pganb@aicoco.xyz\nother@aicoco.xyz\n12"} />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="母号来源" name="source_type">
+                <Select
+                  options={[
+                    { value: 'auto', label: 'auto 自动识别' },
+                    { value: 'chatgpt_account', label: '账号池 ChatGPTAccount ID' },
+                    { value: 'access_token_account', label: 'Free AT Token ID' },
+                    { value: 'email_account', label: '邮箱池 EmailAccount ID' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="每个母号邀请数量" name="invite_count_per_inviter">
+                <InputNumber min={1} max={5} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="随机前缀长度" name="prefix_len">
+                <InputNumber min={3} max={64} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="后续动作" name="activate_after_invite">
+            <Radio.Group>
+              <Radio value={true}>全部邀请完成后自动激活</Radio>
+              <Radio value={false}>只邀请，不创建激活子流程</Radio>
+            </Radio.Group>
+          </Form.Item>
+          <Form.Item label="执行模式" name="dry_run">
+            <Radio.Group>
+              <Radio value={false}>实际发送邀请</Radio>
+              <Radio value={true}>Dry-run 只生成/预检</Radio>
+            </Radio.Group>
+          </Form.Item>
+        </>
+      )}
+
+      {showCodexFields && (
+        <>
+          <ActionCard
+            title="Codex 邀请参数"
+            description="这里填写“邀请母号”：可以填母号邮箱，系统会从账号池/Free AT 池查 token；也可以填母号在账号池/AT池/邮箱池里的 ID。邀请成功后会把生成的受邀邮箱传给后面的 SSO OAuth 和 active。"
+          />
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="邀请母号邮箱" name="inviter_email">
+                <Input placeholder="mother@example.com" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="邀请母号账号/资源 ID" name="inviter_account_id">
+                <InputNumber min={1} style={{ width: '100%' }} placeholder="例如账号池 Account #12" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="母号来源" name="source_type">
+                <Select
+                  options={[
+                    { value: 'auto', label: 'auto 自动识别' },
+                    { value: 'chatgpt_account', label: '账号池 ChatGPTAccount ID' },
+                    { value: 'access_token_account', label: 'Free AT Token ID' },
+                    { value: 'email_account', label: '邮箱池 EmailAccount ID' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="邀请数量" name="invite_count">
+                <InputNumber min={1} max={200} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="前缀长度" name="prefix_len">
+                <InputNumber min={3} max={64} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="覆盖域名（可选）" name="domain">
+            <Input placeholder="留空则使用源邮箱 @ 后面的域名，例如 example.com" />
+          </Form.Item>
+          <Form.Item label="access_token 覆盖（邮箱池源必填；账号/Token 源可留空）" name="access_token">
+            <Input.Password placeholder="Bearer token 原文，不要带 Bearer 前缀" />
+          </Form.Item>
+          <Form.Item label="chatgpt-account-id 覆盖（邮箱池源必填；账号/Token 源可留空）" name="chatgpt_account_id">
+            <Input placeholder="acct_... / account id" />
+          </Form.Item>
+          <Form.Item label="执行模式" name="dry_run">
+            <Radio.Group>
+              <Radio value={false}>实际发送邀请</Radio>
+              <Radio value={true}>Dry-run 只生成/预检</Radio>
+            </Radio.Group>
           </Form.Item>
         </>
       )}

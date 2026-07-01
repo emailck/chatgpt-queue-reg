@@ -8,6 +8,7 @@ import {
   GlobalOutlined,
   KeyOutlined,
   MailOutlined,
+  SendOutlined,
   PhoneOutlined,
   PlayCircleOutlined,
   SettingOutlined,
@@ -26,6 +27,7 @@ import Proxies from '@/pages/Proxies'
 import PayPalNumbers from '@/pages/PayPalNumbers'
 import Pools from '@/pages/Pools'
 import BrowserDebug from '@/pages/BrowserDebug'
+import CodexInvites from '@/pages/CodexInvites'
 import Settings from '@/pages/Settings'
 
 import { lightTheme } from './theme'
@@ -35,6 +37,7 @@ const { Sider, Content, Header } = Layout
 const MENU: ItemType[] = [
   { key: '/pipelines', icon: <PlayCircleOutlined />, label: '任务队列' },
   { key: '/jobs', icon: <UnorderedListOutlined />, label: 'Jobs 追踪' },
+  { key: '/codex-invites', icon: <SendOutlined />, label: 'Codex邀请' },
   { key: '/pools', icon: <AppstoreOutlined />, label: 'WorkPools' },
   {
     key: 'account-pools',
@@ -62,6 +65,7 @@ const MENU: ItemType[] = [
 const PAGE_TITLES: Record<string, string> = {
   '/pipelines': '任务队列',
   '/jobs': 'Jobs 追踪',
+  '/codex-invites': 'Codex邀请',
   '/access-tokens': 'Free 池（已注册 AT）',
   '/accounts': 'Plus 池（sub2api）',
   '/pools': 'WorkPools',
@@ -111,6 +115,7 @@ function Shell() {
             <Route path="/" element={<Navigate to="/pipelines" replace />} />
             <Route path="/pipelines" element={<Pipelines />} />
             <Route path="/jobs" element={<Jobs />} />
+            <Route path="/codex-invites" element={<CodexInvites />} />
             <Route path="/pools" element={<Pools />} />
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/access-tokens" element={<AccessTokens />} />

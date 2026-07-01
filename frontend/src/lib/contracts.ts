@@ -6,6 +6,9 @@ export const STAGE_LABELS: Record<string, string> = {
   sub2api_sync: 'sub2api 同步',
   openai_oauth: 'OpenAI OAuth RT',
   sso_oauth: 'SSO OAuth RT',
+  codex_invitation: 'Codex 邀请',
+  codex_batch_invite: '批量 Codex 邀请',
+  active: 'Codex 激活',
 }
 
 export function stageLabel(stage?: string | null): string {

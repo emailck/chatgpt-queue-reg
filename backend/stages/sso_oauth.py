@@ -73,14 +73,24 @@ def run(ctx: JobContext) -> None:
     sso_email_domain = str(payload.get("sso_email_domain") or extra_config.get("sso_email_domain") or merged_extra.get("sso_email_domain") or "").strip()
     sso_invite_code = str(payload.get("sso_invite_code") or extra_config.get("sso_invite_code") or merged_extra.get("sso_invite_code") or "").strip()
 
-    # Build SSO login email: random_username@sso_email_domain
-    if sso_email_domain:
-        import secrets as _secrets
-        import string as _string
-        _random_user = "".join(_secrets.choice(_string.ascii_lowercase + _string.digits) for _ in range(10))
-        sso_email = f"{_random_user}@{sso_email_domain.lstrip('@')}"
-    else:
-        raise RuntimeError("sso_oauth stage requires sso_email_domain in workpool config")
+    # Build SSO login email. If a previous codex_invitation stage provided an
+    # invited email, use it; otherwise fall back to random_username@configured_domain.
+    sso_email = str(
+        payload.get("sso_email")
+        or payload.get("invited_email")
+        or payload.get("email")
+        or extra_config.get("sso_email")
+        or merged_extra.get("sso_email")
+        or ""
+    ).strip()
+    if not sso_email:
+        if sso_email_domain:
+            import secrets as _secrets
+            import string as _string
+            _random_user = "".join(_secrets.choice(_string.ascii_lowercase + _string.digits) for _ in range(10))
+            sso_email = f"{_random_user}@{sso_email_domain.lstrip('@')}"
+        else:
+            raise RuntimeError("sso_oauth stage requires sso_email or sso_email_domain in workpool config")
 
     ctx.log(
         "starting sso_oauth stage",
@@ -169,6 +179,8 @@ def run(ctx: JobContext) -> None:
 
     ctx.update_result({
         "account_id": account_id or None,
+        "email": sso_email,
+        "sso_email": sso_email,
         "refresh_token_id": refresh_token_id,
         "has_refresh_token": True,
         "expires_in": expires_in,
@@ -280,24 +292,27 @@ def _run_sso_oauth(
         _log(f"SSO OAuth: selecting SSO connection {sso_connection_id} (provider={sso_provider})")
         state = _authorize_continue_sso(session, device_id, ua, sec_ch_ua, sso_connection_id, sso_provider, _get_sentinel)
         _log(f"SSO OAuth state after sso select: page_type={state.page_type} next={str(state.continue_url)[:120]}")
-
-        # Step 3b: Follow external SSO redirect chain
-        _log("SSO OAuth: following external SSO redirects...")
-        code, state = _follow_sso_chain(session, ua, sec_ch_ua, state, impersonate, _log, sso_invite_code, email, device_id=device_id)
-        if code:
-            return exchange_code(oauth, f"{oauth.redirect_uri}?code={code}&state={oauth.state}", user_agent=ua, proxy="")
-
-        # Step 3c: After SSO redirects, handle interstitial + workspace + consent
-        code, state = _handle_post_sso_flow(session, ua, sec_ch_ua, device_id, state, impersonate, _log)
-        if code:
-            return exchange_code(oauth, f"{oauth.redirect_uri}?code={code}&state={oauth.state}", user_agent=ua, proxy="")
-
-        raise RuntimeError(f"SSO OAuth post-sso flow did not produce code: page_type={state.page_type}")
+    elif state.page_type == "external_url" and state.continue_url:
+        # Some SSO tenants return the external SSO authorize URL immediately
+        # after email submit, without exposing a connections array. In that
+        # case the flow is already past connection selection; follow it.
+        _log(f"SSO OAuth: email submit returned direct external SSO URL, following without connection_id: {str(state.continue_url)[:120]}")
     else:
-        # No SSO connection — fall back to standard email+password flow
         _log("SSO OAuth: no SSO connections detected, falling back to standard OAuth")
-        # This shouldn't happen if user explicitly chose SSO, but handle gracefully
         raise RuntimeError("SSO OAuth: account does not support SSO (no connections in authorize/continue response)")
+
+    # Step 3b: Follow external SSO redirect chain
+    _log("SSO OAuth: following external SSO redirects...")
+    code, state = _follow_sso_chain(session, ua, sec_ch_ua, state, impersonate, _log, sso_invite_code, email, device_id=device_id)
+    if code:
+        return exchange_code(oauth, f"{oauth.redirect_uri}?code={code}&state={oauth.state}", user_agent=ua, proxy="")
+
+    # Step 3c: After SSO redirects, handle interstitial + workspace + consent
+    code, state = _handle_post_sso_flow(session, ua, sec_ch_ua, device_id, state, impersonate, _log)
+    if code:
+        return exchange_code(oauth, f"{oauth.redirect_uri}?code={code}&state={oauth.state}", user_agent=ua, proxy="")
+
+    raise RuntimeError(f"SSO OAuth post-sso flow did not produce code: page_type={state.page_type}")
 
 
 def _authorize_continue(session, device_id: str, ua: str, sec_ch_ua: str, email: str, get_sentinel) -> FlowState:

@@ -168,6 +168,47 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       { key: 'workpool.sso_oauth.account_id', label: '账号 ID (可选)', type: 'number', placeholder: '指定账号ID，RT会存入该账号的token池' },
     ],
   },
+  codex_invitation: {
+    id: 'workpool.codex_invitation',
+    title: 'WorkPool: codex_invitation 配置',
+    description: 'Codex referral 邀请池：输入源账号/邮箱 ID，按同域名随机生成受邀邮箱并发送邀请。',
+    fields: [
+      { key: 'worker_concurrency.codex_invitation', label: 'codex_invitation 并发', type: 'number', placeholder: '默认 2' },
+      { key: 'workpool.codex_invitation.invite_count', label: '默认邀请数量', type: 'number', placeholder: '1' },
+      { key: 'workpool.codex_invitation.prefix_len', label: '随机邮箱前缀长度', type: 'number', placeholder: '20' },
+      { key: 'workpool.codex_invitation.proxy_url', label: '显式代理 URL', placeholder: '留空则不使用；也可任务输入 proxy_url' },
+      { key: 'workpool.codex_invitation.acquire_proxy', label: '无显式代理时从 proxy_pool 领取', type: 'switch' },
+      { key: 'workpool.codex_invitation.check_eligibility', label: '发送前检查邀请额度', type: 'switch' },
+      { key: 'workpool.codex_invitation.dry_run', label: '默认 dry-run', type: 'switch' },
+      { key: 'workpool.codex_invitation.auth_file', label: 'Codex auth.json 路径', placeholder: '默认 ~/.codex/auth.json' },
+      { key: 'workpool.codex_invitation.access_token', label: '母号 access_token 覆盖', type: 'password' },
+      { key: 'workpool.codex_invitation.chatgpt_account_id', label: '母号 chatgpt-account-id 覆盖' },
+    ],
+  },
+  codex_batch_invite: {
+    id: 'workpool.codex_batch_invite',
+    title: 'WorkPool: codex_batch_invite 配置',
+    description: '批量邀请编排：多个母号先全部邀请完成，再统一创建 SSO OAuth + active 子流程。',
+    fields: [
+      { key: 'worker_concurrency.codex_batch_invite', label: 'codex_batch_invite 并发', type: 'number', placeholder: '默认 1' },
+      { key: 'workpool.codex_batch_invite.invite_count_per_inviter', label: '每个母号邀请数量', type: 'number', placeholder: '最多 5' },
+      { key: 'workpool.codex_batch_invite.prefix_len', label: '随机邮箱前缀长度', type: 'number', placeholder: '20' },
+      { key: 'workpool.codex_batch_invite.activate_after_invite', label: '邀请完成后自动创建激活子流程', type: 'switch' },
+      { key: 'workpool.codex_batch_invite.dry_run', label: '默认 dry-run', type: 'switch' },
+    ],
+  },
+  active: {
+    id: 'workpool.active',
+    title: 'WorkPool: active 配置',
+    description: 'Codex 激活池：接在 sso_oauth 后，模拟 Codex Desktop 协议请求完成受邀账号激活。',
+    fields: [
+      { key: 'worker_concurrency.active', label: 'active 并发', type: 'number', placeholder: '默认 3' },
+      { key: 'workpool.active.proxy_url', label: '显式代理 URL', placeholder: '留空复用任务/账号代理' },
+      { key: 'workpool.active.acquire_proxy', label: '无显式代理时从 proxy_pool 领取', type: 'switch' },
+      { key: 'workpool.active.refresh_before_activation', label: '激活前刷新 access_token', type: 'switch' },
+      { key: 'workpool.active.dry_run', label: '默认 dry-run', type: 'switch' },
+    ],
+  },
 }
 
 export const RESOURCEPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {

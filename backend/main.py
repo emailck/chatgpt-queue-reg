@@ -15,6 +15,7 @@ from backend.api.accounts_export import router as accounts_export_router
 from backend.api.access_tokens import router as access_tokens_router
 from backend.api.auth import router as auth_router
 from backend.api.browser_debug import router as browser_debug_router
+from backend.api.codex_invites import router as codex_invites_router
 from backend.api.cards import router as cards_router
 from backend.api.refresh_tokens import router as refresh_tokens_router
 from backend.api.emails import router as emails_router
@@ -79,6 +80,7 @@ app.include_router(sms_router)
 app.include_router(refresh_tokens_router)
 app.include_router(pools_router)
 app.include_router(browser_debug_router)
+app.include_router(codex_invites_router)
 app.include_router(settings_router)
 
 

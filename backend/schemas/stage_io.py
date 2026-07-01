@@ -139,6 +139,88 @@ class OpenAIOAuthOutput(StageOutput):
     sub2api_status: str = ""
 
 
+class CodexInvitationInput(StageInput):
+    email_id: Optional[int] = None
+    email: str = ""
+    inviter_account_id: Optional[int] = None
+    inviter_email: str = ""
+    source_id: Optional[int] = None
+    source_type: str = "auto"
+    invite_count: int = Field(default=1, ge=1, le=200)
+    prefix_len: int = Field(default=20, ge=3, le=64)
+    domain: str = ""
+    emails: list[str] = Field(default_factory=list)
+    access_token: str = ""
+    chatgpt_account_id: str = ""
+    codex_account_id: str = ""
+    dry_run: bool = False
+    check_eligibility: bool = True
+    insecure: bool = False
+    extra_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class CodexInvitationOutput(StageOutput):
+    source_type: str = ""
+    source_id: int = 0
+    source_email: str = ""
+    domain: str = ""
+    emails: list[str] = Field(default_factory=list)
+    invited_email: str = ""
+    sso_email: str = ""
+    invite_count: int = 0
+    remaining_invites: Optional[int] = None
+    sent: bool = False
+    status_code: int = 0
+
+
+class CodexBatchInviteInput(StageInput):
+    inviter_list: str = ""
+    inviter_emails: str = ""
+    inviter_account_ids: str = ""
+    source_type: str = "auto"
+    invite_count_per_inviter: int = Field(default=5, ge=1, le=5)
+    invite_concurrency: int = Field(default=5, ge=1, le=50)
+    prefix_len: int = Field(default=20, ge=3, le=64)
+    dry_run: bool = False
+    activate_after_invite: bool = True
+    check_eligibility: bool = True
+    extra_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class CodexBatchInviteOutput(StageOutput):
+    inviter_count: int = 0
+    invite_count_per_inviter: int = 0
+    invited_count: int = 0
+    invited_emails: list[str] = Field(default_factory=list)
+    activation_pipeline_ids: list[int] = Field(default_factory=list)
+    activation_started: bool = False
+    failed_count: int = 0
+
+
+class ActiveInput(StageInput):
+    email: str = ""
+    sso_email: str = ""
+    refresh_token_id: Optional[int] = None
+    access_token: str = ""
+    refresh_token: str = ""
+    id_token: str = ""
+    chatgpt_account_id: str = ""
+    dry_run: bool = False
+    refresh_before_activation: bool = True
+    insecure: bool = False
+    extra_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ActiveOutput(StageOutput):
+    email: str = ""
+    sso_email: str = ""
+    chatgpt_account_id: str = ""
+    refresh_token_id: Optional[int] = None
+    activated: bool = False
+    success_count: int = 0
+    total_count: int = 0
+
+
 STAGE_INPUT_SCHEMAS = {
     "register": RegisterInput,
     "payment_link": PaymentLinkInput,
@@ -146,6 +228,9 @@ STAGE_INPUT_SCHEMAS = {
     "chatgpt_session": ChatGPTSessionInput,
     "openai_oauth": OpenAIOAuthInput,
     "sso_oauth": OpenAIOAuthInput,
+    "codex_invitation": CodexInvitationInput,
+    "codex_batch_invite": CodexBatchInviteInput,
+    "active": ActiveInput,
     "sub2api_sync": Sub2ApiSyncInput,
 }
 
@@ -156,5 +241,8 @@ STAGE_OUTPUT_SCHEMAS = {
     "chatgpt_session": ChatGPTSessionOutput,
     "openai_oauth": OpenAIOAuthOutput,
     "sso_oauth": OpenAIOAuthOutput,
+    "codex_invitation": CodexInvitationOutput,
+    "codex_batch_invite": CodexBatchInviteOutput,
+    "active": ActiveOutput,
     "sub2api_sync": Sub2ApiSyncOutput,
 }

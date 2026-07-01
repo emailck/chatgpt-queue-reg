@@ -327,7 +327,10 @@ def _account_update_payload(account_doc: dict[str, Any]) -> dict[str, Any]:
 
 def _build_openai_import_payload(account: dict[str, Any], token: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     auth_mode = _auth_mode(account, token)
-    access_token = str(account.get("access_token") or "").strip()
+    # Prefer ChatGPT Web Session AT when present; for SSO/Codex-only accounts
+    # there is no ChatGPTAccount.access_token, so fall back to the OAuth AT
+    # stored on OpenAIRefreshToken. sub2api expects this in credentials.access_token.
+    access_token = str(account.get("access_token") or token.get("oauth_access_token") or "").strip()
     refresh_token = str(token.get("refresh_token") or "").strip()
     id_token = str(account.get("id_token") or token.get("oauth_id_token") or "").strip()
     if not access_token and not refresh_token:
