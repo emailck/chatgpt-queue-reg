@@ -55,6 +55,7 @@ def run(ctx) -> None:
         raise RuntimeError(f"unsupported chatgpt_session mode: {mode}")
 
     force_refresh = _truthy(ctx.input.get("force_refresh"))
+    force_relogin = _truthy(ctx.input.get("force_relogin"))
     refresh_before_seconds = _read_int_setting("workpool.chatgpt_session.refresh_before_seconds", 300, minimum=0, maximum=86400)
     max_attempts = _read_int_setting("workpool.chatgpt_session.max_attempts", 3, minimum=1, maximum=10)
 
@@ -64,26 +65,47 @@ def run(ctx) -> None:
             raise RuntimeError(f"account {account_id} not found")
         snapshot = _account_snapshot(account)
 
-    ctx.log("validating ChatGPT access token", payload={"account_id": account_id, "force_refresh": force_refresh})
+    ctx.log("validating ChatGPT access token", payload={"account_id": account_id, "force_refresh": force_refresh, "force_relogin": force_relogin})
     with Session(engine) as s:
         account = s.get(ChatGPTAccount, account_id)
         if account is None:
             raise RuntimeError(f"account {account_id} not found")
         client = _build_client_from_account(account, ctx)
 
-    if snapshot["access_token"]:
+    workspace_access_token = str(ctx.input.get("workspace_session_access_token") or "").strip()
+    if workspace_access_token:
+        ctx.log("using workspace_join switched access token", payload={"account_id": account_id})
+        valid, me_or_error = _validate_access_token(client, workspace_access_token, ctx, label="workspace_join")
+        if not valid:
+            error = f"workspace_join access token invalid: {me_or_error}"
+            _record_session_failure(account_id, error)
+            ctx.log(f"chatgpt_session failed: {error}", level="error")
+            raise RuntimeError(error)
+        session_data = _session_data_from_access_token(workspace_access_token)
+        identity_state = client.export_identity_state()
+        snapshot = _persist_session_data(account_id, session_data, identity_state, me_or_error if isinstance(me_or_error, dict) else {}, status="workspace_join_token")
+        ctx.update_result(_output_payload(snapshot, session_refresh_status="workspace_join_token", workspace_sessions=ctx.input.get("workspace_sessions")))
+        _maybe_enqueue_sub2api_sync(ctx, account_id, snapshot)
+        ctx.log("chatgpt_session stored workspace_join access token", payload={"account_id": account_id, "plan_type": snapshot.get("plan_type", ""), "chatgpt_account_id": snapshot.get("chatgpt_account_id", "")})
+        return
+
+    if snapshot["access_token"] and not force_refresh and not force_relogin:
         ok, me_or_error = _validate_access_token(client, snapshot["access_token"], ctx, label="cached")
         if ok:
             snapshot = _record_session_valid(account_id, me_or_error if isinstance(me_or_error, dict) else {}, "current")
-            ctx.update_result(_output_payload(snapshot, session_refresh_status="current"))
+            ctx.update_result(_output_payload(snapshot, session_refresh_status="current", workspace_sessions=ctx.input.get("workspace_sessions")))
             _maybe_enqueue_sub2api_sync(ctx, account_id, snapshot)
             ctx.log("chatgpt_session current", payload={"account_id": account_id, "expires_at": _iso(snapshot["session_expires_at"])})
             return
         ctx.log("cached ChatGPT access token invalid", level="warning", payload={"account_id": account_id, "error": str(me_or_error or "")[:240]})
 
     old_access_token = snapshot.get("access_token", "")
-    ctx.log("refreshing ChatGPT web session from cached cookies", payload={"account_id": account_id, "force_refresh": force_refresh})
-    ok, session_or_error = client.fetch_chatgpt_session(max_attempts=max_attempts, retry_delay=1.2)
+    if force_relogin:
+        ctx.log("force_relogin enabled; skip cached cookie session refresh", payload={"account_id": account_id})
+        ok, session_or_error = False, "force_relogin"
+    else:
+        ctx.log("refreshing ChatGPT web session from cached cookies", payload={"account_id": account_id, "force_refresh": force_refresh})
+        ok, session_or_error = client.fetch_chatgpt_session(max_attempts=max_attempts, retry_delay=1.2)
     if ok:
         session_data = session_or_error if isinstance(session_or_error, dict) else {}
         new_access_token = str(session_data.get("accessToken") or "").strip()
@@ -94,7 +116,7 @@ def run(ctx) -> None:
             if valid:
                 identity_state = client.export_identity_state()
                 snapshot = _persist_session_data(account_id, session_data, identity_state, me_or_error if isinstance(me_or_error, dict) else {}, status="refreshed_from_session")
-                ctx.update_result(_output_payload(snapshot, session_refresh_status="refreshed_from_session"))
+                ctx.update_result(_output_payload(snapshot, session_refresh_status="refreshed_from_session", workspace_sessions=ctx.input.get("workspace_sessions")))
                 _maybe_enqueue_sub2api_sync(ctx, account_id, snapshot)
                 ctx.log("chatgpt_session refreshed from cached cookies", payload={"account_id": account_id, "expires_at": _iso(snapshot["session_expires_at"])})
                 return
@@ -135,7 +157,7 @@ def run(ctx) -> None:
 
     identity_state = client.export_identity_state()
     snapshot = _persist_session_data(account_id, session_data, identity_state, me_or_error if isinstance(me_or_error, dict) else {}, status="relogin_refreshed")
-    ctx.update_result(_output_payload(snapshot, session_refresh_status="relogin_refreshed"))
+    ctx.update_result(_output_payload(snapshot, session_refresh_status="relogin_refreshed", workspace_sessions=ctx.input.get("workspace_sessions")))
     _maybe_enqueue_sub2api_sync(ctx, account_id, snapshot)
     ctx.log("chatgpt_session relogin refreshed", payload={"account_id": account_id, "changed": changed, "expires_at": _iso(snapshot["session_expires_at"])})
 
@@ -190,9 +212,10 @@ def _account_snapshot(account: ChatGPTAccount) -> dict[str, Any]:
     }
 
 
-def _output_payload(snapshot: dict[str, Any], *, session_refresh_status: str) -> dict[str, Any]:
+def _output_payload(snapshot: dict[str, Any], *, session_refresh_status: str, workspace_sessions: Any = None) -> dict[str, Any]:
     return {
         "account_id": snapshot["account_id"],
+        "workspace_sessions": workspace_sessions if isinstance(workspace_sessions, list) else [],
         "chatgpt_account_id": snapshot.get("chatgpt_account_id", ""),
         "chatgpt_user_id": snapshot.get("chatgpt_user_id", ""),
         "access_token": snapshot.get("access_token", ""),
@@ -370,6 +393,27 @@ def _mark_account_session_usable(row: ChatGPTAccount) -> None:
         return
     if row.status in {"", ACCOUNT_STATUS_FAILED}:
         row.status = ACCOUNT_STATUS_REGISTERED
+
+
+def _session_data_from_access_token(access_token: str) -> dict[str, Any]:
+    payload = decode_jwt_payload(access_token)
+    auth = payload.get("https://api.openai.com/auth") if isinstance(payload.get("https://api.openai.com/auth"), dict) else {}
+    profile = payload.get("https://api.openai.com/profile") if isinstance(payload.get("https://api.openai.com/profile"), dict) else {}
+    exp = int(payload.get("exp") or 0)
+    expires = datetime.fromtimestamp(exp, tz=timezone.utc).isoformat() if exp else ""
+    return {
+        "accessToken": access_token,
+        "expires": expires,
+        "authProvider": "openai",
+        "user": {
+            "id": auth.get("chatgpt_user_id") or auth.get("user_id") or "",
+            "email": profile.get("email") or "",
+        },
+        "account": {
+            "id": auth.get("chatgpt_account_id") or "",
+            "planType": auth.get("chatgpt_plan_type") or "",
+        },
+    }
 
 
 def _validate_access_token(client: Any, access_token: str, ctx: Any, *, label: str) -> tuple[bool, dict[str, Any] | str]:

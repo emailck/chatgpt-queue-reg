@@ -58,7 +58,6 @@ def list_email_accounts(limit: int = Query(500, ge=1, le=1000)):
         rows = list(
             s.exec(
                 sa_select(EmailAccount)
-                .where(EmailAccount.provider == "microsoft")
                 .order_by(EmailAccount.id.desc())
                 .limit(limit)
             ).scalars()
@@ -107,7 +106,6 @@ def read_email(body: ReadRequest):
         row = (
             s.exec(
                 sa_select(EmailAccount)
-                .where(EmailAccount.provider == "microsoft")
                 .where(EmailAccount.email == email)
             ).scalars().first()
         )
@@ -115,29 +113,59 @@ def read_email(body: ReadRequest):
         raise HTTPException(status_code=404, detail=f"邮箱不在 Microsoft 池中: {email}")
 
     meta = json_loads(row.metadata_json, fallback={}) or {}
-    client_id = str(meta.get("client_id") or "")
-    refresh_token = row.refresh_token
-    if not client_id or not refresh_token:
-        raise HTTPException(status_code=409, detail=f"邮箱缺少 OAuth client_id/refresh_token: {email}")
-
     since_dt = datetime.now(timezone.utc) - timedelta(seconds=OTP_REQUEST_GRACE_SECONDS)
-    data = wait_for_otp(
-        mailbox=MicrosoftMailbox(),
-        client_id=client_id,
-        refresh_token=refresh_token,
-        keyword=body.keyword,
-        code_pattern=body.code_regex,
-        timeout=int(body.timeout_seconds or 120),
-        poll_interval=5,
-        since_iso=since_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    )
+    if str(row.provider or "") == "netease_163":
+        from backend.integrations.mail.imap163 import wait_for_163_otp
+        data = wait_for_163_otp(
+            row,
+            keyword=body.keyword,
+            code_pattern=body.code_regex,
+            timeout=int(body.timeout_seconds or 120),
+            poll_interval=5,
+            since_dt=since_dt,
+        )
+    elif str(row.provider or "") == "gmail_imap":
+        from backend.integrations.mail.gmail import wait_for_gmail_otp
+        data = wait_for_gmail_otp(
+            row,
+            keyword=body.keyword,
+            code_pattern=body.code_regex,
+            timeout=int(body.timeout_seconds or 120),
+            poll_interval=5,
+            since_dt=since_dt,
+        )
+    elif str(row.provider or "") == "tinkmail":
+        from backend.integrations.mail.tinkmail import wait_for_tinkmail_otp
+        data = wait_for_tinkmail_otp(
+            row,
+            keyword=body.keyword,
+            code_pattern=body.code_regex,
+            timeout=int(body.timeout_seconds or 120),
+            poll_interval=5,
+            since_dt=since_dt,
+        )
+    else:
+        client_id = str(meta.get("client_id") or "")
+        refresh_token = row.refresh_token
+        if not client_id or not refresh_token:
+            raise HTTPException(status_code=409, detail=f"邮箱缺少 OAuth client_id/refresh_token: {email}")
+        data = wait_for_otp(
+            mailbox=MicrosoftMailbox(),
+            client_id=client_id,
+            refresh_token=refresh_token,
+            keyword=body.keyword,
+            code_pattern=body.code_regex,
+            timeout=int(body.timeout_seconds or 120),
+            poll_interval=5,
+            since_iso=since_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
 
     with session_scope() as s:
         s.add(EmailMessage(
             account_id=row.id,
             job_id=None,
             email=row.email,
-            provider="microsoft",
+            provider=row.provider,
             subject=str(data.get("subject") or ""),
             sender=str(data.get("sender") or ""),
             body_text=str(data.get("body_text") or ""),
@@ -193,7 +221,6 @@ def _get_microsoft_email_account(email: str) -> EmailAccount:
         row = (
             s.exec(
                 sa_select(EmailAccount)
-                .where(EmailAccount.provider == "microsoft")
                 .where(EmailAccount.email == value)
             ).scalars().first()
         )
@@ -203,6 +230,18 @@ def _get_microsoft_email_account(email: str) -> EmailAccount:
 
 
 def _fetch_live_email_history(row: EmailAccount, *, limit: int) -> list[dict[str, Any]] | None:
+    if str(row.provider or "") == "netease_163":
+        try:
+            from backend.integrations.mail.imap163 import list_163_messages
+            return list_163_messages(row, limit=limit)
+        except Exception:
+            return None
+    if str(row.provider or "") == "gmail_imap":
+        try:
+            from backend.integrations.mail.gmail import list_gmail_messages
+            return list_gmail_messages(row, limit=limit)
+        except Exception:
+            return None
     meta = json_loads(row.metadata_json, fallback={}) or {}
     client_id = str(meta.get("client_id") or "")
     refresh_token = row.refresh_token

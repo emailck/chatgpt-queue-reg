@@ -75,6 +75,23 @@ function sortJobs(jobs: Job[]): Job[] {
   return [...jobs].sort((a, b) => latestJobTime(b) - latestJobTime(a))
 }
 
+function mergeJobs(...groups: Job[][]): Job[] {
+  const seen = new Set<number>()
+  const out: Job[] = []
+  for (const group of groups) {
+    for (const job of group) {
+      if (seen.has(job.id)) continue
+      seen.add(job.id)
+      out.push(job)
+    }
+  }
+  return sortJobs(out)
+}
+
+function latestRowTime(row: JobTrackerRow): number {
+  return Math.max(latestTime(row.pipeline), row.latestJob ? latestJobTime(row.latestJob) : 0)
+}
+
 function pickCurrentJob(pipeline: Pipeline, jobs: Job[]) {
   const sorted = sortJobs(jobs)
   return (
@@ -138,8 +155,8 @@ function buildRows(pipelines: Pipeline[], jobs: Job[], accounts: AccountSummary[
     const account = accountsById.get(accountId)
     const pipelineJobs = sortedPipelines.flatMap((item) => jobsByPipeline.get(item.id) || [])
     const accountJobs = jobsByAccount.get(accountId) || []
-    const rowJobs = pipelineJobs.length ? pipelineJobs : accountJobs
-    const currentJob = pickCurrentJob(pipeline, jobsByPipeline.get(pipeline.id) || rowJobs)
+    const rowJobs = mergeJobs(pipelineJobs, accountJobs)
+    const currentJob = pickCurrentJob(pipeline, mergeJobs(jobsByPipeline.get(pipeline.id) || [], accountJobs))
     rows.push({
       key: `account-${accountId}`,
       accountId,
@@ -147,9 +164,9 @@ function buildRows(pipelines: Pipeline[], jobs: Job[], accounts: AccountSummary[
       account,
       pipeline,
       pipelines: sortedPipelines,
-      jobs: sortJobs(rowJobs),
+      jobs: rowJobs,
       currentJob,
-      latestJob: sortJobs(rowJobs)[0],
+      latestJob: rowJobs[0],
       isPendingAccount: false,
     })
   }
@@ -170,7 +187,7 @@ function buildRows(pipelines: Pipeline[], jobs: Job[], accounts: AccountSummary[
     })
   }
 
-  return rows.sort((a, b) => latestTime(b.pipeline) - latestTime(a.pipeline))
+  return rows.sort((a, b) => latestRowTime(b) - latestRowTime(a))
 }
 
 function stageOptionsFromRows(rows: JobTrackerRow[]) {
@@ -287,16 +304,19 @@ export default function Jobs() {
     setDetailLoading(true)
     try {
       const data = await apiFetch<PipelineDetail>(`/pipelines/${pipelineId}`)
-      const detailJobs = data.jobs || []
+      const accountStandaloneJobs = data.pipeline.account_id !== null
+        ? jobs.filter((job) => job.pipeline_id === null && job.account_id === data.pipeline.account_id)
+        : []
+      const detailJobs = mergeJobs(data.jobs || [], accountStandaloneJobs)
       const defaultJob = pickCurrentJob(data.pipeline, detailJobs)
-      setDetail(data)
+      setDetail({ ...data, jobs: detailJobs })
       setSelectedLogJobId(defaultJob?.id || null)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载详情失败')
     } finally {
       setDetailLoading(false)
     }
-  }, [])
+  }, [jobs])
 
   const closeDetail = () => {
     setDetail(null)
@@ -369,6 +389,7 @@ export default function Jobs() {
           <Space size={4} wrap>
             <Tag>{row.pipeline.preset || 'pipeline'}</Tag>
             {row.pipelines.length > 1 && <Tag color="blue">{row.pipelines.length} pipelines</Tag>}
+            {row.jobs.some((job) => job.pipeline_id === null) && <Tag color="geekblue">独立 jobs {row.jobs.filter((job) => job.pipeline_id === null).length}</Tag>}
           </Space>
         </Space>
       ),
@@ -477,6 +498,8 @@ export default function Jobs() {
     }))
   }, [detailPipeline, jobsByStage])
 
+  const detailStandaloneJobs = useMemo(() => detailJobs.filter((job) => job.pipeline_id === null), [detailJobs])
+
   const stageColumns: TableColumnsType<StageBreakdownRow> = [
     {
       title: '模块 / Stage',
@@ -582,6 +605,57 @@ export default function Jobs() {
     },
   ]
 
+
+  const standaloneJobColumns: TableColumnsType<Job> = [
+    {
+      title: 'Job',
+      key: 'job',
+      width: 100,
+      render: (_, job) => <Tag color="geekblue">#{job.id}</Tag>,
+    },
+    {
+      title: '类型',
+      key: 'type',
+      width: 180,
+      render: (_, job) => <Text code>{stageLabel(job.type)}</Text>,
+    },
+    {
+      title: '状态',
+      key: 'status',
+      width: 120,
+      render: (_, job) => <StatusTag status={job.status} />,
+    },
+    {
+      title: '耗时',
+      key: 'duration',
+      width: 120,
+      render: (_, job) => formatDuration(job.started_at, job.finished_at),
+    },
+    {
+      title: '创建 / 完成',
+      key: 'time',
+      width: 230,
+      render: (_, job) => (
+        <Space direction="vertical" size={2}>
+          <Text>{formatDateTime(job.created_at)}</Text>
+          <Text type="secondary">{formatDateTime(job.finished_at)}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: '错误',
+      key: 'error',
+      ellipsis: true,
+      render: (_, job) => job.error ? <Tooltip title={job.error}><Text type="danger" ellipsis>{job.error}</Text></Tooltip> : <Text type="secondary">-</Text>,
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 90,
+      render: (_, job) => <Button size="small" onClick={() => setSelectedLogJobId(job.id)}>日志</Button>,
+    },
+  ]
+
   return (
     <PageScaffold
       title="Jobs 追踪"
@@ -658,7 +732,13 @@ export default function Jobs() {
             </KeyValueGrid>
             <ErrorCallout error={detailPipeline.error} />
             <Table rowKey="key" size="small" columns={stageColumns} dataSource={stageRows} pagination={false} scroll={{ x: 1200 }} />
-            <ActionCard title={selectedLogJobId ? `Job #${selectedLogJobId} 原始日志` : '原始日志'} description="选择上方模块行的 job 查看对应 transcript。" />
+            {detailStandaloneJobs.length > 0 && (
+              <>
+                <ActionCard title={`账号级独立 Jobs (${detailStandaloneJobs.length})`} description="显示 pipeline 外、但属于当前账号的独立任务，例如 codex_token / openai_oauth / sub2api_sync。" />
+                <Table rowKey="id" size="small" columns={standaloneJobColumns} dataSource={detailStandaloneJobs} pagination={false} scroll={{ x: 1200 }} />
+              </>
+            )}
+            <ActionCard title={selectedLogJobId ? `Job #${selectedLogJobId} 原始日志` : '原始日志'} description="选择上方模块行或账号级独立 job 查看对应 transcript。" />
             {selectedLogJobId ? (
               <JobLogPanel jobId={selectedLogJobId} onTerminal={() => { reload(); openDetail(detailPipeline.id) }} />
             ) : (

@@ -19,6 +19,7 @@ The `enabled` boolean stays the source of truth for "claimable now":
 from __future__ import annotations
 
 import threading
+import time
 from typing import Iterable
 
 from sqlalchemy import select as sa_select
@@ -62,34 +63,92 @@ def get_pool_status(row: EmailAccount) -> str:
                (POOL_STATUS_AVAILABLE if row.enabled else POOL_STATUS_CONSUMED))
 
 
-def claim(*, fixed_email: str | None = None) -> EmailAccount | None:
+def claim(*, fixed_email: str | None = None, provider: str = "microsoft", wait_seconds: float = 0, poll_interval: float = 5.0) -> EmailAccount | None:
     """Atomically pick an available mailbox and flip it to `claimed`.
 
     Returns None when the pool is empty.  When `fixed_email` is given, only
     that exact address is considered.
     """
-    with _pop_lock:
-        with session_scope() as s:
-            stmt = (
-                sa_select(EmailAccount)
-                .where(EmailAccount.provider == "microsoft")
-                .where(EmailAccount.enabled == True)  # noqa: E712
-                .order_by(EmailAccount.id)
-            )
-            if fixed_email:
-                stmt = stmt.where(EmailAccount.email == str(fixed_email).strip())
-            row = s.exec(stmt).scalars().first()
-            if row is None:
-                return None
+    deadline = time.time() + max(0.0, float(wait_seconds or 0))
+    while True:
+        with _pop_lock:
+            row, blocked_by_same_mailbox = _claim_once(fixed_email=fixed_email, provider=provider)
+            if row is not None:
+                return row
+        if not blocked_by_same_mailbox or time.time() >= deadline:
+            return None
+        time.sleep(max(0.5, float(poll_interval or 5.0)))
+
+
+def _claim_once(*, fixed_email: str | None = None, provider: str = "microsoft") -> tuple[EmailAccount | None, bool]:
+    blocked_by_same_mailbox = False
+    with session_scope() as s:
+        stmt = (
+            sa_select(EmailAccount)
+            .where(EmailAccount.enabled == True)  # noqa: E712
+            .order_by(EmailAccount.id)
+        )
+        provider_value = str(provider or "microsoft").strip()
+        if provider_value and provider_value not in {"*", "all", "any"}:
+            stmt = stmt.where(EmailAccount.provider == provider_value)
+        if fixed_email:
+            stmt = stmt.where(EmailAccount.email == str(fixed_email).strip())
+        rows = list(s.exec(stmt).scalars().all())
+        if not rows:
+            return None, False
+        busy_keys = _claimed_mailbox_keys(s)
+        for row in rows:
+            key = _mailbox_key(row)
+            if key and key in busy_keys:
+                blocked_by_same_mailbox = True
+                continue
             row.enabled = False
             _set_pool_status(row, POOL_STATUS_CLAIMED)
             row.updated_at = utcnow()
             s.add(row)
             s.commit()
             s.refresh(row)
-            # Detach so callers don't accidentally re-bind to a closed session.
             s.expunge(row)
-            return row
+            return row, False
+    return None, blocked_by_same_mailbox
+
+
+def _claimed_mailbox_keys(s: Session) -> set[str]:
+    keys: set[str] = set()
+    rows = list(s.exec(sa_select(EmailAccount).where(EmailAccount.enabled == False)).scalars().all())  # noqa: E712
+    for row in rows:
+        if get_pool_status(row) != POOL_STATUS_CLAIMED:
+            continue
+        key = _mailbox_key(row)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _mailbox_key(row: EmailAccount) -> str:
+    provider = str(row.provider or "").strip().lower()
+    meta = _get_meta(row)
+    account_type = str(meta.get("account_type") or "").strip().lower()
+    email = str(row.email or "").strip().lower()
+    if account_type == "mailapi_url" or str(meta.get("mailapi_url") or "").strip():
+        mailapi_url = str(meta.get("mailapi_url") or row.api_base or "").strip()
+        if mailapi_url:
+            return "mailapi:" + mailapi_url
+    if provider == "gmail_imap" or account_type == "gmail_imap" or email.endswith("@gmail.com") or email.endswith("@googlemail.com"):
+        login_email = str(meta.get("imap_login_email") or "").strip().lower()
+        return "gmail:" + (login_email or _canonical_gmail_address(email))
+    return ""
+
+
+def _canonical_gmail_address(email: str) -> str:
+    value = str(email or "").strip().lower()
+    if "@" not in value:
+        return value
+    local, domain = value.split("@", 1)
+    if domain not in {"gmail.com", "googlemail.com"}:
+        return value
+    local = local.split("+", 1)[0].replace(".", "")
+    return f"{local}@gmail.com"
 
 
 def requeue(*, email: str) -> bool:
@@ -100,7 +159,6 @@ def requeue(*, email: str) -> bool:
     with session_scope() as s:
         row = s.exec(
             sa_select(EmailAccount)
-            .where(EmailAccount.provider == "microsoft")
             .where(EmailAccount.email == target)
         ).scalars().first()
         if row is None:
@@ -119,7 +177,6 @@ def mark_consumed(*, email: str, note: str = "registered") -> bool:
     with session_scope() as s:
         row = s.exec(
             sa_select(EmailAccount)
-            .where(EmailAccount.provider == "microsoft")
             .where(EmailAccount.email == target)
         ).scalars().first()
         if row is None:
@@ -138,7 +195,6 @@ def blacklist(*, email: str, note: str = "") -> bool:
     with session_scope() as s:
         row = s.exec(
             sa_select(EmailAccount)
-            .where(EmailAccount.provider == "microsoft")
             .where(EmailAccount.email == target)
         ).scalars().first()
         if row is None:
@@ -156,7 +212,7 @@ def stats() -> dict[str, int]:
     with Session(engine) as s:
         rows = list(
             s.exec(
-                sa_select(EmailAccount).where(EmailAccount.provider == "microsoft")
+                sa_select(EmailAccount)
             ).scalars()
         )
     for row in rows:
@@ -176,7 +232,6 @@ def batch_delete(emails: Iterable[str]) -> dict[str, list[str] | int]:
         for email in wanted:
             row = s.exec(
                 sa_select(EmailAccount)
-                .where(EmailAccount.provider == "microsoft")
                 .where(EmailAccount.email == email)
             ).scalars().first()
             if row is None:

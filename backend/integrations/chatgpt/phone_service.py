@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -82,33 +84,112 @@ class SmsBowerProvider(PhoneProvider):
         self.base_url = str(config.get("smsbower_base_url") or "https://smsbower.page/stubs/handler_api.php").strip()
         self.service = str(config.get("smsbower_service") or "dr").strip()
         self.country = str(config.get("smsbower_country") or "0").strip()
+        self.countries = _split_csv(config.get("smsbower_countries") or config.get("smsbower_country_list") or self.country)
+        if not self.countries:
+            self.countries = [self.country or "0"]
         self.operator = str(config.get("smsbower_operator") or "").strip()
         self.max_price = _read_float(config, "smsbower_max_price", default=0.0)
         self.min_price = _read_float(config, "smsbower_min_price", default=0.0)
+        self.price_action = str(config.get("smsbower_price_action") or "getPricesV2").strip() or "getPricesV2"
+        self.prefer_expensive_after_attempts = _read_int(
+            config,
+            "smsbower_prefer_expensive_after_attempts",
+            fallback_keys=("phone_verification_prefer_expensive_after_attempts",),
+            default=3,
+            minimum=0,
+            maximum=20,
+        )
+        self._acquire_attempt = 0
 
     def acquire_phone(self) -> PhoneLease:
-        params: dict[str, Any] = {"service": self.service, "country": self.country}
-        if self.operator:
-            params["operator"] = self.operator
-        if self.max_price > 0:
-            params["maxPrice"] = self.max_price
-        if self.min_price > 0:
-            params["minPrice"] = self.min_price
-        ok, text, data = self._request("getNumberV2", params=params, timeout=30)
+        self._acquire_attempt += 1
+        prefer_expensive = bool(
+            self.prefer_expensive_after_attempts
+            and self._acquire_attempt > self.prefer_expensive_after_attempts
+        )
+        countries = list(dict.fromkeys([c for c in self.countries if c]))
+        random.shuffle(countries)
+        last_error = ""
+        for country in countries:
+            viable_prices = self._viable_prices(country)
+            selected_min_price = 0.0
+            if viable_prices is not None and not viable_prices:
+                last_error = f"国家 {country} 无 <= {self.max_price or '不限'} 的 {self.service} 价格/库存"
+                self._log(last_error)
+                continue
+            if viable_prices:
+                shown_prices = viable_prices if not prefer_expensive else sorted(viable_prices, key=lambda item: (-item[0], -item[1]))
+                shown = ", ".join(f"{price:g}({count})" for price, count in shown_prices[:6])
+                self._log(f"国家 {country} 可用价格: {shown}" + ("，优先高价档" if prefer_expensive else ""))
+                if prefer_expensive:
+                    selected_min_price = shown_prices[0][0]
+
+            params: dict[str, Any] = {"service": self.service, "country": country}
+            if self.operator:
+                params["operator"] = self.operator
+            if self.max_price > 0:
+                params["maxPrice"] = self.max_price
+            effective_min_price = max(self.min_price, selected_min_price)
+            if effective_min_price > 0:
+                params["minPrice"] = round(effective_min_price, 6)
+            ok, text, data = self._request("getNumberV2", params=params, timeout=30)
+            lease = self._parse_number_response(ok, text, data, country)
+            if lease is not None:
+                return lease
+            last_error = text or str(data) or "SmsBower 取号失败"
+            self._log(f"国家 {country} 取号失败: {last_error}")
+        raise RuntimeError(last_error or "SmsBower 取号失败")
+
+    def _viable_prices(self, country: str) -> list[tuple[float, int]] | None:
+        if not self.price_action:
+            return None
+        ok, text, data = self._request(self.price_action, params={"service": self.service, "country": country}, timeout=30)
+        if not ok:
+            self._log(f"价格查询失败 action={self.price_action} country={country}: {text}")
+            return None
+        service_prices = None
+        if isinstance(data, dict):
+            country_node = data.get(str(country))
+            if country_node is None and str(country).isdigit():
+                country_node = data.get(int(country))
+            if isinstance(country_node, dict):
+                service_prices = country_node.get(self.service)
+        if not isinstance(service_prices, dict):
+            return []
+        out: list[tuple[float, int]] = []
+        for price_raw, count_raw in service_prices.items():
+            try:
+                price = float(price_raw)
+                count = int(count_raw)
+            except Exception:
+                continue
+            if count <= 0:
+                continue
+            if self.min_price > 0 and price < self.min_price:
+                continue
+            if self.max_price > 0 and price > self.max_price:
+                continue
+            out.append((price, count))
+        out.sort(key=lambda item: (item[0], -item[1]))
+        return out
+
+    def _parse_number_response(self, ok: bool, text: str, data: Any, country: str) -> PhoneLease | None:
         if ok and isinstance(data, dict):
             activation_id = str(data.get("activationId") or "").strip()
             phone = _normalize_phone(str(data.get("phoneNumber") or ""))
             if activation_id and phone:
-                self._log(f"取号成功: {phone} id={activation_id} cost={data.get('activationCost') or '-'}")
-                return PhoneLease(self.provider_name, activation_id, phone, data)
+                meta = dict(data)
+                meta.setdefault("country", country)
+                self._log(f"取号成功: {phone} id={activation_id} country={country} cost={data.get('activationCost') or '-'}")
+                return PhoneLease(self.provider_name, activation_id, phone, meta)
         if ok and text.upper().startswith("ACCESS_NUMBER:"):
             parts = text.split(":", 2)
             if len(parts) >= 3:
                 activation_id = parts[1].strip()
                 phone = _normalize_phone(parts[2])
-                self._log(f"取号成功: {phone} id={activation_id}")
-                return PhoneLease(self.provider_name, activation_id, phone, {"raw": text})
-        raise RuntimeError(text or str(data) or "SmsBower 取号失败")
+                self._log(f"取号成功: {phone} id={activation_id} country={country}")
+                return PhoneLease(self.provider_name, activation_id, phone, {"raw": text, "country": country})
+        return None
 
     def prepare_for_sms(self, lease: PhoneLease) -> None:
         self._request("setStatus", params={"id": lease.activation_id, "status": 1}, timeout=20)
@@ -390,6 +471,13 @@ def _read_float(values: dict[str, Any], key: str, *, default: float) -> float:
         return float(values.get(key))
     except Exception:
         return float(default)
+
+
+def _split_csv(value: Any) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    return [part.strip() for part in re.split(r"[\s,;|]+", raw) if part.strip()]
 
 
 def _normalize_phone(value: str) -> str:

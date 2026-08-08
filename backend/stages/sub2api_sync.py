@@ -7,7 +7,7 @@ only their ChatGPT access token material.
 from __future__ import annotations
 
 import hashlib
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select as sa_select
@@ -77,13 +77,22 @@ def run(ctx) -> None:
 
     try:
         if mode in {"", "auto", "openai", "session", "web_session"}:
-            payload, auth_mode, credential_fingerprint = _build_openai_import_payload(account_snapshot, token_snapshot)
-            sync_result = _sync_openai_account(
-                payload,
-                auth_mode=auth_mode,
-                credential_fingerprint=credential_fingerprint,
-                reset_remote_status=_truthy(ctx.input.get("reset_remote_status")),
-            )
+            workspace_sessions = _normalize_workspace_sessions(ctx.input.get("workspace_sessions"))
+            if workspace_sessions:
+                sync_result = _sync_workspace_sessions(
+                    account_snapshot,
+                    workspace_sessions,
+                    reset_remote_status=_truthy(ctx.input.get("reset_remote_status")),
+                    force_new=True if len(workspace_sessions) > 1 else _truthy(ctx.input.get("force_new") or ctx.input.get("upload_multiple")),
+                )
+            else:
+                payload, auth_mode, credential_fingerprint = _build_openai_import_payload(account_snapshot, token_snapshot)
+                sync_result = _sync_openai_account(
+                    payload,
+                    auth_mode=auth_mode,
+                    credential_fingerprint=credential_fingerprint,
+                    reset_remote_status=_truthy(ctx.input.get("reset_remote_status")),
+                )
         else:
             raise RuntimeError(f"unsupported sub2api_sync mode: {mode}")
     except Sub2ApiNotConfigured as exc:
@@ -96,7 +105,7 @@ def run(ctx) -> None:
         ctx.log(f"sub2api sync failed: {exc}", level="error")
         raise
 
-    ctx.update_result(_result_payload(
+    result_payload = _result_payload(
         account_id,
         refresh_token_id,
         status=sync_result.get("status", ""),
@@ -104,7 +113,11 @@ def run(ctx) -> None:
         auth_mode=sync_result.get("auth_mode", ""),
         schedulable=sync_result.get("schedulable", True),
         relogin_required=sync_result.get("relogin_required", False),
-    ))
+    )
+    if sync_result.get("workspace_upload_count") is not None:
+        result_payload["workspace_upload_count"] = sync_result.get("workspace_upload_count", 0)
+        result_payload["workspace_results"] = sync_result.get("workspace_results", [])
+    ctx.update_result(result_payload)
     ctx.log(
         "sub2api sync ok",
         payload={
@@ -116,6 +129,91 @@ def run(ctx) -> None:
     )
 
 
+
+
+def _normalize_workspace_sessions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        token = str(item.get("access_token") or item.get("workspace_session_access_token") or "").strip()
+        workspace_id = str(item.get("workspace_id") or item.get("switched_workspace_id") or "").strip()
+        if not token or not workspace_id or token in seen:
+            continue
+        seen.add(token)
+        out.append({
+            "workspace_id": workspace_id,
+            "access_token": token,
+            "plan_type": str(item.get("plan_type") or item.get("workspace_session_plan_type") or ""),
+            "email": str(item.get("email") or ""),
+            "account_id": str(item.get("account_id") or item.get("chatgpt_account_id") or ""),
+            "token_type": str(item.get("token_type") or item.get("type") or ""),
+            "websockets": bool(item.get("websockets", False)),
+            "credential_id": item.get("credential_id"),
+            "credential_name": item.get("credential_name"),
+            "expires_at": item.get("expires_at"),
+            "expires_at_unix": item.get("expires_at_unix"),
+            "last_refresh": item.get("last_refresh"),
+        })
+    return out
+
+
+def _sync_workspace_sessions(
+    base_account: dict[str, Any],
+    workspace_sessions: list[dict[str, Any]],
+    *,
+    reset_remote_status: bool = False,
+    force_new: bool = False,
+) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    ok_count = 0
+    last: dict[str, Any] = {}
+    for item in workspace_sessions:
+        account = dict(base_account)
+        token = str(item.get("access_token") or "")
+        workspace_id = str(item.get("workspace_id") or "")
+        account["access_token"] = token
+        account["chatgpt_account_id"] = str(item.get("account_id") or workspace_id)
+        account["workspace_id"] = workspace_id
+        if item.get("email"):
+            account["email"] = str(item.get("email") or "")
+        for key in ("token_type", "websockets", "credential_id", "credential_name", "expires_at", "expires_at_unix", "last_refresh"):
+            if item.get(key) not in (None, ""):
+                account[key] = item.get(key)
+        plan_type = str(item.get("plan_type") or "")
+        if plan_type:
+            account["plan_type"] = plan_type
+        payload, auth_mode, credential_fingerprint = _build_openai_import_payload(account, {})
+        if force_new:
+            payload["force_new"] = True
+        sync_result = _sync_openai_account(
+            payload,
+            auth_mode=auth_mode,
+            credential_fingerprint=credential_fingerprint,
+            reset_remote_status=reset_remote_status,
+            force_new=force_new,
+        )
+        last = sync_result
+        ok_count += 1
+        results.append({
+            "workspace_id": workspace_id,
+            "sub2api_account_id": sync_result.get("sub2api_account_id", ""),
+            "status": sync_result.get("status", ""),
+            "auth_mode": sync_result.get("auth_mode", ""),
+        })
+    return {
+        "sub2api_account_id": str(last.get("sub2api_account_id") or ""),
+        "status": str(last.get("status") or "synced"),
+        "auth_mode": str(last.get("auth_mode") or "access_token_only"),
+        "schedulable": bool(last.get("schedulable", True)),
+        "relogin_required": bool(last.get("relogin_required", False)),
+        "workspace_upload_count": ok_count,
+        "workspace_results": results,
+    }
+
 # ---- sync paths ------------------------------------------------------------
 
 
@@ -125,12 +223,13 @@ def _sync_openai_account(
     auth_mode: str,
     credential_fingerprint: str,
     reset_remote_status: bool = False,
+    force_new: bool = False,
 ) -> dict[str, Any]:
     client = get_sub2api_client()
     account_doc = _first_payload_account(payload)
     account_id = int(payload.get("queue_account_id") or 0)
     refresh_token_id = int(payload.get("queue_refresh_token_id") or 0)
-    existing = _find_existing_openai_account(client, account_doc, account_id=account_id)
+    existing = None if force_new else _find_existing_openai_account(client, account_doc, account_id=account_id)
     action = "updated" if existing else "imported"
 
     if existing:
@@ -140,7 +239,11 @@ def _sync_openai_account(
         sync_resp = client.update_openai_account(sub2api_account_id, _account_update_payload(account_doc))
     else:
         sync_resp = client.import_account_data(_sub2api_data_payload(payload))
-        existing = _find_existing_openai_account(client, account_doc, account_id=account_id)
+        # Import endpoint may return only a generic success payload. Even when
+        # force_new is enabled to avoid updating an existing binding, search
+        # after import so we can resolve the newly created remote id. Use
+        # account_id=0 for force_new to avoid the local binding shortcut.
+        existing = _find_existing_openai_account(client, account_doc, account_id=0 if force_new else account_id)
         sub2api_account_id = _extract_sub2api_account_id(existing or sync_resp)
         if not sub2api_account_id:
             raise RuntimeError("sub2api import completed but account id could not be resolved")
@@ -327,12 +430,17 @@ def _account_update_payload(account_doc: dict[str, Any]) -> dict[str, Any]:
 
 def _build_openai_import_payload(account: dict[str, Any], token: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     auth_mode = _auth_mode(account, token)
-    # Prefer ChatGPT Web Session AT when present; for SSO/Codex-only accounts
-    # there is no ChatGPTAccount.access_token, so fall back to the OAuth AT
-    # stored on OpenAIRefreshToken. sub2api expects this in credentials.access_token.
-    access_token = str(account.get("access_token") or token.get("oauth_access_token") or "").strip()
     refresh_token = str(token.get("refresh_token") or "").strip()
-    id_token = str(account.get("id_token") or token.get("oauth_id_token") or "").strip()
+    # For OAuth RT accounts, keep the credential set internally consistent:
+    # access_token/id_token must come from the same OAuth authorization as the RT.
+    # Falling back to ChatGPTAccount.access_token can upload a free/personal web AT
+    # alongside a team/workspace RT, which makes sub2api treat the account wrong.
+    if refresh_token:
+        access_token = str(token.get("oauth_access_token") or account.get("access_token") or "").strip()
+        id_token = str(token.get("oauth_id_token") or account.get("id_token") or "").strip()
+    else:
+        access_token = str(account.get("access_token") or token.get("oauth_access_token") or "").strip()
+        id_token = str(account.get("id_token") or token.get("oauth_id_token") or "").strip()
     if not access_token and not refresh_token:
         raise RuntimeError("account has no access_token or refresh_token for sub2api")
 
@@ -343,30 +451,51 @@ def _build_openai_import_payload(account: dict[str, Any], token: dict[str, Any])
     profile_claims = access_payload.get("https://api.openai.com/profile") if isinstance(access_payload.get("https://api.openai.com/profile"), dict) else {}
     organization_id = _primary_organization_id(id_auth_claims)
 
+    expires_at = _account_expires_at(account, access_payload)
+    if refresh_token:
+        # OAuth RT mode: keep all identity fields aligned to the OAuth token
+        # workspace, not to the original web-session/personal account row.
+        chatgpt_account_id = auth_claims.get("chatgpt_account_id") or id_auth_claims.get("chatgpt_account_id") or account.get("chatgpt_account_id") or ""
+        chatgpt_user_id = auth_claims.get("chatgpt_user_id") or auth_claims.get("user_id") or id_auth_claims.get("chatgpt_user_id") or id_auth_claims.get("user_id") or account.get("chatgpt_user_id") or ""
+        plan_type = auth_claims.get("chatgpt_plan_type") or id_auth_claims.get("chatgpt_plan_type") or account.get("plan_type") or ""
+    else:
+        chatgpt_account_id = account.get("chatgpt_account_id") or auth_claims.get("chatgpt_account_id") or id_auth_claims.get("chatgpt_account_id") or ""
+        chatgpt_user_id = account.get("chatgpt_user_id") or auth_claims.get("chatgpt_user_id") or auth_claims.get("user_id") or id_auth_claims.get("chatgpt_user_id") or id_auth_claims.get("user_id") or ""
+        plan_type = account.get("plan_type") or auth_claims.get("chatgpt_plan_type") or id_auth_claims.get("chatgpt_plan_type") or ""
+
     credentials: dict[str, Any] = {
         "access_token": access_token,
-        "chatgpt_account_id": account.get("chatgpt_account_id") or auth_claims.get("chatgpt_account_id") or id_auth_claims.get("chatgpt_account_id") or "",
-        "chatgpt_user_id": account.get("chatgpt_user_id") or auth_claims.get("chatgpt_user_id") or auth_claims.get("user_id") or id_auth_claims.get("chatgpt_user_id") or id_auth_claims.get("user_id") or "",
+        "chatgpt_account_id": chatgpt_account_id,
+        "chatgpt_user_id": chatgpt_user_id,
         "client_id": access_payload.get("client_id") or _first_audience(id_payload) or "",
         "email": account.get("email") or profile_claims.get("email") or id_payload.get("email") or "",
-        "expires_at": _jwt_exp(access_payload),
-        "expires_in": _jwt_expires_in(access_payload),
+        "expires_at": expires_at,
+        "expires_in": _account_expires_in(account, access_payload, expires_at),
         "id_token": id_token,
         "organization_id": organization_id,
-        "plan_type": account.get("plan_type") or auth_claims.get("chatgpt_plan_type") or id_auth_claims.get("chatgpt_plan_type") or "",
+        "plan_type": plan_type,
     }
     if refresh_token:
         credentials["refresh_token"] = refresh_token
 
     email = str(credentials.get("email") or account.get("email") or "").strip()
+    workspace_id_for_name = str(credentials.get("chatgpt_account_id") or account.get("workspace_id") or "").strip()
+    account_name = email or _sub2api_account_name(account)
+    if workspace_id_for_name:
+        account_name = f"{account_name} [{workspace_id_for_name[:8]}]"
     account_doc = {
-        "name": email or _sub2api_account_name(account),
+        "name": account_name,
         "platform": "openai",
         "type": "oauth",
         "credentials": _drop_empty(credentials),
         "extra": _drop_empty({
             "email": email,
             "privacy_mode": account.get("privacy_mode") or "",
+            "token_type": account.get("token_type") or "",
+            "websockets": account.get("websockets"),
+            "credential_id": account.get("credential_id") or "",
+            "credential_name": account.get("credential_name") or "",
+            "last_refresh": account.get("last_refresh") or "",
         }),
         "concurrency": _read_int_setting("workpool.sub2api_sync.account_concurrency", 10, minimum=1, maximum=1000),
         "priority": _read_int_setting("workpool.sub2api_sync.account_priority", 100, minimum=0, maximum=1000),
@@ -395,6 +524,8 @@ def _sub2api_account_name(account: dict[str, Any]) -> str:
 
 
 def _auth_mode(account: dict[str, Any], token: dict[str, Any]) -> str:
+    if str(account.get("token_type") or "").strip().lower() == "codex" or str(account.get("credential_id") or "").strip():
+        return "codex_token"
     if str(token.get("refresh_token") or "").strip():
         return "oauth_rt"
     return "access_token_only"
@@ -417,11 +548,17 @@ def _snapshot_account(row: ChatGPTAccount) -> dict[str, Any]:
     user = metadata.get("user") if isinstance(metadata.get("user"), dict) else {}
     raw_account = metadata.get("account") if isinstance(metadata.get("account"), dict) else {}
     auth_payload = (decode_jwt_payload(row.access_token).get("https://api.openai.com/auth") or {}) if row.access_token else {}
-    plan_type = _effective_plan_type(row, raw_account)
+    token_account_id = str(auth_payload.get("chatgpt_account_id") or "").strip()
+    current_workspace_id = str(metadata.get("current_workspace_id") or "").strip()
+    token_plan_type = str(auth_payload.get("chatgpt_plan_type") or "").strip().lower()
+    snapshot_account_id = str(row.account_id or raw_account.get("id") or token_account_id or "")
+    if token_account_id and (token_account_id == current_workspace_id or token_plan_type not in {"", "free"}):
+        snapshot_account_id = token_account_id
+    plan_type = token_plan_type or _effective_plan_type(row, raw_account)
     return {
         "id": int(row.id or 0),
         "email": str(row.email or ""),
-        "chatgpt_account_id": str(row.account_id or raw_account.get("id") or auth_payload.get("chatgpt_account_id") or ""),
+        "chatgpt_account_id": snapshot_account_id,
         "chatgpt_user_id": str(metadata.get("user_id") or user.get("id") or auth_payload.get("chatgpt_user_id") or auth_payload.get("user_id") or ""),
         "access_token": str(row.access_token or ""),
         "id_token": str(row.id_token or ""),
@@ -766,6 +903,55 @@ def _first_audience(payload: dict[str, Any]) -> str:
     if isinstance(audience, list):
         return str(audience[0] or "") if audience else ""
     return str(audience or "")
+
+
+def _account_expires_at(account: dict[str, Any], access_payload: dict[str, Any]) -> int | None:
+    for key in ("expires_at_unix", "credential_expires_at_unix"):
+        try:
+            value = int(account.get(key) or 0)
+        except Exception:
+            value = 0
+        if value:
+            return value
+    for key in ("expires_at", "credential_expires_at", "expired"):
+        parsed = _parse_timestamp(account.get(key))
+        if parsed:
+            return parsed
+    return _jwt_exp(access_payload)
+
+
+def _account_expires_in(account: dict[str, Any], access_payload: dict[str, Any], expires_at: int | None) -> int | None:
+    try:
+        value = int(account.get("expires_in") or 0)
+    except Exception:
+        value = 0
+    if value:
+        return value
+    jwt_value = _jwt_expires_in(access_payload)
+    if jwt_value is not None:
+        return jwt_value
+    if expires_at:
+        return max(0, int(expires_at) - int(utcnow().timestamp()))
+    return None
+
+
+def _parse_timestamp(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        return int(float(text))
+    except Exception:
+        pass
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return 0
 
 
 def _jwt_exp(payload: dict[str, Any]) -> int | None:

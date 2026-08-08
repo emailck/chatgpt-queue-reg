@@ -47,7 +47,15 @@ def run(ctx: JobContext) -> None:
     requested_email = str(payload.get("email") or "").strip()
     password_from_input = bool(str(payload.get("password") or "").strip())
     requested_password = str(payload.get("password") or "").strip() or _generate_register_password()
-    proxy_url = ctx.proxy_url or str(payload.get("proxy_url") or "").strip()
+    # Prefer explicit task proxy, then stage/global default proxy.  This keeps
+    # registration on the stable local default proxy instead of randomly
+    # rotating into a slow/bad proxy from proxy_pool.
+    proxy_url = (
+        ctx.proxy_url
+        or str(payload.get("proxy_url") or "").strip()
+        or str(settings.get("workpool.register.proxy_url", "") or "").strip()
+        or str(settings.get("proxy_url", "") or "").strip()
+    )
     proxy_id = ctx.proxy_id or int(payload.get("proxy_id") or 0) or None
     proxy_region = str(
         payload.get("proxy_region")
@@ -288,10 +296,10 @@ def _resolve_proxy_identity(proxy_url: str) -> tuple[int | None, str]:
 
 
 def _resolve_email_service(extra_config: dict[str, Any]):
-    """Return the email service the legacy engine expects.
+    """Return a generic email service backed by email_accounts.
 
-    For now we only support Microsoft.  We adapt our `EmailAccount` table
-    behind the legacy `EmailService`-shaped duck-type the engine consumes.
+    It can claim Microsoft rows or 163 IMAP rows; provider-specific OTP
+    reading is selected by the claimed account provider.
     """
     from backend.integrations.mail.email_service import MicrosoftEmailService
 

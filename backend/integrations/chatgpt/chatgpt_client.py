@@ -5,6 +5,8 @@ ChatGPT 注册客户端模块
 
 import uuid
 import time
+import json
+import base64
 from dataclasses import asdict
 from urllib.parse import urlparse
 from backend.core.proxy import build_requests_proxy_config
@@ -734,12 +736,19 @@ class ChatGPTClient:
                     return False, "登录需要邮箱验证码，但未提供邮箱取码服务"
                 if not otp_sent_at:
                     otp_sent_at = time.time() - 30
-                code = self._get_login_otp_code(otp_provider, email, timeout=300, otp_sent_at=otp_sent_at)
+                code = self._get_login_otp_code(otp_provider, email, timeout=600, otp_sent_at=otp_sent_at)
                 if not code:
                     return False, "登录邮箱验证码获取失败"
                 ok, next_state = self.verify_email_otp(code, return_state=True)
                 if not ok:
                     return False, f"登录邮箱验证码验证失败: {next_state}"
+                state = next_state
+                self._log(f"登录状态: {describe_flow_state(state)}")
+                continue
+            if self._state_is_workspace_selection(state):
+                ok, next_state = self.select_login_workspace(state, return_state=True)
+                if not ok:
+                    return False, f"登录 workspace 选择失败: {next_state}"
                 state = next_state
                 self._log(f"登录状态: {describe_flow_state(state)}")
                 continue
@@ -835,12 +844,26 @@ class ChatGPTClient:
 
     @staticmethod
     def _get_login_otp_code(otp_provider, email, *, timeout, otp_sent_at):
+        # Login re-auth and account registration can happen back-to-back.
+        # The mailbox then contains both "verification code" (registration)
+        # and "login code" (re-login).  Prefer the login-code subject/body so
+        # we do not submit the just-used registration OTP to email-otp/validate.
         wait_fn = getattr(otp_provider, "wait_for_verification_code", None)
         if callable(wait_fn):
-            return wait_fn(email, timeout=timeout, otp_sent_at=otp_sent_at)
+            try:
+                code = wait_fn(email, timeout=timeout, otp_sent_at=otp_sent_at, keyword="login code")
+            except TypeError:
+                code = wait_fn(email, timeout=timeout, otp_sent_at=otp_sent_at)
+            if code:
+                return code
         get_fn = getattr(otp_provider, "get_verification_code", None)
         if callable(get_fn):
-            return get_fn(email=email, timeout=timeout, otp_sent_at=otp_sent_at)
+            try:
+                code = get_fn(email=email, timeout=timeout, otp_sent_at=otp_sent_at, keyword="login code")
+            except TypeError:
+                code = get_fn(email=email, timeout=timeout, otp_sent_at=otp_sent_at)
+            if code:
+                return code
         return ""
 
     def verify_login_password(self, password, state, return_state=False):
@@ -887,6 +910,135 @@ class ChatGPTClient:
     def _state_is_login_password(state: FlowState):
         target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
         return "login_password" in target or "log-in/password" in target
+
+    @staticmethod
+    def _state_is_workspace_selection(state: FlowState):
+        target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
+        return (
+            state.page_type in {"workspace", "workspace_selection", "organization_selection"}
+            or "/workspace" in target
+            or "workspace/select" in target
+            or "organization/select" in target
+        )
+
+    def select_login_workspace(self, state: FlowState, return_state=False):
+        """Select a workspace during ordinary ChatGPT login.
+
+        Defaults to the first non-personal workspace if one is available;
+        otherwise falls back to the first workspace returned by auth session.
+        """
+        referer = state.current_url or state.continue_url or f"{self.AUTH}/workspace"
+        workspaces = self._load_login_workspaces(referer)
+        workspace = self._pick_login_workspace(workspaces)
+        if not workspace:
+            return False, "no workspace found"
+        workspace_id = str(workspace.get("id") or workspace.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return False, "workspace missing id"
+        kind = str(workspace.get("kind") or workspace.get("title") or workspace.get("name") or "")
+        self._enter_stage("workspace_select", f"select workspace {workspace_id}")
+        self._log(f"选择登录 workspace: {workspace_id} kind={kind or '-'}")
+        url = f"{self.AUTH}/api/accounts/workspace/select"
+        headers = self._headers(
+            url,
+            accept="application/json",
+            referer=referer,
+            origin=self.AUTH,
+            content_type="application/json",
+            fetch_site="same-origin",
+            extra_headers={"oai-device-id": self.device_id},
+        )
+        headers.update(generate_datadog_trace())
+        try:
+            self._browser_pause()
+            response = self._session_post(
+                url,
+                json={"workspace_id": workspace_id},
+                headers=headers,
+                allow_redirects=False,
+                timeout=45,
+            )
+        except Exception as exc:
+            return False, str(exc)
+        self._log(f"workspace/select -> {response.status_code}")
+        if response.status_code in (301, 302, 303, 307, 308):
+            location = normalize_flow_url(response.headers.get("Location", ""), auth_base=self.AUTH)
+            return (True, self._state_from_url(location)) if return_state else (True, location or "redirect")
+        if response.status_code != 200:
+            return False, f"HTTP {response.status_code}: {response.text[:240]}"
+        try:
+            next_state = self._state_from_payload(response.json(), current_url=str(response.url) or url)
+        except Exception as exc:
+            return False, f"workspace/select 返回非 JSON: {exc}"
+        return (True, next_state) if return_state else (True, "ok")
+
+    def _load_login_workspaces(self, referer: str = "") -> list[dict]:
+        self._dump_client_auth_session(referer=referer or f"{self.AUTH}/workspace")
+        sources = [self.last_client_auth_session_dump]
+        cookie_data = self._decode_oai_client_auth_session_cookie()
+        if cookie_data:
+            sources.append(cookie_data)
+        workspaces: list[dict] = []
+        for source in sources:
+            workspaces.extend(self._extract_workspace_list(source))
+        deduped: list[dict] = []
+        seen: set[str] = set()
+        for ws in workspaces:
+            if not isinstance(ws, dict):
+                continue
+            ws_id = str(ws.get("id") or ws.get("workspace_id") or "").strip()
+            if not ws_id or ws_id in seen:
+                continue
+            seen.add(ws_id)
+            deduped.append(ws)
+        self._log(f"登录 workspace 候选数量: {len(deduped)}")
+        return deduped
+
+    def _decode_oai_client_auth_session_cookie(self) -> dict:
+        raw = self._get_cookie_value("oai-client-auth-session", "auth.openai.com") or self._get_cookie_value("oai-client-auth-session")
+        if not raw:
+            return {}
+        candidates = [str(raw).strip()]
+        if "." in candidates[0]:
+            candidates.insert(0, candidates[0].split(".", 1)[0])
+        for candidate in candidates:
+            if not candidate:
+                continue
+            padded = candidate + "=" * (-len(candidate) % 4)
+            for decoder in (base64.urlsafe_b64decode, base64.b64decode):
+                try:
+                    parsed = json.loads(decoder(padded).decode("utf-8"))
+                except Exception:
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
+        return {}
+
+    def _extract_workspace_list(self, payload) -> list[dict]:
+        if isinstance(payload, list):
+            return [x for x in payload if isinstance(x, dict)]
+        if not isinstance(payload, dict):
+            return []
+        direct = payload.get("workspaces")
+        if isinstance(direct, list):
+            return [x for x in direct if isinstance(x, dict)]
+        for key in ("client_auth_session", "user", "account", "session", "data"):
+            nested = payload.get(key)
+            items = self._extract_workspace_list(nested)
+            if items:
+                return items
+        return []
+
+    @staticmethod
+    def _pick_login_workspace(workspaces: list[dict]) -> dict:
+        for workspace in workspaces:
+            kind = str(workspace.get("kind") or workspace.get("title") or workspace.get("name") or "").lower()
+            if "personal" not in kind and (workspace.get("id") or workspace.get("workspace_id")):
+                return workspace
+        for workspace in workspaces:
+            if workspace.get("id") or workspace.get("workspace_id"):
+                return workspace
+        return {}
 
     def _callback_landed_enough_for_session(self) -> bool:
         """Check whether the ChatGPT session landed despite a flaky callback response."""
@@ -1767,6 +1919,18 @@ class ChatGPTClient:
                 if not success:
                     return False, f"创建账号失败: {next_state}"
                 account_created = True
+                state = next_state
+                self.last_registration_state = state
+                continue
+
+            if self._state_is_workspace_selection(state):
+                self._enter_stage("workspace_select", describe_flow_state(state))
+                success, next_state = self.select_login_workspace(
+                    state,
+                    return_state=True,
+                )
+                if not success:
+                    return False, f"workspace 选择失败: {next_state}"
                 state = next_state
                 self.last_registration_state = state
                 continue

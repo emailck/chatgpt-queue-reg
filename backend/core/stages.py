@@ -25,7 +25,9 @@ StageHandler = Callable[[JobContext], None]
 
 ALLOWED_STAGE_NAMES: tuple[str, ...] = (
     "register",
+    "tinkmail_email_register",
     "payment_link",
+    "pp_long_link",
     "payment",
     "chatgpt_session",
     "openai_oauth",
@@ -33,6 +35,8 @@ ALLOWED_STAGE_NAMES: tuple[str, ...] = (
     "codex_invitation",
     "codex_batch_invite",
     "active",
+    "workspace_join",
+    "codex_token",
     "sub2api_sync",
 )
 ALLOWED_STAGE_SET = set(ALLOWED_STAGE_NAMES)

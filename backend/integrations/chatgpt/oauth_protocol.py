@@ -500,8 +500,20 @@ class ProtocolOAuthClient:
                 return parsed
         return {}
 
-    @staticmethod
-    def _pick_workspace(workspaces: list[dict[str, Any]]) -> dict[str, Any]:
+    def _pick_workspace(self, workspaces: list[dict[str, Any]]) -> dict[str, Any]:
+        desired = _split_workspace_ids([
+            self.config.get("workspace_ids"),
+            self.config.get("workspace_id"),
+            self.config.get("oauth_workspace_ids"),
+            self.config.get("oauth_workspace_id"),
+        ])
+        if desired:
+            desired_set = set(desired)
+            for workspace in workspaces:
+                ws_id = str(workspace.get("id") or workspace.get("workspace_id") or "").strip()
+                if ws_id in desired_set:
+                    return workspace
+            self._log(f"OAuth RT requested workspace not found, fallback to first team: {desired[:3]}")
         for workspace in workspaces:
             kind = str(workspace.get("kind") or workspace.get("title") or workspace.get("name") or "").lower()
             if "personal" not in kind and workspace.get("id"):
@@ -542,6 +554,30 @@ class ProtocolOAuthClient:
             return True
         return bool(self._decode_auth_session_cookie().get("workspaces"))
 
+
+
+
+def _split_workspace_ids(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in (None, "", []):
+            continue
+        if isinstance(value, list):
+            parts = [str(x or "") for x in value]
+        else:
+            text = str(value or "")
+            for sep in ["\r\n", "\r", "\n", ";", "，", "|"]:
+                text = text.replace(sep, ",")
+            parts = text.split(",")
+        for part in parts:
+            item = str(part or "").strip()
+            if "__" in item:
+                item = item.split("__", 1)[0].strip()
+            if item and item not in seen:
+                seen.add(item)
+                out.append(item)
+    return out
 
 def run_protocol_oauth(
     oauth: OAuthSession,

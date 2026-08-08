@@ -5,6 +5,8 @@ from urllib.parse import urlparse
 
 ACCOUNT_TYPE_MICROSOFT_OAUTH = "microsoft_oauth"
 ACCOUNT_TYPE_MAILAPI_URL = "mailapi_url"
+ACCOUNT_TYPE_NETEASE_163_IMAP = "netease_163_imap"
+ACCOUNT_TYPE_GMAIL_IMAP = "gmail_imap"
 
 
 @dataclass
@@ -16,6 +18,7 @@ class MicrosoftMailImportRecord:
     refresh_token: str = ""
     account_type: str = ACCOUNT_TYPE_MICROSOFT_OAUTH
     mailapi_url: str = ""
+    imap_auth_code: str = ""
 
 
 class MicrosoftMailImportRule(Protocol):
@@ -104,23 +107,79 @@ class MailApiUrlRowParser:
         )
 
 
+class GmailImapRowParser:
+    def parse(self, line_number: int, line: str) -> MicrosoftMailImportRecord:
+        parts = [part.strip() for part in str(line or "").split("----")]
+        if len(parts) != 2:
+            raise ValueError(f"行 {line_number}: Gmail 导入需为 邮箱----AppPassword")
+        email, app_password = parts
+        if not _is_valid_email(email) or not email.lower().endswith("@gmail.com"):
+            raise ValueError(f"行 {line_number}: 不是有效的 Gmail 邮箱: {email}")
+        if not app_password:
+            raise ValueError(f"行 {line_number}: 缺少 Gmail App Password")
+        return MicrosoftMailImportRecord(
+            line_number=line_number,
+            email=email,
+            password=app_password,
+            client_id="",
+            refresh_token=app_password,
+            account_type=ACCOUNT_TYPE_GMAIL_IMAP,
+            mailapi_url="",
+            imap_auth_code=app_password,
+        )
+
+
+class NetEase163ImapRowParser:
+    def parse(self, line_number: int, line: str) -> MicrosoftMailImportRecord:
+        parts = [part.strip() for part in str(line or "").split("----")]
+        if len(parts) != 3:
+            raise ValueError(f"行 {line_number}: 163 导入需为 邮箱----密码----授权码")
+        email, password, auth_code = parts
+        if not _is_valid_email(email) or not email.lower().endswith("@163.com"):
+            raise ValueError(f"行 {line_number}: 不是有效的 163 邮箱: {email}")
+        if not password:
+            raise ValueError(f"行 {line_number}: 缺少密码")
+        if not auth_code:
+            raise ValueError(f"行 {line_number}: 缺少 163 IMAP 授权码")
+        return MicrosoftMailImportRecord(
+            line_number=line_number,
+            email=email,
+            password=password,
+            client_id="",
+            refresh_token=auth_code,
+            account_type=ACCOUNT_TYPE_NETEASE_163_IMAP,
+            mailapi_url="",
+            imap_auth_code=auth_code,
+        )
+
+
 class AutoDetectRowParser:
     def __init__(
         self,
         oauth_parser: Optional[MicrosoftImportRowParser] = None,
         mailapi_parser: Optional[MicrosoftImportRowParser] = None,
+        netease163_parser: Optional[MicrosoftImportRowParser] = None,
+        gmail_parser: Optional[MicrosoftImportRowParser] = None,
     ):
         self._oauth_parser = oauth_parser or MicrosoftOAuthRowParser()
         self._mailapi_parser = mailapi_parser or MailApiUrlRowParser()
+        self._netease163_parser = netease163_parser or NetEase163ImapRowParser()
+        self._gmail_parser = gmail_parser or GmailImapRowParser()
 
     def parse(self, line_number: int, line: str) -> MicrosoftMailImportRecord:
         parts = [part.strip() for part in str(line or "").split("----")]
+        if len(parts) == 2 and _is_valid_mailapi_url(parts[1]):
+            return self._mailapi_parser.parse(line_number, line)
+        if len(parts) == 2 and parts[0].lower().endswith("@gmail.com"):
+            return self._gmail_parser.parse(line_number, line)
         if len(parts) == 2:
             return self._mailapi_parser.parse(line_number, line)
+        if len(parts) == 3 and parts[0].lower().endswith("@163.com"):
+            return self._netease163_parser.parse(line_number, line)
         if len(parts) >= 4:
             return self._oauth_parser.parse(line_number, line)
         raise ValueError(
-            f"行 {line_number}: 格式错误，仅支持 邮箱----mailapi_url 或 邮箱----密码----client_id----refresh_token"
+            f"行 {line_number}: 格式错误，支持 邮箱----mailapi_url / 邮箱----AppPassword(Gmail) / 邮箱----密码----授权码(163) / 邮箱----密码----client_id----refresh_token"
         )
 
 

@@ -1,6 +1,7 @@
 export const STAGE_LABELS: Record<string, string> = {
   register: '注册',
   payment_link: '生成长链',
+  pp_long_link: 'PP 长链接',
   payment: '付款',
   chatgpt_session: 'ChatGPT Session',
   sub2api_sync: 'sub2api 同步',
@@ -9,6 +10,8 @@ export const STAGE_LABELS: Record<string, string> = {
   codex_invitation: 'Codex 邀请',
   codex_batch_invite: '批量 Codex 邀请',
   active: 'Codex 激活',
+  workspace_join: 'Workspace 加入',
+  codex_token: '创建 Codex 令牌',
 }
 
 export function stageLabel(stage?: string | null): string {

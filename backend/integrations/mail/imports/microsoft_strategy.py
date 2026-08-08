@@ -20,6 +20,8 @@ from backend.models.email import EmailAccount
 from .microsoft_import_rules import (
     ACCOUNT_TYPE_MAILAPI_URL,
     ACCOUNT_TYPE_MICROSOFT_OAUTH,
+    ACCOUNT_TYPE_NETEASE_163_IMAP,
+    ACCOUNT_TYPE_GMAIL_IMAP,
     AutoDetectRowParser,
     DuplicateMicrosoftMailboxRule,
     MailApiUrlFormatRule,
@@ -188,7 +190,7 @@ class MicrosoftMailImportStrategy:
             existing_emails = {
                 str(email or "").strip()
                 for email in s.exec(
-                    select(EmailAccount.email).where(EmailAccount.provider == PROVIDER_NAME)
+                    select(EmailAccount.email)
                 ).all()
             }
 
@@ -228,18 +230,31 @@ class MicrosoftMailImportStrategy:
         with session_scope() as s:
             for record in valid_records:
                 try:
+                    if record.account_type == ACCOUNT_TYPE_NETEASE_163_IMAP:
+                        provider = "netease_163"
+                    elif record.account_type == ACCOUNT_TYPE_GMAIL_IMAP:
+                        provider = "gmail_imap"
+                    else:
+                        provider = PROVIDER_NAME
+                    meta = {
+                        "client_id": record.client_id,
+                        "account_type": record.account_type,
+                        "mailapi_url": record.mailapi_url,
+                    }
+                    if record.account_type == ACCOUNT_TYPE_NETEASE_163_IMAP:
+                        from backend.integrations.mail.imap163 import build_metadata
+                        meta.update(build_metadata(auth_code=record.imap_auth_code or record.refresh_token))
+                    elif record.account_type == ACCOUNT_TYPE_GMAIL_IMAP:
+                        from backend.integrations.mail.gmail import build_metadata
+                        meta.update(build_metadata(alias_email=record.email, app_password=record.imap_auth_code or record.refresh_token))
                     account = EmailAccount(
-                        provider=PROVIDER_NAME,
+                        provider=provider,
                         email=record.email,
                         password=record.password,
                         refresh_token=record.refresh_token,
                         api_base="",
                         enabled=bool(request.enabled),
-                        metadata_json=json_dumps({
-                            "client_id": record.client_id,
-                            "account_type": record.account_type,
-                            "mailapi_url": record.mailapi_url,
-                        }),
+                        metadata_json=json_dumps(meta),
                     )
                     s.add(account)
                     s.commit()

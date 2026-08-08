@@ -19,6 +19,7 @@ const STOP_OPTIONS = [
   { value: '', label: '跑完整链路' },
   { value: 'register', label: '注册后停止' },
   { value: 'payment_link', label: '长链后停止' },
+  { value: 'pp_long_link', label: 'PP 长链接后停止' },
   { value: 'payment', label: '付款模块后停止' },
   { value: 'chatgpt_session', label: 'Session 标准化后停止' },
   { value: 'sub2api_sync', label: 'sub2api 同步后停止' },
@@ -26,11 +27,15 @@ const STOP_OPTIONS = [
   { value: 'sso_oauth', label: 'SSO OAuth RT 后停止' },
   { value: 'codex_invitation', label: 'Codex 邀请后停止' },
   { value: 'active', label: 'Codex 激活后停止' },
+  { value: 'workspace_join', label: 'Workspace 加入后停止' },
+  { value: 'codex_token', label: 'Codex 令牌后停止' },
 ]
 
 const STAGE_OPTIONS: { value: string; label: string }[] = [
   { value: 'register', label: '注册' },
+  { value: 'tinkmail_email_register', label: '自动注册 TinkMail 邮箱' },
   { value: 'payment_link', label: '生成长链' },
+  { value: 'pp_long_link', label: 'PP 长链接' },
   { value: 'payment', label: '付款' },
   { value: 'chatgpt_session', label: 'ChatGPT Session' },
   { value: 'openai_oauth', label: 'OpenAI OAuth RT' },
@@ -38,20 +43,31 @@ const STAGE_OPTIONS: { value: string; label: string }[] = [
   { value: 'codex_invitation', label: 'Codex 邀请' },
   { value: 'codex_batch_invite', label: '批量 Codex 邀请' },
   { value: 'active', label: 'Codex 激活' },
+  { value: 'workspace_join', label: 'Workspace 加入' },
+  { value: 'codex_token', label: '创建 Codex 令牌' },
   { value: 'sub2api_sync', label: 'sub2api 同步' },
 ]
 
 const PRESET_OPTIONS: { value: string; label: string }[] = [
   { value: 'full_chain', label: '完整链路 register→payment_link→payment→chatgpt_session→sub2api_sync' },
   { value: 'register_only', label: '仅注册 register' },
+  { value: 'tinkmail_email_register', label: '自动注册 TinkMail 邮箱 tinkmail_email_register' },
   { value: 'register_with_refresh_token', label: '注册+RT register→chatgpt_session→openai_oauth→sub2api_sync' },
   { value: 'account_paid', label: '全自动付费 register→payment_link→payment' },
   { value: 'account_paid_with_refresh_token', label: '付费+RT 全部6步' },
   { value: 'link_only', label: '只到长链 register→payment_link' },
+  { value: 'pp_long_link_only', label: '已有号生成 PP 长链接 pp_long_link' },
+  { value: 'register_pp_long_link', label: '注册→PP 长链接 register→pp_long_link' },
   { value: 'refresh_token_only', label: '已有号补RT chatgpt_session→openai_oauth→sub2api_sync' },
   { value: 'codex_invitation_only', label: 'Codex 邀请 codex_invitation' },
   { value: 'codex_invite_sso_active', label: 'Codex 邀请+SSO+激活 codex_invitation→sso_oauth→active' },
   { value: 'codex_batch_invite_active', label: '批量 Codex 邀请→统一激活 codex_batch_invite' },
+  { value: 'sso_workspace_join', label: 'SSO→Workspace 加入 sso_oauth→workspace_join' },
+  { value: 'workspace_join_only', label: '仅 Workspace 加入 workspace_join' },
+  { value: 'workspace_request_only', label: '仅 Workspace Request 申请加入 workspace_join(request)' },
+  { value: 'register_workspace_request', label: '注册→Workspace Request 申请加入 register→workspace_join(request)' },
+  { value: 'team_codex_token_sub2api', label: '切换Team→创建Codex令牌→上传sub codex_token→sub2api_sync' },
+  { value: 'register_team_codex_token_sub2api', label: '注册→切换Team→创建Codex令牌→上传sub' },
   { value: 'active_only', label: '仅 Codex 激活 active' },
 ]
 
@@ -110,6 +126,33 @@ interface PipelineDetail {
   jobs: Job[]
 }
 
+function timeValue(value?: string | null): number {
+  if (!value) return 0
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function latestJobTime(job: Job): number {
+  return Math.max(timeValue(job.finished_at), timeValue(job.started_at), timeValue(job.created_at))
+}
+
+function sortJobs(jobs: Job[]): Job[] {
+  return [...jobs].sort((a, b) => latestJobTime(b) - latestJobTime(a))
+}
+
+function mergeJobs(...groups: Job[][]): Job[] {
+  const seen = new Set<number>()
+  const out: Job[] = []
+  for (const group of groups) {
+    for (const job of group) {
+      if (seen.has(job.id)) continue
+      seen.add(job.id)
+      out.push(job)
+    }
+  }
+  return sortJobs(out)
+}
+
 function resultText(value: unknown): string {
   if (Array.isArray(value)) return value.map((item) => String(item || '').trim()).filter(Boolean).join(', ')
   if (value === undefined || value === null) return ''
@@ -140,6 +183,27 @@ function jobResultHighlights(job: Job): { label: string; value: string }[] {
     add('激活邮箱', 'email')
     add('ChatGPT Account', 'chatgpt_account_id')
     add('激活结果', 'activated')
+  } else if (job.type === 'workspace_join') {
+    add('Workspace', 'workspace_ids')
+    add('动作', 'route')
+    add('成功数', 'success_count')
+    add('失败数', 'failed_count')
+    add('已切换空间', 'switched_workspace_id')
+    add('切换结果', 'workspace_session_switched')
+  } else if (job.type === 'codex_token') {
+    add('邮箱', 'email')
+    add('Workspace', 'workspace_ids')
+    add('成功数', 'success_count')
+    add('失败数', 'failed_count')
+  } else if (job.type === 'openai_oauth') {
+    add('RT ID', 'refresh_token_id')
+    add('expires_in', 'expires_in')
+    add('sub状态', 'sub2api_status')
+  } else if (job.type === 'sub2api_sync') {
+    add('RT ID', 'refresh_token_id')
+    add('sub账号', 'sub2api_account_id')
+    add('sub状态', 'sub2api_status')
+    add('调度', 'schedulable')
   }
   return rows
 }
@@ -190,7 +254,13 @@ export default function Pipelines() {
   const openDetail = useCallback(async (id: number) => {
     try {
       const data = await apiFetch<PipelineDetail>(`/pipelines/${id}`)
-      setDetail(data)
+      if (data.pipeline.account_id) {
+        const accountJobs = await apiFetch<Job[]>(`/jobs?account_id=${data.pipeline.account_id}&limit=500`)
+        const standaloneJobs = (accountJobs || []).filter((job) => job.pipeline_id === null)
+        setDetail({ ...data, jobs: mergeJobs(data.jobs || [], standaloneJobs) })
+      } else {
+        setDetail({ ...data, jobs: sortJobs(data.jobs || []) })
+      }
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载详情失败')
     }
@@ -285,9 +355,144 @@ export default function Pipelines() {
       body.stop_after = stopAfter || undefined
     }
 
+    const includesWorkspaceJoin = mode === 'custom'
+      ? Array.isArray(body.stages) && body.stages.includes('workspace_join')
+      : body.preset === 'sso_workspace_join'
+        || body.preset === 'workspace_join_only'
+        || body.preset === 'workspace_request_only'
+        || body.preset === 'register_workspace_request'
+
     const includesCodex = mode === 'custom'
       ? Array.isArray(body.stages) && (body.stages.includes('codex_invitation') || body.stages.includes('codex_batch_invite'))
       : body.preset === 'codex_invitation_only' || body.preset === 'codex_invite_sso_active' || body.preset === 'codex_batch_invite_active'
+
+    const includesPPLongLink = mode === 'custom'
+      ? Array.isArray(body.stages) && body.stages.includes('pp_long_link')
+      : body.preset === 'pp_long_link_only' || body.preset === 'register_pp_long_link'
+    const includesCodexToken = mode === 'custom'
+      ? Array.isArray(body.stages) && body.stages.includes('codex_token')
+      : body.preset === 'team_codex_token_sub2api' || body.preset === 'register_team_codex_token_sub2api'
+    const includesRegister = mode === 'custom'
+      ? Array.isArray(body.stages) && body.stages.includes('register')
+      : String(body.preset || '').startsWith('register') || ['full_chain', 'account_paid', 'account_paid_with_refresh_token', 'link_only'].includes(String(body.preset || ''))
+    if (includesRegister) {
+      for (const key of ['email', 'password']) {
+        const value = values[key]
+        if (value !== undefined && value !== null && value !== '') {
+          body[key] = value
+        }
+      }
+    }
+
+    const includesTinkMailRegister = mode === 'custom'
+      ? Array.isArray(body.stages) && body.stages.includes('tinkmail_email_register')
+      : body.preset === 'tinkmail_email_register'
+    if (includesTinkMailRegister) {
+      const stageInputs = (body.stage_inputs as Record<string, Record<string, unknown>> | undefined) || {}
+      const tinkInput: Record<string, unknown> = {
+        enabled: values.tinkmail_enabled !== false,
+        acquire_proxy: values.tinkmail_acquire_proxy === true,
+      }
+      const tinkFields: Array<[string, string]> = [
+        ['tinkmail_account', 'account'],
+        ['tinkmail_password', 'password'],
+        ['tinkmail_secure_email', 'secure_email'],
+        ['tinkmail_proxy_url', 'proxy_url'],
+      ]
+      for (const [formKey, payloadKey] of tinkFields) {
+        const value = values[formKey]
+        if (value !== undefined && value !== null && value !== '') tinkInput[payloadKey] = value
+      }
+      stageInputs.tinkmail_email_register = { ...(stageInputs.tinkmail_email_register || {}), ...tinkInput }
+      body.stage_inputs = stageInputs
+    }
+    if (includesWorkspaceJoin) {
+      const workspaceFields = [
+        'account_id',
+        'workspace_id',
+        'workspace_ids',
+        'workspace_account_id',
+        'workspace_account_ids',
+        'route',
+        'interval_ms',
+        'max_retries',
+        'retry_backoff_ms',
+        'refresh_before_request',
+        'allow_partial',
+        'switch_after_join',
+        'access_token',
+        'refresh_token',
+        'id_token',
+        'dry_run',
+      ]
+      for (const key of workspaceFields) {
+        const value = values[key]
+        if (value !== undefined && value !== null && value !== '') {
+          body[key] = value
+        }
+      }
+    }
+
+    if (includesPPLongLink) {
+      const stageInputs = (body.stage_inputs as Record<string, Record<string, unknown>> | undefined) || {}
+      const ppInput: Record<string, unknown> = {}
+      const ppFields: Array<[string, string]> = [
+        ['pp_country', 'country'],
+        ['pp_currency', 'currency'],
+        ['pp_target_amount', 'target_amount'],
+        ['pp_create_proxy_url', 'create_proxy_url'],
+        ['pp_followup_proxy_url', 'followup_proxy_url'],
+        ['pp_approve_proxy_url', 'approve_proxy_url'],
+        ['pp_proxy_url', 'proxy_url'],
+        ['pp_access_token', 'access_token'],
+        ['pp_max_retries', 'max_retries'],
+        ['pp_retry_backoff_ms', 'retry_backoff_ms'],
+      ]
+      for (const [formKey, payloadKey] of ppFields) {
+        const value = values[formKey]
+        if (value !== undefined && value !== null && value !== '') ppInput[payloadKey] = value
+      }
+      stageInputs.pp_long_link = { ...(stageInputs.pp_long_link || {}), ...ppInput }
+      body.stage_inputs = stageInputs
+    }
+
+    if (includesCodexToken) {
+      const codexTokenFields = [
+        'account_id',
+        'workspace_id',
+        'workspace_ids',
+        'workspace_account_id',
+        'workspace_account_ids',
+        'token_name',
+        'ttl',
+        'scope',
+        'interval_ms',
+        'max_retries',
+        'retry_backoff_ms',
+        'allow_partial',
+        'upload_multiple',
+        'dry_run',
+      ]
+      for (const key of codexTokenFields) {
+        const value = values[key]
+        if (value !== undefined && value !== null && value !== '') {
+          body[key] = value
+        }
+      }
+    }
+
+    const includesOAuthRt = mode === 'custom'
+      ? Array.isArray(body.stages) && (body.stages.includes('openai_oauth') || body.stages.includes('sso_oauth') || body.stages.includes('chatgpt_session'))
+      : body.preset === 'refresh_token_only' || body.preset === 'sso_rt_only'
+    if (includesOAuthRt) {
+      for (const key of ['account_id', 'email', 'refresh_token_id', 'dry_run']) {
+        const value = values[key]
+        if (value !== undefined && value !== null && value !== '') {
+          body[key] = value
+        }
+      }
+    }
+
     if (includesCodex) {
       const codexFields = [
         'email_id',
@@ -438,6 +643,7 @@ export default function Pipelines() {
               <StatCard label="当前 Stage" value={stageLabel(detail.pipeline.current_stage)} hint={detail.pipeline.current_stage} tone="info" />
               <StatCard label="进度" value={`${detail.pipeline.completed_steps}/${detail.pipeline.total_steps}`} tone="primary" />
               <StatCard label="耗时" value={formatDuration(detail.pipeline.created_at, detail.pipeline.finished_at)} />
+              <StatCard label="独立 Jobs" value={detail.jobs.filter((job) => job.pipeline_id === null).length} tone={detail.jobs.some((job) => job.pipeline_id === null) ? 'info' : 'default'} />
             </SummaryGrid>
             <KeyValueGrid>
               <KeyValue label="账号" value={detail.pipeline.account_id || '-'} />
@@ -456,7 +662,7 @@ export default function Pipelines() {
                 <EntityCard
                   key={job.id}
                   title={`Job #${job.id}`}
-                  subtitle={<Text code>{job.type}</Text>}
+                  subtitle={<Space size={4}><Text code>{job.type}</Text>{job.pipeline_id === null && <Tag color="geekblue">账号级独立</Tag>}</Space>}
                   status={<StatusTag status={job.status} />}
                   tone={statusTone(job.status)}
                   footer={formatDateTime(job.created_at)}
@@ -505,6 +711,29 @@ function CreateForm({ form }: { form: FormInstance }) {
   const showBatchCodexFields = selectedMode === 'preset'
     ? selectedPreset === 'codex_batch_invite_active'
     : Array.isArray(selectedStages) && selectedStages.includes('codex_batch_invite')
+  const showWorkspaceJoinFields = selectedMode === 'preset'
+    ? selectedPreset === 'sso_workspace_join'
+      || selectedPreset === 'workspace_join_only'
+      || selectedPreset === 'workspace_request_only'
+      || selectedPreset === 'register_workspace_request'
+    : Array.isArray(selectedStages) && selectedStages.includes('workspace_join')
+  const isWorkspaceRequestPreset = selectedMode === 'preset'
+    && (selectedPreset === 'workspace_request_only' || selectedPreset === 'register_workspace_request')
+  const showPPLongLinkFields = selectedMode === 'preset'
+    ? selectedPreset === 'pp_long_link_only' || selectedPreset === 'register_pp_long_link'
+    : Array.isArray(selectedStages) && selectedStages.includes('pp_long_link')
+  const showCodexTokenFields = selectedMode === 'preset'
+    ? selectedPreset === 'team_codex_token_sub2api' || selectedPreset === 'register_team_codex_token_sub2api'
+    : Array.isArray(selectedStages) && selectedStages.includes('codex_token')
+  const showOAuthRtFields = selectedMode === 'preset'
+    ? selectedPreset === 'refresh_token_only' || selectedPreset === 'sso_rt_only'
+    : Array.isArray(selectedStages) && (selectedStages.includes('openai_oauth') || selectedStages.includes('sso_oauth') || selectedStages.includes('chatgpt_session'))
+  const showRegisterFields = selectedMode === 'preset'
+    ? ['full_chain', 'register_only', 'register_with_refresh_token', 'account_paid', 'account_paid_with_refresh_token', 'link_only', 'register_pp_long_link', 'register_workspace_request', 'register_team_codex_token_sub2api'].includes(String(selectedPreset || ''))
+    : Array.isArray(selectedStages) && selectedStages.includes('register')
+  const showTinkMailFields = selectedMode === 'preset'
+    ? selectedPreset === 'tinkmail_email_register'
+    : Array.isArray(selectedStages) && selectedStages.includes('tinkmail_email_register')
 
   const loadConfigs = useCallback(async () => {
     setLoadingConfigs(true)
@@ -516,6 +745,11 @@ function CreateForm({ form }: { form: FormInstance }) {
   }, [])
 
   useEffect(() => { loadConfigs() }, [loadConfigs])
+  useEffect(() => {
+    if (isWorkspaceRequestPreset) {
+      form.setFieldsValue({ route: 'request', switch_after_join: false, refresh_before_request: false })
+    }
+  }, [form, isWorkspaceRequestPreset])
 
   const handleSave = async () => {
     const name = saveName.trim()
@@ -547,7 +781,7 @@ function CreateForm({ form }: { form: FormInstance }) {
     <Form
       form={form}
       layout="vertical"
-      initialValues={{ count: 1, mode: 'preset', preset: 'full_chain', stages: [], stop_after: '', source_type: 'auto', invite_count: 1, prefix_len: 20, dry_run: false, invite_count_per_inviter: 5, activate_after_invite: true }}
+      initialValues={{ count: 1, mode: 'preset', preset: 'full_chain', stages: [], stop_after: '', source_type: 'auto', invite_count: 1, prefix_len: 20, dry_run: false, invite_count_per_inviter: 5, activate_after_invite: true, route: 'request', interval_ms: 1500, max_retries: 3, retry_backoff_ms: 5000, refresh_before_request: true, allow_partial: false, switch_after_join: true, upload_multiple: true, ttl: 7776000, token_name: 'codex', scope: 'chatgpt.workspace.feature.allow-codex-local-access.access', pp_country: 'US', pp_currency: 'USD', pp_max_retries: 3, pp_retry_backoff_ms: 5000, tinkmail_enabled: true, tinkmail_acquire_proxy: false }}
       autoComplete="off"
     >
       <Row gutter={16}>
@@ -635,6 +869,324 @@ function CreateForm({ form }: { form: FormInstance }) {
               <Button icon={<PlusOutlined />} onClick={handleSave}>保存</Button>
             </Space>
           </Form.Item>
+        </>
+      )}
+
+      {showTinkMailFields && (
+        <>
+          <ActionCard
+            title="自动注册 TinkMail 邮箱"
+            description="创建一个新的 @tinkmail.me 邮箱并自动写入邮箱池；本地名/密码留空会自动生成。"
+          />
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="本地名 account（可选）" name="tinkmail_account">
+                <Input placeholder="留空自动生成，例如 tmxxxx" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="TinkMail 密码（可选）" name="tinkmail_password">
+                <Input.Password placeholder="留空自动生成" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="恢复邮箱 secure_email（可选）" name="tinkmail_secure_email">
+            <Input placeholder="留空使用全局配置/自动值" />
+          </Form.Item>
+          <Form.Item label="代理 URL 覆盖（可选）" name="tinkmail_proxy_url">
+            <Input placeholder="留空走 workpool.tinkmail_email_register.proxy_url / 默认代理" />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="创建后放入可用邮箱池" name="tinkmail_enabled">
+                <Radio.Group>
+                  <Radio value={true}>是</Radio>
+                  <Radio value={false}>否</Radio>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="无代理时从代理池领取" name="tinkmail_acquire_proxy">
+                <Radio.Group>
+                  <Radio value={false}>否</Radio>
+                  <Radio value={true}>是</Radio>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+          </Row>
+        </>
+      )}
+
+      {showRegisterFields && (
+        <>
+          <ActionCard
+            title="注册邮箱选择"
+            description="留空则从邮箱池自动领取；填具体邮箱则按邮箱池记录使用对应收件方式：QQ=邮箱----mailapi_url，TinkMail=@tinkmail.me。"
+          />
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="指定邮箱（可选）" name="email">
+                <Input placeholder="例如 2213584103@qq.com 或 xxx@tinkmail.me；留空自动取邮箱池" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="注册密码覆盖（可选）" name="password">
+                <Input.Password placeholder="留空则自动生成/使用邮箱策略" />
+              </Form.Item>
+            </Col>
+          </Row>
+        </>
+      )}
+
+      {showOAuthRtFields && (
+        <>
+          <ActionCard
+            title="OAuth / RT 参数"
+            description="已有账号补 RT/上传 sub 时需要填账号池 account_id；注册+RT 链路如果前面有 register，可以不填。"
+          />
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="已有账号 ID" name="account_id" rules={[{ required: selectedPreset === 'refresh_token_only' || selectedPreset === 'sso_rt_only', message: '已有账号补 RT 必须填账号ID' }]}>
+                <InputNumber min={1} style={{ width: '100%' }} placeholder="账号池 account_id，例如 353" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="邮箱覆盖（可选）" name="email">
+                <Input placeholder="默认从账号池读取" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="已有 RT ID（可选；只同步已有 RT 时填）" name="refresh_token_id">
+            <InputNumber min={1} style={{ width: '100%' }} placeholder="一般留空，让 openai_oauth 新取 RT" />
+          </Form.Item>
+          <Form.Item label="执行模式" name="dry_run">
+            <Radio.Group>
+              <Radio value={false}>实际获取 RT 并上传 sub</Radio>
+              <Radio value={true}>Dry-run 只检查参数</Radio>
+            </Radio.Group>
+          </Form.Item>
+        </>
+      )}
+
+      {showCodexTokenFields && (
+        <>
+          <ActionCard
+            title="Team Codex 令牌上传 sub 参数"
+            description="复用账号缓存 cookie，先切换到 Team Workspace，再在 /admin 创建 Codex 令牌；sub2api_sync 会上传这个 Codex 令牌而不是普通 AT。"
+          />
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="已有账号 ID" name="account_id" rules={[{ required: selectedPreset === 'team_codex_token_sub2api', message: '已有账号流程必须填账号ID' }]}>
+                <InputNumber min={1} style={{ width: '100%' }} placeholder="账号池 account_id" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="令牌名前缀" name="token_name">
+                <Input placeholder="codex" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="TTL 秒" name="ttl">
+                <InputNumber min={60} max={31536000} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="Team Workspace ID 列表" name="workspace_ids" rules={[{ required: true, message: '请输入 Team Workspace ID' }]}>
+            <Input.TextArea rows={4} placeholder={"一行一个或逗号分隔，例如:\n7dc92548-255c-4e45-a570-ef25d793ab23"} />
+          </Form.Item>
+          <Form.Item label="也可填 Team 母号账号 ID（可选）" name="workspace_account_ids">
+            <Input placeholder="多个账号ID用逗号/换行分隔；系统从账号池 workspace_id 字段解析" />
+          </Form.Item>
+          <Form.Item label="Scope" name="scope">
+            <Input placeholder="chatgpt.workspace.feature.allow-codex-local-access.access" />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="Workspace 间隔毫秒" name="interval_ms">
+                <InputNumber min={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="最大重试" name="max_retries">
+                <InputNumber min={0} max={10} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="重试退避毫秒" name="retry_backoff_ms">
+                <InputNumber min={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="多空间上传多条 sub" name="upload_multiple">
+                <Radio.Group>
+                  <Radio value={true}>是</Radio>
+                  <Radio value={false}>否</Radio>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="执行模式" name="dry_run">
+                <Radio.Group>
+                  <Radio value={false}>实际创建并上传</Radio>
+                  <Radio value={true}>Dry-run 只检查参数</Radio>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+          </Row>
+        </>
+      )}
+
+
+      {showWorkspaceJoinFields && (
+        <>
+          <ActionCard
+            title={isWorkspaceRequestPreset ? 'Workspace Request 参数' : 'Workspace Join Request 参数'}
+            description={isWorkspaceRequestPreset
+              ? '等价于浏览器脚本的 Request：使用当前账号 AT 向母号 Workspace 发送加入申请，只走 /invites/request，Workspace ID 可配置。'
+              : 'AT 会自动使用前置 sso_oauth / openai_oauth 的 access_token；只需要填写母号 Workspace ID。request = 子号主动申请加入；accept = 接受已有邀请。'}
+          />
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="已有账号 ID（子号）" name="account_id">
+                <InputNumber min={1} style={{ width: '100%' }} placeholder="账号池 account_id，例如 353" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="说明">
+                <Text type="secondary">已有号加入空间时填；注册→加入链路可留空。</Text>
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="母号 Workspace ID 列表" name="workspace_ids">
+            <Input.TextArea rows={4} placeholder={"一行一个或逗号分隔，例如:\nacfb4e38-524c-4dc8-b4cf-fb3d0ce28b25"} />
+          </Form.Item>
+          <Form.Item label="也可填母号账号 ID（可选）" name="workspace_account_ids">
+            <Input placeholder="多个账号ID用逗号/换行分隔；系统从账号池 workspace_id 字段解析" />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="动作" name="route">
+                <Select
+                  disabled={isWorkspaceRequestPreset}
+                  options={[
+                    { value: 'request', label: 'request 主动申请' },
+                    { value: 'accept', label: 'accept 接受邀请' },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="间隔毫秒" name="interval_ms">
+                <InputNumber min={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="最大重试" name="max_retries">
+                <InputNumber min={0} max={10} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="重试退避毫秒" name="retry_backoff_ms">
+                <InputNumber min={0} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="请求前刷新 AT" name="refresh_before_request">
+                <Radio.Group>
+                  <Radio value={true}>是</Radio>
+                  <Radio value={false}>否</Radio>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="部分成功是否通过" name="allow_partial">
+                <Radio.Group>
+                  <Radio value={false}>否</Radio>
+                  <Radio value={true}>是</Radio>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="加入后切换到该 Workspace" name="switch_after_join">
+            <Radio.Group>
+              <Radio value={true} disabled={isWorkspaceRequestPreset}>是，后续 chatgpt_session 直接取新空间 AT</Radio>
+              <Radio value={false}>否，只加入不切换</Radio>
+            </Radio.Group>
+          </Form.Item>
+          <Form.Item label="access_token 覆盖（可选；仅 workspace_join_only 且没有前置 token 时填写）" name="access_token">
+            <Input.Password placeholder="Bearer token 原文，不要带 Bearer 前缀" />
+          </Form.Item>
+          <Form.Item label="执行模式" name="dry_run">
+            <Radio.Group>
+              <Radio value={false}>实际发送</Radio>
+              <Radio value={true}>Dry-run 只检查参数</Radio>
+            </Radio.Group>
+          </Form.Item>
+        </>
+      )}
+
+      {showPPLongLinkFields && (
+        <>
+          <ActionCard
+            title="PP 长链接参数"
+            description="这里配置失败重试次数；不是生成多条。总尝试次数 = 1 + 最大失败重试。"
+          />
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="国家" name="pp_country">
+                <Input placeholder="US" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="币种" name="pp_currency">
+                <Input placeholder="USD" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="金额覆盖（可选）" name="pp_target_amount">
+                <Input placeholder="留空使用 app.py 默认" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="失败重试次数" name="pp_max_retries">
+                <InputNumber min={0} max={20} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="重试退避毫秒" name="pp_retry_backoff_ms">
+                <InputNumber min={0} max={300000} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="access_token 覆盖（可选；已有号单独生成时可填）" name="pp_access_token">
+            <Input.Password placeholder="Bearer token 原文，不要带 Bearer 前缀" />
+          </Form.Item>
+          <Form.Item label="统一代理 URL（可选）" name="pp_proxy_url">
+            <Input placeholder="留空复用任务/账号代理" />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="create 代理（可选）" name="pp_create_proxy_url">
+                <Input placeholder="留空使用统一代理" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="followup 代理（可选）" name="pp_followup_proxy_url">
+                <Input placeholder="留空使用 create 代理" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="approve 代理（可选）" name="pp_approve_proxy_url">
+                <Input placeholder="留空使用 followup 代理" />
+              </Form.Item>
+            </Col>
+          </Row>
         </>
       )}
 

@@ -23,6 +23,19 @@ class EmailServiceAdapter:
         self.email = email
         self.log_fn = log_fn
         self._used_codes = set()
+        self._prefetch_current_code()
+
+    def _prefetch_current_code(self):
+        peek = getattr(self.es, "peek_current_code", None)
+        if not callable(peek):
+            return
+        try:
+            code = str(peek(self.email) or "").strip()
+        except Exception:
+            code = ""
+        if code:
+            self._used_codes.add(code)
+            self.log_fn(f"注册前 HTTP 当前验证码基线: {code}，等待新验证码变化")
 
     def wait_for_verification_code(self, email, timeout=60, otp_sent_at=None, exclude_codes=None):
         msg = f"\u6b63\u5728\u7b49\u5f85\u90ae\u7bb1 {email} \u7684\u9a8c\u8bc1\u7801 ({timeout}s)..."

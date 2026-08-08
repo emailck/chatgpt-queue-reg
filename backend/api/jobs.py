@@ -64,6 +64,7 @@ class CreatePipelineRequest(BaseModel):
     # Convenience top-level fields for single-stage/manual WorkPools such as
     # codex_invitation. These are persisted into pipeline.input_json and
     # forwarded to stages whose input contract includes them.
+    account_id: Optional[int] = None
     email_id: Optional[int] = None
     email: Optional[str] = None
     inviter_account_id: Optional[int] = None
@@ -80,9 +81,37 @@ class CreatePipelineRequest(BaseModel):
     domain: Optional[str] = None
     emails: Optional[list[str]] = None
     access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    id_token: Optional[str] = None
+    refresh_token_id: Optional[int] = None
+    access_token_account_id: Optional[int] = None
     chatgpt_account_id: Optional[str] = None
     codex_account_id: Optional[str] = None
     dry_run: Optional[bool] = None
+    workspace_id: Optional[str] = None
+    workspace_ids: Optional[str | list[str]] = None
+    workspace_account_id: Optional[int] = None
+    workspace_account_ids: Optional[str | list[int]] = None
+    country: Optional[str] = None
+    currency: Optional[str] = None
+    target_amount: Optional[str] = None
+    create_proxy_url: Optional[str] = None
+    followup_proxy_url: Optional[str] = None
+    approve_proxy_url: Optional[str] = None
+    proxy_url: Optional[str] = None
+    route: Optional[str] = None
+    interval_ms: Optional[int] = None
+    max_retries: Optional[int] = None
+    retry_backoff_ms: Optional[int] = None
+    refresh_before_request: Optional[bool] = None
+    allow_partial: Optional[bool] = None
+    switch_after_join: Optional[bool] = None
+    switch_all_workspaces: Optional[bool] = None
+    upload_multiple: Optional[bool] = None
+    token_name: Optional[str] = None
+    ttl: Optional[int] = None
+    scope: Optional[str] = None
+    scopes: Optional[str | list[str]] = None
 
 
 class JobEnqueueRequest(BaseModel):
@@ -123,6 +152,7 @@ def create_pipeline_endpoint(body: CreatePipelineRequest):
     resolved_preset = body.preset or ("" if body.stages else DEFAULT_PRESET)
     request_payload: dict[str, Any] = {}
     for key in (
+        "account_id",
         "email_id",
         "email",
         "inviter_account_id",
@@ -139,9 +169,37 @@ def create_pipeline_endpoint(body: CreatePipelineRequest):
         "domain",
         "emails",
         "access_token",
+        "access_token_account_id",
+        "refresh_token_id",
+        "id_token",
+        "refresh_token",
         "chatgpt_account_id",
         "codex_account_id",
         "dry_run",
+        "workspace_id",
+        "workspace_ids",
+        "workspace_account_id",
+        "workspace_account_ids",
+        "country",
+        "currency",
+        "target_amount",
+        "create_proxy_url",
+        "followup_proxy_url",
+        "approve_proxy_url",
+        "proxy_url",
+        "route",
+        "interval_ms",
+        "max_retries",
+        "retry_backoff_ms",
+        "refresh_before_request",
+        "allow_partial",
+        "switch_after_join",
+        "switch_all_workspaces",
+        "upload_multiple",
+        "token_name",
+        "ttl",
+        "scope",
+        "scopes",
     ):
         value = getattr(body, key)
         if value not in (None, "", []):
@@ -157,6 +215,59 @@ def create_pipeline_endpoint(body: CreatePipelineRequest):
             **request_payload,
             **dict(stage_inputs.get("codex_batch_invite") or {}),
         }
+    if body.preset in {"workspace_request_only", "register_workspace_request"} and "workspace_join" in stages:
+        workspace_input = {
+            **request_payload,
+            **dict(stage_inputs.get("workspace_join") or {}),
+        }
+        workspace_input["route"] = "request"
+        # Match the userscript: only POST /invites/request.  Do not switch to
+        # the joined workspace or fetch a workspace AT in this workflow.
+        workspace_input.setdefault("switch_after_join", False)
+        workspace_input.setdefault("refresh_before_request", False)
+        stage_inputs["workspace_join"] = workspace_input
+    elif request_payload and "workspace_join" in stages:
+        stage_inputs["workspace_join"] = {
+            **request_payload,
+            **dict(stage_inputs.get("workspace_join") or {}),
+        }
+    if request_payload and "codex_token" in stages:
+        stage_inputs["codex_token"] = {
+            **request_payload,
+            **dict(stage_inputs.get("codex_token") or {}),
+        }
+    if request_payload and "pp_long_link" in stages:
+        stage_inputs["pp_long_link"] = {
+            **request_payload,
+            **dict(stage_inputs.get("pp_long_link") or {}),
+        }
+    # If a workflow joins a workspace and then asks for a ChatGPT session,
+    # workspace_join now switches the cached chatgpt.com web session to the
+    # joined workspace first.  Then chatgpt_session should call the normal
+    # /api/auth/session from those switched cookies (no forced email relogin).
+    if "workspace_join" in stages and "chatgpt_session" in stages:
+        try:
+            if stages.index("chatgpt_session") > stages.index("workspace_join"):
+                existing = dict(stage_inputs.get("chatgpt_session") or {})
+                existing.setdefault("mode", "session")
+                existing.setdefault("force_refresh", True)
+                existing.setdefault("force_relogin", False)
+                existing.setdefault("sync_sub2api_after_refresh", False)
+                stage_inputs["chatgpt_session"] = existing
+        except ValueError:
+            pass
+    if "sub2api_sync" in stages:
+        existing = dict(stage_inputs.get("sub2api_sync") or {})
+        existing.setdefault("force_upload", True)
+        existing.setdefault("reset_remote_status", True)
+        if "codex_token" in stages:
+            existing.setdefault("upload_multiple", True)
+            existing.setdefault("force_new", True)
+        if request_payload.get("upload_multiple") not in (None, ""):
+            existing.setdefault("upload_multiple", bool(request_payload.get("upload_multiple")))
+        if request_payload.get("switch_all_workspaces") not in (None, ""):
+            existing.setdefault("upload_multiple", bool(request_payload.get("switch_all_workspaces")))
+        stage_inputs["sub2api_sync"] = existing
     pipeline_ids: list[int] = []
     for _ in range(body.count):
         pid = create_pipeline(

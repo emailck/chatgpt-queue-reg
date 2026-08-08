@@ -28,3 +28,16 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+
+# Generated run artifacts / local exports
+account_*_access_token.txt
+activation_*.txt
+activation_*.json
+invite_result_*.json
+invited_emails_*.txt
+mother_sso_*_result.json
+result.json
+proxies.txt
+usable_mothers_*.txt
+backups/
+runs/
