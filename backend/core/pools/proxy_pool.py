@@ -25,6 +25,8 @@ class ProxyResourcePool:
         account_id = int(hint.get("account_id") or 0)
         requested_proxy_id = int(hint.get("proxy_id") or 0)
         region = str(hint.get("region") or "").strip()
+        provider = str(hint.get("provider") or "").strip()
+        duration = str(hint.get("duration") or hint.get("ttl") or "").strip()
         exclude_proxy_ids = {int(hint.get("exclude_proxy_id") or 0)} if hint.get("exclude_proxy_id") else set()
         for value in hint.get("exclude_proxy_ids") or []:
             try:
@@ -36,7 +38,7 @@ class ProxyResourcePool:
         exclude_urls = {str(hint.get("exclude_url") or "").strip()} if hint.get("exclude_url") else set()
         exclude_urls.update(str(value or "").strip() for value in hint.get("exclude_urls") or [] if str(value or "").strip())
 
-        if account_id and not region and not requested_proxy_id:
+        if account_id and not region and not provider and not duration and not requested_proxy_id:
             with Session(engine) as s:
                 account = s.get(ChatGPTAccount, account_id)
                 if account is not None and (account.proxy_url or "").strip():
@@ -45,6 +47,8 @@ class ProxyResourcePool:
                         proxy_id=account.proxy_id,
                         url=account.proxy_url,
                         region=proxy.region if proxy else "",
+                        provider=getattr(proxy, "provider", "") if proxy else "",
+                        duration=getattr(proxy, "duration", "") if proxy else "",
                         account_pinned=True,
                     )
 
@@ -54,6 +58,10 @@ class ProxyResourcePool:
                 stmt = stmt.where(Proxy.id == requested_proxy_id)
             if region:
                 stmt = stmt.where(Proxy.region == region)
+            if provider:
+                stmt = stmt.where(Proxy.provider == provider)
+            if duration:
+                stmt = stmt.where(Proxy.duration == duration)
             if exclude_proxy_ids:
                 stmt = stmt.where(Proxy.id.not_in(exclude_proxy_ids))
             if exclude_urls:
@@ -66,6 +74,8 @@ class ProxyResourcePool:
             proxy_id=row.id,
             url=row.url,
             region=row.region,
+            provider=getattr(row, "provider", ""),
+            duration=getattr(row, "duration", ""),
             account_pinned=False,
         )
 
@@ -89,7 +99,7 @@ class ProxyResourcePool:
             s.add(row)
             s.commit()
 
-    def _resource_from_values(self, *, proxy_id: int | None, url: str, region: str, account_pinned: bool) -> Resource:
+    def _resource_from_values(self, *, proxy_id: int | None, url: str, region: str, account_pinned: bool, provider: str = "", duration: str = "") -> Resource:
         return Resource(
             pool=self.name,
             id=str(proxy_id or url),
@@ -97,6 +107,8 @@ class ProxyResourcePool:
                 "proxy_id": proxy_id,
                 "url": url,
                 "region": region,
+                "provider": provider,
+                "duration": duration,
                 "account_pinned": account_pinned,
             },
         )

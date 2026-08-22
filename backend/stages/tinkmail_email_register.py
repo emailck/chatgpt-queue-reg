@@ -5,6 +5,7 @@ from typing import Any
 
 from backend.core.job_context import JobContext
 from backend.core.settings import settings
+from backend.core.proxy import resolve_workpool_proxy_template
 from backend.core.stages import stage
 
 
@@ -25,16 +26,22 @@ def run(ctx: JobContext) -> None:
         or ""
     ).strip()
     enabled = _as_bool(payload.get("enabled", True))
+    settings_all = settings.get_all()
     proxy_url = (
         str(payload.get("proxy_url") or "").strip()
-        or str(settings.get("workpool.tinkmail_email_register.proxy_url", "") or "").strip()
-        or str(settings.get("tinkmail.proxy_url", settings.get("tinkmail_proxy_url", "")) or "").strip()
-        or str(settings.get("default_proxy_url", "") or "").strip()
-        or str(settings.get("proxy_url", "") or "").strip()
+        or str(settings_all.get("workpool.tinkmail_email_register.proxy_url", "") or "").strip()
+        or str(settings_all.get("tinkmail.proxy_url", settings_all.get("tinkmail_proxy_url", "")) or "").strip()
+        or str(settings_all.get("default_proxy_url", "") or "").strip()
+        or str(settings_all.get("proxy_url", "") or "").strip()
     )
     proxy_id = ctx.proxy_id
+    if not proxy_url:
+        rendered = resolve_workpool_proxy_template("tinkmail_email_register", payload=payload, extra=settings_all)
+        if rendered is not None and rendered.url:
+            proxy_url = rendered.url
+            ctx.log("TinkMail dynamic proxy rendered", payload={"provider": rendered.provider, "region": rendered.region, "ttl": rendered.ttl, "sid": rendered.sid})
     if not proxy_url and _as_bool(payload.get("acquire_proxy", settings.get_bool("workpool.tinkmail_email_register.acquire_proxy", False))):
-        resource = ctx.acquire("proxy_pool", hint={"stage": "tinkmail_email_register"})
+        resource = ctx.acquire("proxy_pool", hint={"stage": "tinkmail_email_register", "region": payload.get("proxy_region") or settings_all.get("workpool.tinkmail_email_register.proxy_region", ""), "provider": payload.get("proxy_provider") or settings_all.get("workpool.tinkmail_email_register.proxy_provider", ""), "duration": payload.get("proxy_duration") or payload.get("proxy_ttl") or settings_all.get("workpool.tinkmail_email_register.proxy_duration", "") or settings_all.get("workpool.tinkmail_email_register.proxy_ttl", "")})
         rpayload = resource.payload or {}
         proxy_url = str(rpayload.get("url") or resource.id or "").strip()
         proxy_id = int(rpayload.get("proxy_id") or 0) or proxy_id

@@ -17,7 +17,7 @@ from backend.core.constants import (
 )
 from backend.core.db import engine, session_scope
 from backend.core.json_utils import json_dumps, json_loads
-from backend.core.proxy import build_requests_proxy_config
+from backend.core.proxy import build_requests_proxy_config, resolve_workpool_proxy_template
 from backend.core.settings import settings
 from backend.core.stages import stage
 from backend.core.time_utils import utcnow
@@ -278,18 +278,36 @@ def _build_client_from_account(
 
 
 def _acquire_relogin_proxy(ctx: Any, account: ChatGPTAccount) -> tuple[int | None, str, str]:
+    settings_all = settings.get_all()
+    payload_input = dict(ctx.input or {})
+    reuse_account_proxy = _truthy(
+        payload_input.get(
+            "relogin_reuse_account_proxy",
+            settings_all.get("workpool.chatgpt_session.relogin_reuse_account_proxy", "1"),
+        )
+    )
+    if reuse_account_proxy and str(account.proxy_url or "").strip():
+        return int(account.proxy_id or 0) or None, str(account.proxy_url or "").strip(), ""
     proxy_region = str(
-        ctx.input.get("proxy_region")
-        or ctx.input.get("region")
-        or settings.get("workpool.chatgpt_session.proxy_region", "")
+        payload_input.get("proxy_region")
+        or payload_input.get("region")
+        or settings_all.get("workpool.chatgpt_session.proxy_region", "")
         or ""
     ).strip()
+    proxy_provider = str(payload_input.get("proxy_provider") or settings_all.get("workpool.chatgpt_session.proxy_provider", "") or "").strip()
+    proxy_duration = str(payload_input.get("proxy_duration") or payload_input.get("proxy_ttl") or settings_all.get("workpool.chatgpt_session.proxy_duration", "") or settings_all.get("workpool.chatgpt_session.proxy_ttl", "") or "").strip()
+    rendered = resolve_workpool_proxy_template("chatgpt_session", payload=payload_input, extra=settings_all)
+    if rendered is not None and rendered.url:
+        ctx.log("chatgpt_session dynamic relogin proxy rendered", payload={"provider": rendered.provider, "region": rendered.region, "ttl": rendered.ttl, "sid": rendered.sid})
+        return None, rendered.url, rendered.region or proxy_region
     resource = ctx.acquire(
         "proxy_pool",
         hint={
             "stage": "chatgpt_session",
             "account_id": int(account.id or 0),
             "region": proxy_region,
+            "provider": proxy_provider,
+            "duration": proxy_duration,
             "exclude_proxy_id": int(account.proxy_id or 0),
             "exclude_url": str(account.proxy_url or ""),
         },

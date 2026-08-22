@@ -26,6 +26,7 @@ from backend.core.errors import JobCancelled
 from backend.core.job_context import JobContext
 from backend.core.json_utils import json_dumps, json_loads
 from backend.core.settings import settings
+from backend.core.proxy import resolve_workpool_proxy_template
 from backend.core.stages import stage
 from backend.core.time_utils import utcnow
 from backend.models.account import ChatGPTAccount
@@ -47,42 +48,56 @@ def run(ctx: JobContext) -> None:
     requested_email = str(payload.get("email") or "").strip()
     password_from_input = bool(str(payload.get("password") or "").strip())
     requested_password = str(payload.get("password") or "").strip() or _generate_register_password()
-    # Prefer explicit task proxy, then stage/global default proxy.  This keeps
-    # registration on the stable local default proxy instead of randomly
-    # rotating into a slow/bad proxy from proxy_pool.
+    extra_config = dict(payload.get("extra_config") or {})
+    settings_all = {**settings.get_all(), **extra_config}
+    # Prefer explicit task proxy, then stage configured URL, then dynamic provider
+    # template, finally DB proxy_pool.  Dynamic provider templates generate one
+    # concrete URL per pipeline and ctx.attach_proxy persists it for downstream
+    # stages.
     proxy_url = (
         ctx.proxy_url
         or str(payload.get("proxy_url") or "").strip()
-        or str(settings.get("workpool.register.proxy_url", "") or "").strip()
-        or str(settings.get("proxy_url", "") or "").strip()
+        or str(settings_all.get("workpool.register.proxy_url", "") or "").strip()
+        or str(settings_all.get("proxy_url", "") or "").strip()
     )
     proxy_id = ctx.proxy_id or int(payload.get("proxy_id") or 0) or None
     proxy_region = str(
         payload.get("proxy_region")
         or payload.get("region")
-        or settings.get("workpool.register.proxy_region", "")
+        or settings_all.get("workpool.register.proxy_region", "")
         or ""
     ).strip()
+    proxy_provider = str(payload.get("proxy_provider") or settings_all.get("workpool.register.proxy_provider", "") or "").strip()
+    proxy_duration = str(payload.get("proxy_duration") or payload.get("proxy_ttl") or settings_all.get("workpool.register.proxy_duration", "") or settings_all.get("workpool.register.proxy_ttl", "") or "").strip()
+    if not proxy_url:
+        rendered = resolve_workpool_proxy_template("register", payload=payload, extra=settings_all)
+        if rendered is not None and rendered.url:
+            proxy_url = rendered.url
+            proxy_region = rendered.region or proxy_region
+            proxy_provider = rendered.provider or proxy_provider
+            proxy_duration = str(rendered.ttl or proxy_duration or "")
+            ctx.log("register dynamic proxy rendered", payload={"provider": proxy_provider, "region": proxy_region, "ttl": proxy_duration, "sid": rendered.sid})
     if not proxy_url:
         proxy_resource = ctx.acquire(
             "proxy_pool",
-            hint={"stage": "register", "proxy_id": proxy_id, "region": proxy_region},
+            hint={"stage": "register", "proxy_id": proxy_id, "region": proxy_region, "provider": proxy_provider, "duration": proxy_duration},
         )
         proxy_payload = proxy_resource.payload or {}
         proxy_url = str(proxy_payload.get("url") or proxy_resource.id or "").strip()
         proxy_id = int(proxy_payload.get("proxy_id") or 0) or proxy_id
         proxy_region = str(proxy_payload.get("region") or proxy_region or "")
+        proxy_provider = str(proxy_payload.get("provider") or proxy_provider or "")
+        proxy_duration = str(proxy_payload.get("duration") or proxy_duration or "")
     elif not proxy_id:
         proxy_id, proxy_region = _resolve_proxy_identity(proxy_url)
 
-    if not proxy_id or not proxy_url:
-        raise RuntimeError("register stage requires a bound proxy_id and proxy_url")
+    if not proxy_url:
+        raise RuntimeError("register stage requires a bound proxy_url")
     ctx.attach_proxy(proxy_id=proxy_id, proxy_url=proxy_url)
-    extra_config = dict(payload.get("extra_config") or {})
     also_record_to_at_pool = bool(
         ctx.input.get(
             "also_record_to_at_pool",
-            settings.get_bool("workpool.register.also_record_to_at_pool", False),
+            settings.get_bool("workpool.register.also_record_to_at_pool", True),
         )
     )
 
@@ -104,6 +119,8 @@ def run(ctx: JobContext) -> None:
             "proxy_provided": bool(proxy_url),
             "proxy_id": proxy_id,
             "proxy_region": proxy_region,
+            "proxy_provider": proxy_provider,
+            "proxy_duration": proxy_duration,
             "also_record_to_at_pool": also_record_to_at_pool,
         },
     )

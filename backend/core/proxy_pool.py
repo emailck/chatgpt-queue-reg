@@ -43,11 +43,15 @@ class ProxyPool:
 
     # ---- selection ----------------------------------------------------------
 
-    def get_next(self, region: str = "") -> Optional[str]:
+    def get_next(self, region: str = "", provider: str = "", duration: str = "") -> Optional[str]:
         with Session(engine) as s:
             stmt = select(Proxy).where(Proxy.enabled == True)  # noqa: E712
             if region:
                 stmt = stmt.where(Proxy.region == region)
+            if provider:
+                stmt = stmt.where(Proxy.provider == provider)
+            if duration:
+                stmt = stmt.where(Proxy.duration == duration)
             rows = s.exec(stmt).all()
         if not rows:
             return None
@@ -60,8 +64,8 @@ class ProxyPool:
             self._index += 1
         return rows[idx].url
 
-    def acquire(self, *, region: str = "") -> Optional[str]:
-        return self.get_next(region=region)
+    def acquire(self, *, region: str = "", provider: str = "", duration: str = "") -> Optional[str]:
+        return self.get_next(region=region, provider=provider, duration=duration)
 
     # ---- bookkeeping --------------------------------------------------------
 

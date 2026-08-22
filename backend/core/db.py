@@ -59,6 +59,7 @@ def _import_models() -> None:
     from backend.models import pipeline  # noqa: F401
     from backend.models import pipeline_config  # noqa: F401
     from backend.models import proxy  # noqa: F401
+    from backend.models import smspool_phone  # noqa: F401
     from backend.models import sms_project  # noqa: F401
     from backend.models import sub2api_binding  # noqa: F401
 
@@ -70,6 +71,7 @@ def init_db() -> None:
     _migrate_openai_refresh_token_columns()
     _migrate_chatgpt_account_session_columns()
     _migrate_paypal_number_columns()
+    _migrate_proxy_columns()
     _migrate_paypal_number_statuses()
 
 
@@ -210,6 +212,24 @@ def _migrate_paypal_number_columns() -> None:
             if name not in existing:
                 conn.exec_driver_sql(f"ALTER TABLE paypal_numbers ADD COLUMN {name} {ddl}")
 
+
+
+
+def _migrate_proxy_columns() -> None:
+    if engine.url.get_backend_name() != "sqlite":
+        return
+    columns = {
+        "provider": "VARCHAR DEFAULT ''",
+        "duration": "VARCHAR DEFAULT ''",
+    }
+    with engine.begin() as conn:
+        if not _sqlite_table_exists(conn, "proxies"):
+            return
+        existing = _sqlite_columns(conn, "proxies")
+        for name, ddl in columns.items():
+            if name not in existing:
+                conn.exec_driver_sql(f"ALTER TABLE proxies ADD COLUMN {name} {ddl}")
+                existing.add(name)
 
 
 def _migrate_paypal_number_statuses() -> None:

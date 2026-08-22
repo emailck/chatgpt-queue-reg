@@ -1,9 +1,10 @@
 # GPT 注册、加入空间、创建令牌/RT 并上传 sub2api 流程
 
-本文档说明两种邮箱来源的完整流水线：
+本文档说明三种邮箱来源的完整流水线：
 
 1. **QQ 邮箱**：需要先提供/导入邮箱收码链接，再注册 GPT，申请加入指定 workspace。
-2. **TinkMail 邮箱**：系统可自动注册 `tinkmail.me` 邮箱，再注册 GPT，默认加入固定 workspace：`d5ea8b6d-de61-48d5-9210-bf662eb1f1c3`。
+2. **Outlook 邮箱**：从已导入邮箱池选择 `outlook.com/hotmail.com` 邮箱，再注册 GPT，默认加入固定 workspace：`68dd6ed1-261e-45e3-9fcc-28e09adee411`。
+3. **TinkMail 邮箱**：系统可自动注册 `tinkmail.me` 邮箱，再注册 GPT，默认加入固定 workspace：`d5ea8b6d-de61-48d5-9210-bf662eb1f1c3`。
 
 后续统一执行：优先创建 team Codex 令牌；如果失败，则自动获取 OAuth RT，并上传到 sub2api。
 
@@ -30,6 +31,40 @@ curl -sS 'http://127.0.0.1:8000/api/jobs?limit=10' | jq '.[] | {id,type,status,a
 # 指定任务日志
 curl -sS 'http://127.0.0.1:8000/api/jobs/JOB_ID/events?limit=120' \
   | jq -r '.[] | "\(.created_at) [\(.level)] \(.message)"'
+```
+
+---
+
+## 1A. Outlook 邮箱流程
+
+Outlook / Hotmail 邮箱池默认 workspace：
+
+```text
+68dd6ed1-261e-45e3-9fcc-28e09adee411
+```
+
+### 1A.1 从邮箱池选择最新可用 Outlook 邮箱并执行步骤1
+
+```bash
+cd /home/ubuntu/chatgpt-queue-reg
+
+EMAIL=$(curl -sS 'http://127.0.0.1:8000/api/email/accounts?limit=1000' \
+  | jq -r '[.[] | select(.provider=="microsoft" and .enabled==true and ((.email|ascii_downcase|endswith("@outlook.com")) or (.email|ascii_downcase|endswith("@hotmail.com"))))] | sort_by(.created_at) | reverse | .[0].email')
+
+./scripts/create_account_join_workspace.py \
+  -e "$EMAIL" \
+  -w 68dd6ed1-261e-45e3-9fcc-28e09adee411 \
+  --wait \
+  --json
+```
+
+### 1A.2 步骤2：创建令牌/RT 并上传 sub2api
+
+```bash
+./scripts/team_token_or_rt_upload_sub.py \
+  --account-id ACCOUNT_ID \
+  -w 68dd6ed1-261e-45e3-9fcc-28e09adee411 \
+  --json
 ```
 
 ---

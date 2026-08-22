@@ -3,7 +3,7 @@ export type FieldType = 'text' | 'switch' | 'number' | 'select' | 'password'
 export interface SettingField {
   key: string
   label: string
-  type?: FieldType
+  type?: FieldType | 'proxy_select'
   placeholder?: string
   options?: { value: string; label: string }[]
 }
@@ -16,6 +16,12 @@ export interface PoolSettingGroup {
   emptyText?: string
 }
 
+const PROXY_PROVIDER_OPTIONS = [
+  { value: 'arxlabs', label: 'arxlabs' },
+  { value: '1024proxy', label: '1024proxy' },
+  { value: 'custom', label: 'custom / 其他' },
+]
+
 export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
   register: {
     id: 'workpool.register',
@@ -23,7 +29,10 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
     description: '注册池只负责账号注册和账号身份绑定；邮箱、代理从对应资源池领取。',
     fields: [
       { key: 'worker_concurrency.register', label: 'register 并发', type: 'number', placeholder: '默认 3' },
-      { key: 'workpool.register.proxy_region', label: '注册代理 region', placeholder: '留空则不限制 region' },
+      { key: 'workpool.register.proxy_provider', label: '注册代理厂商', type: 'select', options: PROXY_PROVIDER_OPTIONS },
+      { key: 'workpool.register.proxy_region', label: '注册代理 region', placeholder: 'US / JP / BR' },
+      { key: 'workpool.register.proxy_ttl', label: '注册代理持续时间 t', type: 'number', placeholder: '默认 5' },
+      { key: 'workpool.register.proxy_url', label: '显式代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空则按 provider 模板生成' },
       { key: 'workpool.register.also_record_to_at_pool', label: '注册后写入 AT 池', type: 'switch' },
     ],
   },
@@ -60,10 +69,10 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       { key: 'workpool.pp_long_link.target_amount', label: '金额覆盖（可选）' },
       { key: 'workpool.pp_long_link.max_retries', label: '失败重试次数', type: 'number', placeholder: '3' },
       { key: 'workpool.pp_long_link.retry_backoff_ms', label: '重试退避毫秒', type: 'number', placeholder: '5000' },
-      { key: 'workpool.pp_long_link.proxy_url', label: '统一代理 URL', placeholder: '留空复用任务/账号代理' },
-      { key: 'workpool.pp_long_link.create_proxy_url', label: 'create 代理 URL' },
-      { key: 'workpool.pp_long_link.followup_proxy_url', label: 'followup 代理 URL' },
-      { key: 'workpool.pp_long_link.approve_proxy_url', label: 'approve 代理 URL' },
+      { key: 'workpool.pp_long_link.proxy_url', label: '统一代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空复用任务/账号代理' },
+      { key: 'workpool.pp_long_link.create_proxy_url', label: 'create 代理 URL', type: 'proxy_select' },
+      { key: 'workpool.pp_long_link.followup_proxy_url', label: 'followup 代理 URL', type: 'proxy_select' },
+      { key: 'workpool.pp_long_link.approve_proxy_url', label: 'approve 代理 URL', type: 'proxy_select' },
     ],
   },
   payment: {
@@ -120,7 +129,10 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       },
       { key: 'workpool.chatgpt_session.refresh_before_seconds', label: '提前刷新秒数', type: 'number', placeholder: '300' },
       { key: 'workpool.chatgpt_session.max_attempts', label: 'Session 请求重试次数', type: 'number', placeholder: '3' },
-      { key: 'workpool.chatgpt_session.proxy_region', label: '重登代理 region', placeholder: '只用于重登；留空则不限制 region' },
+      { key: 'workpool.chatgpt_session.relogin_reuse_account_proxy', label: '重登复用账号代理', type: 'switch' },
+      { key: 'workpool.chatgpt_session.proxy_provider', label: '重登代理厂商', type: 'select', options: PROXY_PROVIDER_OPTIONS },
+      { key: 'workpool.chatgpt_session.proxy_region', label: '重登代理 region', placeholder: '只用于重登；US / JP / BR' },
+      { key: 'workpool.chatgpt_session.proxy_ttl', label: '重登代理持续时间 t', type: 'number', placeholder: '默认 5' },
     ],
   },
   sub2api_sync: {
@@ -155,6 +167,10 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
     description: 'OpenAI OAuth PKCE 获取 RT；短期 OAuth access_token 只作 OAuth 元数据保存。',
     fields: [
       { key: 'worker_concurrency.openai_oauth', label: 'openai_oauth 并发', type: 'number', placeholder: '默认 3' },
+      { key: 'workpool.openai_oauth.proxy_provider', label: 'OAuth 代理厂商', type: 'select', options: PROXY_PROVIDER_OPTIONS },
+      { key: 'workpool.openai_oauth.proxy_region', label: 'OAuth 代理 region', placeholder: 'US / JP / BR' },
+      { key: 'workpool.openai_oauth.proxy_ttl', label: 'OAuth 代理持续时间 t', type: 'number', placeholder: '默认 5' },
+      { key: 'workpool.openai_oauth.proxy_url', label: 'OAuth 显式代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空优先复用账号代理' },
       { key: 'workpool.openai_oauth.sms_project', label: 'OAuth 短信项目', placeholder: 'openai_oauth' },
       { key: 'workpool.openai_oauth.phone_verification_enabled', label: '启用 add-phone 接码', type: 'switch' },
       {
@@ -165,11 +181,24 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
           { value: 'smsbower', label: 'SmsBower' },
           { value: 'fivesim', label: '5SIM' },
           { value: 'smsgiare', label: 'SmsGiaRe' },
+          { value: 'smspool', label: 'SmsPool' },
         ],
       },
       { key: 'workpool.openai_oauth.phone_verification_use_proxy', label: '接码平台 API 走账号代理', type: 'switch' },
       { key: 'workpool.openai_oauth.phone_verification_max_attempts', label: '最大取号次数', type: 'number', placeholder: '3' },
       { key: 'workpool.openai_oauth.phone_verification_poll_timeout_seconds', label: '等待短信秒数', type: 'number', placeholder: '180' },
+      { key: 'workpool.openai_oauth.smspool_api_key', label: 'SmsPool API Key', type: 'password' },
+      { key: 'workpool.openai_oauth.smspool_base_url', label: 'SmsPool Base URL', placeholder: '默认 https://api.smspool.net' },
+      { key: 'workpool.openai_oauth.smspool_country', label: 'SmsPool 国家', placeholder: '例如 77 / 1 / US' },
+      { key: 'workpool.openai_oauth.smspool_countries', label: 'SmsPool 国家列表', placeholder: '多个用换行/逗号分隔，留空则用单个国家' },
+      { key: 'workpool.openai_oauth.smspool_service', label: 'SmsPool Service', placeholder: '默认 openai' },
+      { key: 'workpool.openai_oauth.smspool_pool', label: 'SmsPool Pool', placeholder: '留空则自动取可用 pool' },
+      { key: 'workpool.openai_oauth.smspool_max_price', label: 'SmsPool 最高价格', type: 'number', placeholder: '0 表示不限' },
+      { key: 'workpool.openai_oauth.smspool_pricing_option', label: 'SmsPool Pricing Option', placeholder: '可留空' },
+      { key: 'workpool.openai_oauth.smspool_max_reuses', label: 'SmsPool 最大复用次数', type: 'number', placeholder: '3' },
+      { key: 'workpool.openai_oauth.smspool_reuse_cooldown_seconds', label: 'SmsPool 复用冷却秒数', type: 'number', placeholder: '1800' },
+      { key: 'workpool.openai_oauth.smspool_reuse_enabled', label: '启用 SmsPool 复用池', type: 'switch' },
+      { key: 'workpool.openai_oauth.smspool_purchase_enabled', label: '启用 SmsPool 购买号码', type: 'switch' },
     ],
   },
   sso_oauth: {
@@ -193,7 +222,7 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       { key: 'worker_concurrency.codex_invitation', label: 'codex_invitation 并发', type: 'number', placeholder: '默认 2' },
       { key: 'workpool.codex_invitation.invite_count', label: '默认邀请数量', type: 'number', placeholder: '1' },
       { key: 'workpool.codex_invitation.prefix_len', label: '随机邮箱前缀长度', type: 'number', placeholder: '20' },
-      { key: 'workpool.codex_invitation.proxy_url', label: '显式代理 URL', placeholder: '留空则不使用；也可任务输入 proxy_url' },
+      { key: 'workpool.codex_invitation.proxy_url', label: '显式代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空则不使用；也可任务输入 proxy_url' },
       { key: 'workpool.codex_invitation.acquire_proxy', label: '无显式代理时从 proxy_pool 领取', type: 'switch' },
       { key: 'workpool.codex_invitation.check_eligibility', label: '发送前检查邀请额度', type: 'switch' },
       { key: 'workpool.codex_invitation.dry_run', label: '默认 dry-run', type: 'switch' },
@@ -227,7 +256,10 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       { key: 'workpool.codex_token.interval_ms', label: 'Workspace 间隔毫秒', type: 'number', placeholder: '1500' },
       { key: 'workpool.codex_token.max_retries', label: '最大重试次数', type: 'number', placeholder: '3' },
       { key: 'workpool.codex_token.retry_backoff_ms', label: '重试退避毫秒', type: 'number', placeholder: '5000' },
-      { key: 'workpool.codex_token.proxy_url', label: '显式代理 URL', placeholder: '留空复用账号代理' },
+      { key: 'workpool.codex_token.proxy_provider', label: '代理厂商', type: 'select', options: PROXY_PROVIDER_OPTIONS },
+      { key: 'workpool.codex_token.proxy_region', label: '代理 region', placeholder: 'US / JP / BR' },
+      { key: 'workpool.codex_token.proxy_ttl', label: '代理持续时间 t', type: 'number', placeholder: '默认 5' },
+      { key: 'workpool.codex_token.proxy_url', label: '显式代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空复用账号代理' },
     ],
   },
 
@@ -253,7 +285,10 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       { key: 'workpool.workspace_join.refresh_before_request', label: '请求前刷新 AT', type: 'switch' },
       { key: 'workpool.workspace_join.allow_partial', label: '允许部分成功', type: 'switch' },
       { key: 'workpool.workspace_join.switch_after_join', label: '加入成功后切换到该 Workspace', type: 'switch' },
-      { key: 'workpool.workspace_join.proxy_url', label: '显式代理 URL', placeholder: '留空复用任务/账号代理' },
+      { key: 'workpool.workspace_join.proxy_provider', label: '代理厂商', type: 'select', options: PROXY_PROVIDER_OPTIONS },
+      { key: 'workpool.workspace_join.proxy_region', label: '代理 region', placeholder: 'US / JP / BR' },
+      { key: 'workpool.workspace_join.proxy_ttl', label: '代理持续时间 t', type: 'number', placeholder: '默认 5' },
+      { key: 'workpool.workspace_join.proxy_url', label: '显式代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空复用任务/账号代理' },
       { key: 'workpool.workspace_join.acquire_proxy', label: '无显式代理时从 proxy_pool 领取', type: 'switch' },
     ],
   },
@@ -263,7 +298,10 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
     description: 'Codex 激活池：接在 sso_oauth 后，模拟 Codex Desktop 协议请求完成受邀账号激活。',
     fields: [
       { key: 'worker_concurrency.active', label: 'active 并发', type: 'number', placeholder: '默认 3' },
-      { key: 'workpool.active.proxy_url', label: '显式代理 URL', placeholder: '留空复用任务/账号代理' },
+      { key: 'workpool.active.proxy_provider', label: '代理厂商', placeholder: '留空复用任务/账号代理' },
+      { key: 'workpool.active.proxy_region', label: '代理 region', placeholder: 'US / JP / BR' },
+      { key: 'workpool.active.proxy_ttl', label: '代理持续时间 t', type: 'number', placeholder: '默认 5' },
+      { key: 'workpool.active.proxy_url', label: '显式代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空复用任务/账号代理' },
       { key: 'workpool.active.acquire_proxy', label: '无显式代理时从 proxy_pool 领取', type: 'switch' },
       { key: 'workpool.active.refresh_before_activation', label: '激活前刷新 access_token', type: 'switch' },
       { key: 'workpool.active.dry_run', label: '默认 dry-run', type: 'switch' },
@@ -303,7 +341,29 @@ export const RESOURCEPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
     description: '代理资源本身在代理页维护；这里仅保留全局 fallback。账号链路优先使用注册时绑定的代理。',
     fields: [
       { key: 'default_proxy_enabled', label: '启用全局默认代理', type: 'switch' },
-      { key: 'default_proxy_url', label: '全局默认代理', placeholder: 'http://user:pass@host:port' },
+      { key: 'default_proxy_provider', label: '默认动态代理厂商', type: 'select', options: PROXY_PROVIDER_OPTIONS },
+      { key: 'default_proxy_region', label: '默认动态代理地区', placeholder: 'US' },
+      { key: 'default_proxy_ttl', label: '默认动态代理持续时间 t', type: 'number', placeholder: '5' },
+      { key: 'default_proxy_url', label: '全局固定代理 URL 兜底', placeholder: '动态 provider 未配置时才用' },
+      { key: 'proxy_provider.default', label: 'Provider 默认名', type: 'select', options: PROXY_PROVIDER_OPTIONS },
+      { key: 'proxy_provider.arxlabs.enabled', label: 'arxlabs 启用', type: 'switch' },
+      { key: 'proxy_provider.arxlabs.scheme', label: 'arxlabs scheme', placeholder: 'http' },
+      { key: 'proxy_provider.arxlabs.host', label: 'arxlabs host', placeholder: 'us.arxlabs.io' },
+      { key: 'proxy_provider.arxlabs.port', label: 'arxlabs port', type: 'number', placeholder: '3010' },
+      { key: 'proxy_provider.arxlabs.username_template', label: 'arxlabs 用户名模板', placeholder: 'jnej1150915-region-{region}-sid-{sid}-t-{ttl}' },
+      { key: 'proxy_provider.arxlabs.password', label: 'arxlabs 密码', type: 'password' },
+      { key: 'proxy_provider.arxlabs.default_region', label: 'arxlabs 默认地区', placeholder: 'US' },
+      { key: 'proxy_provider.arxlabs.default_ttl', label: 'arxlabs 默认持续时间 t', type: 'number', placeholder: '5' },
+      { key: 'proxy_provider.arxlabs.sid_length', label: 'arxlabs sid 长度', type: 'number', placeholder: '8' },
+      { key: 'proxy_provider.1024proxy.enabled', label: '1024proxy 启用', type: 'switch' },
+      { key: 'proxy_provider.1024proxy.scheme', label: '1024proxy scheme', placeholder: 'socks5' },
+      { key: 'proxy_provider.1024proxy.host', label: '1024proxy host', placeholder: 'us.1024proxy.io' },
+      { key: 'proxy_provider.1024proxy.port', label: '1024proxy port', type: 'number', placeholder: '3000' },
+      { key: 'proxy_provider.1024proxy.username_template', label: '1024proxy 用户名模板', placeholder: 'jbgk38874-region-{region}-sid-{sid}-t-{ttl}' },
+      { key: 'proxy_provider.1024proxy.password', label: '1024proxy 密码', type: 'password' },
+      { key: 'proxy_provider.1024proxy.default_region', label: '1024proxy 默认地区', placeholder: 'US' },
+      { key: 'proxy_provider.1024proxy.default_ttl', label: '1024proxy 默认持续时间 t', type: 'number', placeholder: '5' },
+      { key: 'proxy_provider.1024proxy.sid_length', label: '1024proxy sid 长度', type: 'number', placeholder: '8' },
     ],
   },
   sms_pool: {

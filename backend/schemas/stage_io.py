@@ -17,6 +17,10 @@ class StageInput(BaseModel):
     email_address: str = ""
     proxy_id: Optional[int] = None
     proxy_url: str = ""
+    proxy_provider: str = ""
+    proxy_region: str = ""
+    proxy_ttl: str = ""
+    proxy_duration: str = ""
 
 
 class StageOutput(BaseModel):
@@ -33,7 +37,7 @@ class RegisterInput(StageInput):
     password: Optional[str] = None
     proxy_region: str = ""
     region: str = ""
-    also_record_to_at_pool: bool = False
+    also_record_to_at_pool: bool = True
     extra_config: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -22,6 +22,7 @@ from .microsoft_import_rules import (
     ACCOUNT_TYPE_MICROSOFT_OAUTH,
     ACCOUNT_TYPE_NETEASE_163_IMAP,
     ACCOUNT_TYPE_GMAIL_IMAP,
+    ACCOUNT_TYPE_TINKMAIL_IMAP,
     AutoDetectRowParser,
     DuplicateMicrosoftMailboxRule,
     MailApiUrlFormatRule,
@@ -234,6 +235,8 @@ class MicrosoftMailImportStrategy:
                         provider = "netease_163"
                     elif record.account_type == ACCOUNT_TYPE_GMAIL_IMAP:
                         provider = "gmail_imap"
+                    elif record.account_type == ACCOUNT_TYPE_TINKMAIL_IMAP:
+                        provider = "tinkmail"
                     else:
                         provider = PROVIDER_NAME
                     meta = {
@@ -247,6 +250,9 @@ class MicrosoftMailImportStrategy:
                     elif record.account_type == ACCOUNT_TYPE_GMAIL_IMAP:
                         from backend.integrations.mail.gmail import build_metadata
                         meta.update(build_metadata(alias_email=record.email, app_password=record.imap_auth_code or record.refresh_token))
+                    elif record.account_type == ACCOUNT_TYPE_TINKMAIL_IMAP:
+                        from backend.integrations.mail.tinkmail import build_imap_metadata
+                        meta.update(build_imap_metadata(email=record.email, client_token=record.imap_auth_code or record.refresh_token))
                     account = EmailAccount(
                         provider=provider,
                         email=record.email,

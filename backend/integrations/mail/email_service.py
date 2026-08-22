@@ -121,6 +121,10 @@ class MicrosoftEmailService:
         exclude_codes: set[str] | list[str] | tuple[str, ...] | None = None,
         **_kwargs: Any,
     ) -> str | None:
+        initial_delay = max(0, min(settings.get_int("email_otp_initial_delay_seconds", 5), 60))
+        if initial_delay:
+            logger.info("[email %s] OTP fetch initial delay %ss before polling", email, initial_delay)
+            time.sleep(initial_delay)
         request_dt = _otp_request_datetime(otp_sent_at)
         since_iso = (request_dt - timedelta(seconds=OTP_REQUEST_GRACE_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")
 

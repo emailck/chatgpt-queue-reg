@@ -16,6 +16,8 @@ class Proxy(SQLModel, table=True):
     url: str = Field(index=True, sa_column_kwargs={"unique": True})
     label: str = ""
     region: str = ""
+    provider: str = Field(default="", index=True)
+    duration: str = ""
     enabled: bool = Field(default=True, index=True)
     success_count: int = 0
     fail_count: int = 0

@@ -7,6 +7,7 @@ ACCOUNT_TYPE_MICROSOFT_OAUTH = "microsoft_oauth"
 ACCOUNT_TYPE_MAILAPI_URL = "mailapi_url"
 ACCOUNT_TYPE_NETEASE_163_IMAP = "netease_163_imap"
 ACCOUNT_TYPE_GMAIL_IMAP = "gmail_imap"
+ACCOUNT_TYPE_TINKMAIL_IMAP = "tinkmail_imap"
 
 
 @dataclass
@@ -129,6 +130,28 @@ class GmailImapRowParser:
         )
 
 
+class TinkMailImapRowParser:
+    def parse(self, line_number: int, line: str) -> MicrosoftMailImportRecord:
+        parts = [part.strip() for part in str(line or "").split("----")]
+        if len(parts) != 2:
+            raise ValueError(f"行 {line_number}: TinkMail 导入需为 邮箱----ClientToken")
+        email, client_token = parts
+        if not _is_valid_email(email) or not email.lower().endswith("@tinkmail.me"):
+            raise ValueError(f"行 {line_number}: 不是有效的 TinkMail 邮箱: {email}")
+        if not client_token:
+            raise ValueError(f"行 {line_number}: 缺少 TinkMail Client Token")
+        return MicrosoftMailImportRecord(
+            line_number=line_number,
+            email=email,
+            password=client_token,
+            client_id="",
+            refresh_token=client_token,
+            account_type=ACCOUNT_TYPE_TINKMAIL_IMAP,
+            mailapi_url="",
+            imap_auth_code=client_token,
+        )
+
+
 class NetEase163ImapRowParser:
     def parse(self, line_number: int, line: str) -> MicrosoftMailImportRecord:
         parts = [part.strip() for part in str(line or "").split("----")]
@@ -160,11 +183,13 @@ class AutoDetectRowParser:
         mailapi_parser: Optional[MicrosoftImportRowParser] = None,
         netease163_parser: Optional[MicrosoftImportRowParser] = None,
         gmail_parser: Optional[MicrosoftImportRowParser] = None,
+        tinkmail_parser: Optional[MicrosoftImportRowParser] = None,
     ):
         self._oauth_parser = oauth_parser or MicrosoftOAuthRowParser()
         self._mailapi_parser = mailapi_parser or MailApiUrlRowParser()
         self._netease163_parser = netease163_parser or NetEase163ImapRowParser()
         self._gmail_parser = gmail_parser or GmailImapRowParser()
+        self._tinkmail_parser = tinkmail_parser or TinkMailImapRowParser()
 
     def parse(self, line_number: int, line: str) -> MicrosoftMailImportRecord:
         parts = [part.strip() for part in str(line or "").split("----")]
@@ -172,6 +197,8 @@ class AutoDetectRowParser:
             return self._mailapi_parser.parse(line_number, line)
         if len(parts) == 2 and parts[0].lower().endswith("@gmail.com"):
             return self._gmail_parser.parse(line_number, line)
+        if len(parts) == 2 and parts[0].lower().endswith("@tinkmail.me"):
+            return self._tinkmail_parser.parse(line_number, line)
         if len(parts) == 2:
             return self._mailapi_parser.parse(line_number, line)
         if len(parts) == 3 and parts[0].lower().endswith("@163.com"):
@@ -179,7 +206,7 @@ class AutoDetectRowParser:
         if len(parts) >= 4:
             return self._oauth_parser.parse(line_number, line)
         raise ValueError(
-            f"行 {line_number}: 格式错误，支持 邮箱----mailapi_url / 邮箱----AppPassword(Gmail) / 邮箱----密码----授权码(163) / 邮箱----密码----client_id----refresh_token"
+            f"行 {line_number}: 格式错误，支持 邮箱----mailapi_url / 邮箱----AppPassword(Gmail) / 邮箱----ClientToken(TinkMail) / 邮箱----密码----授权码(163) / 邮箱----密码----client_id----refresh_token"
         )
 
 

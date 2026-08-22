@@ -33,6 +33,11 @@ DEFAULT_UA = (
 DEFAULT_SEC_CH_UA = '"Chromium";v="143", "Google Chrome";v="143", "Not A(Brand";v="24"'
 
 
+class PhoneAuthStaleError(RuntimeError):
+    """Raised when add-phone session is no longer valid and the whole OAuth
+    flow should restart from authorize/continue."""
+
+
 class OAuthOtpAdapter:
     def __init__(self, email_service, *, log_fn, timeout_seconds: int = 300):
         self.email_service = email_service
@@ -294,21 +299,38 @@ class ProtocolOAuthClient:
     def _verify_phone(self, phone_provider, state: FlowState) -> FlowState:
         last_error = ""
         max_attempts = max(1, int(getattr(phone_provider, "max_attempts", 1) or 1))
+        current_state = state
         for attempt in range(1, max_attempts + 1):
             lease = None
             try:
+                current_state = self._refresh_phone_state(current_state)
                 self._log(f"OAuth RT 手机验证尝试 {attempt}/{max_attempts}: 获取号码")
                 lease = phone_provider.acquire_phone()
                 phone_provider.prepare_for_sms(lease)
-                self._send_phone_otp(lease.phone_number, state)
+                self._send_phone_otp(lease.phone_number, current_state)
+                phone_provider.request_resend(lease)
                 code = phone_provider.wait_for_code(lease)
                 if not code:
                     last_error = "接码超时"
                     phone_provider.mark_failure(lease, last_error)
                     continue
-                next_state = self._phone_otp_validate(code, state)
+                next_state = self._phone_otp_validate(code, current_state)
                 phone_provider.mark_success(lease)
                 return next_state
+            except PhoneAuthStaleError as exc:
+                last_error = str(exc)
+                if lease is not None:
+                    try:
+                        phone_provider.mark_failure(lease, last_error)
+                    except Exception:
+                        pass
+                self._log(f"OAuth RT 手机验证状态已过期，刷新手机步骤后重试: {last_error}")
+                try:
+                    current_state = self._refresh_phone_state(current_state)
+                    continue
+                except Exception as refresh_exc:
+                    last_error = f"{last_error}; refresh_failed: {refresh_exc}"
+                    break
             except Exception as exc:
                 last_error = str(exc)
                 if lease is not None:
@@ -321,6 +343,7 @@ class ProtocolOAuthClient:
 
     def _send_phone_otp(self, phone_number: str, state: FlowState) -> None:
         url = f"{AUTH_BASE}/api/accounts/add-phone/send"
+        self._log(f"OAuth RT 提交 add-phone/send 电话号码: {phone_number}")
         headers = self._headers(
             url,
             accept="application/json",
@@ -340,9 +363,15 @@ class ProtocolOAuthClient:
             allow_redirects=False,
             timeout=45,
         )
+        body = response.text or ""
         self._log(f"OAuth RT add-phone/send -> {response.status_code}")
         if response.status_code != 200:
-            raise RuntimeError(f"add-phone/send failed: HTTP {response.status_code} {response.text[:240]}")
+            lowered = body.lower()
+            if "invalid_auth_step" in lowered or "invalid authorization step" in lowered:
+                raise PhoneAuthStaleError(f"add-phone/send stale auth step: HTTP {response.status_code} {body[:240]}")
+            if "redirect_uri" in lowered and "log-in" in lowered:
+                raise PhoneAuthStaleError(f"add-phone/send redirected to login: HTTP {response.status_code} {body[:240]}")
+            raise RuntimeError(f"add-phone/send failed: HTTP {response.status_code} {body[:240]}")
 
     def _phone_otp_validate(self, code: str, state: FlowState) -> FlowState:
         url = f"{AUTH_BASE}/api/accounts/phone-otp/validate"
@@ -365,10 +394,21 @@ class ProtocolOAuthClient:
             allow_redirects=False,
             timeout=45,
         )
+        body = response.text or ""
         self._log(f"OAuth RT phone-otp/validate -> {response.status_code}")
         if response.status_code != 200:
-            raise RuntimeError(f"phone-otp/validate failed: HTTP {response.status_code} {response.text[:240]}")
+            lowered = body.lower()
+            if "invalid_auth_step" in lowered or "invalid authorization step" in lowered or "redirect_uri" in lowered and "log-in" in lowered:
+                raise PhoneAuthStaleError(f"phone-otp/validate stale auth step: HTTP {response.status_code} {body[:240]}")
+            raise RuntimeError(f"phone-otp/validate failed: HTTP {response.status_code} {body[:240]}")
         return extract_flow_state(response.json(), current_url=str(response.url))
+
+    def _refresh_phone_state(self, state: FlowState) -> FlowState:
+        target = state.continue_url or state.current_url or f"{AUTH_BASE}/add-phone"
+        _code, parsed = self._follow_state(_state_from_url(target))
+        if not self._is_add_phone(parsed):
+            raise PhoneAuthStaleError(f"phone state refresh did not return add_phone: {describe_flow_state(parsed)}")
+        return parsed
 
     def _follow_state(self, state: FlowState, max_hops: int = 16) -> tuple[str, FlowState]:
         current_url = state.continue_url or state.current_url

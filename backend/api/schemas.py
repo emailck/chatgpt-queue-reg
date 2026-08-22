@@ -151,6 +151,8 @@ def proxy_to_dict(row) -> dict[str, Any]:
         "url": row.url,
         "label": row.label,
         "region": row.region,
+        "provider": getattr(row, "provider", ""),
+        "duration": getattr(row, "duration", ""),
         "enabled": row.enabled,
         "success_count": row.success_count,
         "fail_count": row.fail_count,

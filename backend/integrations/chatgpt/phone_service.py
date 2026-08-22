@@ -57,6 +57,9 @@ class PhoneProvider:
     def prepare_for_sms(self, _lease: PhoneLease) -> None:
         return None
 
+    def request_resend(self, _lease: PhoneLease) -> None:
+        return None
+
     def wait_for_code(self, lease: PhoneLease) -> str:
         raise NotImplementedError
 
@@ -439,6 +442,10 @@ def build_phone_provider(
         return FiveSimProvider(values, log_fn=log_fn, proxy_url=proxy_url)
     if provider in {"smsgiare", "sms_giare"}:
         return SmsGiaReProvider(values, log_fn=log_fn, proxy_url=proxy_url)
+    if provider in {"smspool", "sms_pool"}:
+        if SmsPoolProvider is None:
+            raise RuntimeError("smspool provider 未能加载")
+        return SmsPoolProvider(values, log_fn=log_fn, proxy_url=proxy_url)
     raise RuntimeError(f"不支持的接码平台: {provider}")
 
 
@@ -485,3 +492,9 @@ def _normalize_phone(value: str) -> str:
     if phone and not phone.startswith("+"):
         phone = f"+{phone}"
     return phone
+
+
+try:
+    from backend.integrations.chatgpt.smspool_provider import SmsPoolProvider
+except Exception:  # pragma: no cover - optional provider
+    SmsPoolProvider = None  # type: ignore[assignment]

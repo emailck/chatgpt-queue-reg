@@ -20,18 +20,24 @@ class ProxyCreate(BaseModel):
     url: str
     label: str = ""
     region: str = ""
+    provider: str = ""
+    duration: str = ""
     enabled: bool = True
 
 
 class ProxyUpdate(BaseModel):
     label: str | None = None
     region: str | None = None
+    provider: str | None = None
+    duration: str | None = None
     enabled: bool | None = None
 
 
 class ProxyBulkCreate(BaseModel):
     proxies: list[str]
     region: str = ""
+    provider: str = ""
+    duration: str = ""
 
 
 class ProxyBatchDelete(BaseModel):
@@ -41,12 +47,18 @@ class ProxyBatchDelete(BaseModel):
 @router.get("/api/proxies", tags=["proxies"])
 def list_proxies(
     region: str = "",
+    provider: str = "",
+    duration: str = "",
     limit: int = Query(500, ge=1, le=2000),
 ):
     with Session(engine) as s:
         stmt = sa_select(Proxy)
         if region:
             stmt = stmt.where(Proxy.region == region)
+        if provider:
+            stmt = stmt.where(Proxy.provider == provider)
+        if duration:
+            stmt = stmt.where(Proxy.duration == duration)
         rows = list(s.exec(stmt.order_by(Proxy.id.desc()).limit(limit)).scalars())
     return [proxy_to_dict(r) for r in rows]
 
@@ -67,7 +79,7 @@ def create_proxy(body: ProxyCreate):
         existing = s.exec(sa_select(Proxy).where(Proxy.url == url)).scalars().first()
         if existing is not None:
             raise HTTPException(status_code=409, detail="proxy already exists")
-        row = Proxy(url=url, label=body.label, region=body.region, enabled=body.enabled)
+        row = Proxy(url=url, label=body.label, region=body.region, provider=body.provider, duration=body.duration, enabled=body.enabled)
         s.add(row)
         s.commit()
         s.refresh(row)
@@ -88,7 +100,7 @@ def bulk_add(body: ProxyBulkCreate):
             if existing is not None:
                 skipped += 1
                 continue
-            s.add(Proxy(url=url, region=body.region or "", enabled=True))
+            s.add(Proxy(url=url, region=body.region or "", provider=body.provider or "", duration=body.duration or "", enabled=True))
             added += 1
     return {"added": added, "skipped": skipped}
 
@@ -103,6 +115,10 @@ def update_proxy(proxy_id: int, body: ProxyUpdate):
             row.label = body.label
         if body.region is not None:
             row.region = body.region
+        if body.provider is not None:
+            row.provider = body.provider
+        if body.duration is not None:
+            row.duration = body.duration
         if body.enabled is not None:
             row.enabled = body.enabled
         row.updated_at = utcnow()
@@ -160,7 +176,7 @@ def check_proxies(background_tasks: BackgroundTasks):
 
 
 @router.get("/api/proxies/next", tags=["proxies"])
-def next_proxy(region: str = ""):
-    url = proxy_pool.get_next(region=region or "")
+def next_proxy(region: str = "", provider: str = "", duration: str = ""):
+    url = proxy_pool.get_next(region=region or "", provider=provider or "", duration=duration or "")
     return {"url": url}
 

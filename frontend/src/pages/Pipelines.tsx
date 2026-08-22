@@ -705,6 +705,8 @@ function CreateForm({ form }: { form: FormInstance }) {
   const selectedMode = Form.useWatch('mode', form) || mode
   const selectedPreset = Form.useWatch('preset', form)
   const selectedStages = Form.useWatch('stages', form) as string[] | undefined
+  const oauthEmail = Form.useWatch('email', form)
+  const oauthAccountId = Form.useWatch('account_id', form)
   const showCodexFields = selectedMode === 'preset'
     ? selectedPreset === 'codex_invitation_only' || selectedPreset === 'codex_invite_sso_active'
     : Array.isArray(selectedStages) && selectedStages.includes('codex_invitation')
@@ -942,17 +944,39 @@ function CreateForm({ form }: { form: FormInstance }) {
         <>
           <ActionCard
             title="OAuth / RT 参数"
-            description="已有账号补 RT/上传 sub 时需要填账号池 account_id；注册+RT 链路如果前面有 register，可以不填。"
+            description="已有账号补 RT/上传 sub：可填账号池 account_id；如果本地账号池没有该账号，也可以只填邮箱，后台会自动创建 OAuth 占位账号并用邮箱验证码登录。"
           />
           <Row gutter={16}>
             <Col span={12}>
-              <Form.Item label="已有账号 ID" name="account_id" rules={[{ required: selectedPreset === 'refresh_token_only' || selectedPreset === 'sso_rt_only', message: '已有账号补 RT 必须填账号ID' }]}>
-                <InputNumber min={1} style={{ width: '100%' }} placeholder="账号池 account_id，例如 353" />
+              <Form.Item
+                label="已有账号 ID"
+                name="account_id"
+                dependencies={["email"]}
+                rules={[{
+                  validator: async () => {
+                    if (selectedPreset !== 'refresh_token_only' && selectedPreset !== 'sso_rt_only') return
+                    if (oauthAccountId || String(oauthEmail || '').trim()) return
+                    throw new Error('已有账号补 RT 请填账号ID；如果账号池没有，就填邮箱')
+                  },
+                }]}
+              >
+                <InputNumber min={1} style={{ width: '100%' }} placeholder="账号池 account_id；没有账号时可留空改填邮箱" />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item label="邮箱覆盖（可选）" name="email">
-                <Input placeholder="默认从账号池读取" />
+              <Form.Item
+                label="邮箱覆盖 / 无账号时 OAuth 邮箱"
+                name="email"
+                dependencies={["account_id"]}
+                rules={[{
+                  validator: async () => {
+                    if (selectedPreset !== 'refresh_token_only') return
+                    if (oauthAccountId || String(oauthEmail || '').trim()) return
+                    throw new Error('账号池没有账号时，请在这里填邮箱')
+                  },
+                }]}
+              >
+                <Input placeholder="默认从账号池读取；账号池没有时填邮箱触发 OAuth 占位账号" />
               </Form.Item>
             </Col>
           </Row>

@@ -1567,6 +1567,7 @@ class ChatGPTClient:
                     last_error = msg
                     phone_provider.mark_failure(lease, msg)
                     continue
+                phone_provider.request_resend(lease)
                 code = phone_provider.wait_for_code(lease)
                 if not code:
                     last_error = "接码超时"
@@ -1590,6 +1591,7 @@ class ChatGPTClient:
 
     def send_phone_otp(self, phone_number):
         self._enter_stage("add_phone", f"send phone otp {phone_number}")
+        self._log(f"提交 add-phone/send 电话号码: {phone_number}")
         url = f"{self.AUTH}/api/accounts/add-phone/send"
         sentinel_token, _sentinel_so_token = self._get_sentinel_token(
             "authorize_continue",

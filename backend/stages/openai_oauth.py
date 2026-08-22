@@ -11,6 +11,7 @@ from backend.core.db import engine, session_scope
 from backend.core.errors import JobCancelled
 from backend.core.job_context import JobContext
 from backend.core.settings import settings
+from backend.core.proxy import resolve_workpool_proxy_template
 from backend.core.stages import stage
 from backend.core.time_utils import utcnow
 from backend.models.account import ChatGPTAccount
@@ -49,7 +50,13 @@ def run(ctx: JobContext) -> None:
     if not email:
         raise RuntimeError(f"account {account_id} has no email")
 
-    proxy_url = ctx.effective_proxy_url() or ""
+    proxy_url = ctx.effective_proxy_url() or str(payload.get("proxy_url") or merged_extra.get("proxy_url") or "").strip()
+    if not proxy_url:
+        rendered = resolve_workpool_proxy_template("openai_oauth", payload=payload, extra=merged_extra)
+        if rendered is not None and rendered.url:
+            proxy_url = rendered.url
+            ctx.attach_proxy(proxy_id=None, proxy_url=proxy_url)
+            ctx.log("openai_oauth dynamic proxy rendered", payload={"provider": rendered.provider, "region": rendered.region, "ttl": rendered.ttl, "sid": rendered.sid})
 
     ctx.log(
         "starting openai_oauth stage",

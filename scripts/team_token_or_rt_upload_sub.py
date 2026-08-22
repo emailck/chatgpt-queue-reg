@@ -48,6 +48,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-base", default=DEFAULT_API_BASE, help=f"后台地址，默认 {DEFAULT_API_BASE}")
     parser.add_argument("--account-id", type=int, default=0, help="本地账号 ID")
     parser.add_argument("--email", default="", help="按邮箱查找本地账号 ID")
+    parser.add_argument(
+        "--no-auto-create-account",
+        dest="auto_create_account",
+        action="store_false",
+        default=True,
+        help="按邮箱找不到本地账号时不自动创建 OAuth 占位账号",
+    )
     parser.add_argument("--latest", action="store_true", help="未指定账号时使用最新 registered 账号")
     parser.add_argument("-w", "--workspace-id", action="append", default=[], help="team workspace UUID，可重复")
     parser.add_argument("--workspace-ids", default="", help="多个 workspace，支持逗号/空格/换行分隔")
@@ -128,6 +135,8 @@ def resolve_account_id(api_base: str, args: argparse.Namespace) -> int:
         for account in accounts:
             if str(account.get("email") or "").strip().lower() == target:
                 return int(account.get("id") or 0)
+        if getattr(args, "auto_create_account", True):
+            return create_oauth_placeholder_account(args.email)
         raise RuntimeError(f"未找到邮箱对应账号: {args.email}")
     if args.latest:
         for account in accounts:
@@ -136,6 +145,87 @@ def resolve_account_id(api_base: str, args: argparse.Namespace) -> int:
         raise RuntimeError("未找到 latest registered 账号")
     raise SystemExit("必须指定 --account-id 或 --email；或使用 --latest")
 
+
+
+def create_oauth_placeholder_account(email: str) -> int:
+    """Create a minimal local ChatGPTAccount row so OAuth can login by email OTP.
+
+    This is for accounts that were created outside this queue but whose mailbox
+    is present in email_accounts.  openai_oauth only needs a local account row
+    for email/password, proxy binding, and browser identity defaults.
+    """
+    value = str(email or "").strip()
+    if not value or "@" not in value:
+        raise RuntimeError(f"邮箱无效，无法创建 OAuth 占位账号: {email!r}")
+    try:
+        from sqlmodel import Session, select
+
+        from backend.core.constants import ACCOUNT_STATUS_REGISTERED
+        from backend.core.db import engine
+        from backend.core.json_utils import json_dumps
+        from backend.core.settings import settings
+        from backend.core.time_utils import utcnow
+        from backend.models.account import ChatGPTAccount
+        from backend.models.email import EmailAccount
+        from backend.models.proxy import Proxy
+    except Exception as exc:
+        raise RuntimeError(f"无法加载本地 DB 模型，不能自动创建账号: {exc}") from exc
+
+    lower = value.lower()
+    proxy_url = (
+        str(settings.get("workpool.openai_oauth.proxy_url", "") or "").strip()
+        or str(settings.get("workpool.register.proxy_url", "") or "").strip()
+        or str(settings.get("default_proxy_url", "") or "").strip()
+        or str(settings.get("proxy_url", "") or "").strip()
+    )
+    proxy_id = None
+    password = ""
+    email_account_id = None
+    provider = ""
+    now = utcnow()
+    with Session(engine) as s:
+        existing = s.exec(select(ChatGPTAccount).where(ChatGPTAccount.email == value)).first()
+        if existing is None:
+            existing = s.exec(select(ChatGPTAccount).where(ChatGPTAccount.email == lower)).first()
+        if existing is not None:
+            return int(existing.id or 0)
+
+        email_row = s.exec(select(EmailAccount).where(EmailAccount.email == value)).first()
+        if email_row is None:
+            email_row = s.exec(select(EmailAccount).where(EmailAccount.email == lower)).first()
+        if email_row is not None:
+            password = str(email_row.password or "")
+            email_account_id = int(email_row.id or 0) or None
+            provider = str(email_row.provider or "")
+
+        if proxy_url:
+            proxy_row = s.exec(select(Proxy).where(Proxy.url == proxy_url)).first()
+            if proxy_row is not None:
+                proxy_id = int(proxy_row.id or 0) or None
+
+        metadata = {
+            "source": "oauth_placeholder",
+            "created_by": "team_token_or_rt_upload_sub.py",
+            "email_account_id": email_account_id,
+            "email_provider": provider,
+        }
+        account = ChatGPTAccount(
+            email=value,
+            password=password,
+            status=ACCOUNT_STATUS_REGISTERED,
+            proxy_id=proxy_id,
+            proxy_url=proxy_url,
+            cookies_json="[]",
+            local_storage_json="{}",
+            browser_fingerprint_json="{}",
+            user_agent="",
+            registered_at=now,
+            metadata_json=json_dumps(metadata),
+        )
+        s.add(account)
+        s.commit()
+        s.refresh(account)
+        return int(account.id or 0)
 
 def enqueue_job(api_base: str, job_type: str, account_id: int, payload: dict[str, Any]) -> int:
     body = {"type": job_type, "account_id": account_id, "input": {"account_id": account_id, **payload}}

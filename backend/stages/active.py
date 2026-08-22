@@ -18,7 +18,7 @@ from sqlmodel import Session
 
 from backend.core.db import engine, session_scope
 from backend.core.job_context import JobContext
-from backend.core.proxy import build_requests_proxy_config
+from backend.core.proxy import build_requests_proxy_config, resolve_workpool_proxy_template
 from backend.core.settings import settings
 from backend.core.stages import stage
 from backend.core.time_utils import utcnow
@@ -53,9 +53,15 @@ def run(ctx: JobContext) -> None:
     email = str(payload.get("sso_email") or payload.get("email") or _extract_email(token_bundle.get("access_token", ""), token_bundle.get("id_token", "")) or "").strip()
 
     proxy_url = str(payload.get("proxy_url") or ctx.effective_proxy_url() or config.get("proxy_url") or "").strip()
+    if not proxy_url:
+        rendered = resolve_workpool_proxy_template("active", payload=payload, extra=config)
+        if rendered is not None and rendered.url:
+            proxy_url = rendered.url
+            ctx.attach_proxy(proxy_id=None, proxy_url=proxy_url)
+            ctx.log("active dynamic proxy rendered", payload={"provider": rendered.provider, "region": rendered.region, "ttl": rendered.ttl, "sid": rendered.sid})
     if not proxy_url and _as_bool(payload.get("acquire_proxy", config.get("acquire_proxy", False))):
         try:
-            proxy_resource = ctx.acquire("proxy_pool", hint={"stage": "active"})
+            proxy_resource = ctx.acquire("proxy_pool", hint={"stage": "active", "region": payload.get("proxy_region") or config.get("proxy_region", ""), "provider": payload.get("proxy_provider") or config.get("proxy_provider", ""), "duration": payload.get("proxy_duration") or payload.get("proxy_ttl") or config.get("proxy_duration", "") or config.get("proxy_ttl", "")})
             proxy_payload = proxy_resource.payload or {}
             proxy_url = str(proxy_payload.get("url") or proxy_resource.id or "").strip()
             ctx.attach_proxy(proxy_id=int(proxy_payload.get("proxy_id") or 0) or None, proxy_url=proxy_url)

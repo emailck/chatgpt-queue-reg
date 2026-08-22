@@ -23,6 +23,7 @@ from backend.api.schemas import (
     pipeline_to_dict,
 )
 from backend.core.constants import (
+    ACCOUNT_STATUS_REGISTERED,
     JOB_STATUS_FAILED,
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
@@ -31,6 +32,9 @@ from backend.core.constants import (
 )
 from backend.core.db import engine, session_scope
 from backend.core.job_context import subscribe_job_events
+from backend.core.json_utils import json_dumps
+from backend.core.settings import settings
+from backend.core.proxy import resolve_workpool_proxy_template
 from backend.core.pipeline import (
     DEFAULT_PRESET,
     PRESETS,
@@ -43,8 +47,11 @@ from backend.core.pipeline import (
 from backend.core.queue import enqueue_job, get_pool
 from backend.core.stages import STAGE_REGISTRY
 from backend.core.time_utils import utcnow
+from backend.models.account import ChatGPTAccount
+from backend.models.email import EmailAccount
 from backend.models.job import Job, JobEvent
 from backend.models.pipeline import Pipeline
+from backend.models.proxy import Proxy
 
 router = APIRouter()
 
@@ -128,6 +135,96 @@ class IdsRequest(BaseModel):
     ids: list[int]
 
 
+
+# ---- OAuth account auto-resolve --------------------------------------------
+
+
+def _oauth_placeholder_account_id(email: str) -> int:
+    """Return/create a minimal ChatGPTAccount for email-driven OAuth.
+
+    UI-created OAuth jobs used to require an account_id.  Sometimes the GPT
+    account was created outside this queue, so only an email pool row exists.
+    For openai_oauth we can login by email OTP as long as we have the mailbox,
+    so create a local placeholder account and let chatgpt_session/openai_oauth
+    populate cookies/tokens as they run.
+    """
+    value = str(email or "").strip()
+    if not value or "@" not in value:
+        raise HTTPException(status_code=400, detail="OAuth 邮箱无效，无法自动创建账号")
+    lower = value.lower()
+    settings_all = settings.get_all()
+    proxy_url = (
+        str(settings_all.get("workpool.openai_oauth.proxy_url", "") or "").strip()
+        or str(settings_all.get("workpool.register.proxy_url", "") or "").strip()
+        or str(settings_all.get("default_proxy_url", "") or "").strip()
+        or str(settings_all.get("proxy_url", "") or "").strip()
+    )
+    if not proxy_url:
+        rendered = resolve_workpool_proxy_template("openai_oauth", payload={"email": value}, extra=settings_all)
+        if rendered is None:
+            rendered = resolve_workpool_proxy_template("register", payload={"email": value}, extra=settings_all)
+        if rendered is not None:
+            proxy_url = rendered.url
+    with session_scope() as s:
+        row = s.exec(sa_select(ChatGPTAccount).where(ChatGPTAccount.email == value)).scalars().first()
+        if row is None and lower != value:
+            row = s.exec(sa_select(ChatGPTAccount).where(ChatGPTAccount.email == lower)).scalars().first()
+        if row is not None:
+            return int(row.id or 0)
+
+        email_row = s.exec(sa_select(EmailAccount).where(EmailAccount.email == value)).scalars().first()
+        if email_row is None and lower != value:
+            email_row = s.exec(sa_select(EmailAccount).where(EmailAccount.email == lower)).scalars().first()
+        password = str(email_row.password or "") if email_row is not None else ""
+        provider = str(email_row.provider or "") if email_row is not None else ""
+        email_account_id = int(email_row.id or 0) if email_row is not None and email_row.id else None
+
+        proxy_id = None
+        if proxy_url:
+            proxy = s.exec(sa_select(Proxy).where(Proxy.url == proxy_url)).scalars().first()
+            if proxy is not None:
+                proxy_id = int(proxy.id or 0) or None
+
+        account = ChatGPTAccount(
+            email=value,
+            password=password,
+            status=ACCOUNT_STATUS_REGISTERED,
+            proxy_id=proxy_id,
+            proxy_url=proxy_url,
+            cookies_json="[]",
+            local_storage_json="{}",
+            browser_fingerprint_json="{}",
+            user_agent="",
+            registered_at=utcnow(),
+            metadata_json=json_dumps({
+                "source": "oauth_placeholder",
+                "created_by": "api/pipelines_or_jobs",
+                "email_account_id": email_account_id,
+                "email_provider": provider,
+            }),
+        )
+        s.add(account)
+        s.commit()
+        s.refresh(account)
+        return int(account.id or 0)
+
+
+def _ensure_oauth_account_id(stages: list[str], request_payload: dict[str, Any]) -> int | None:
+    """For openai_oauth without account_id, resolve/create by email."""
+    if "register" in stages:
+        return None
+    if "openai_oauth" not in stages:
+        return None
+    if request_payload.get("account_id") not in (None, ""):
+        return int(request_payload.get("account_id") or 0) or None
+    email = str(request_payload.get("email") or "").strip()
+    if not email:
+        return None
+    account_id = _oauth_placeholder_account_id(email)
+    request_payload["account_id"] = account_id
+    return account_id
+
+
 # ---- pipeline endpoints -----------------------------------------------------
 
 
@@ -204,6 +301,7 @@ def create_pipeline_endpoint(body: CreatePipelineRequest):
         value = getattr(body, key)
         if value not in (None, "", []):
             request_payload[key] = value
+    _ensure_oauth_account_id(stages, request_payload)
     stage_inputs = dict(body.stage_inputs or {})
     if request_payload and "codex_invitation" in stages:
         stage_inputs["codex_invitation"] = {
@@ -393,6 +491,9 @@ def enqueue_job_endpoint(body: JobEnqueueRequest):
     proxy_id = body.proxy_id
     if account_id is None and payload.get("account_id") not in (None, ""):
         account_id = int(payload.get("account_id") or 0) or None
+    if account_id is None and stage_name == "openai_oauth" and payload.get("email") not in (None, ""):
+        account_id = _oauth_placeholder_account_id(str(payload.get("email") or ""))
+        payload["account_id"] = account_id
     if payment_link_id is None and payload.get("payment_link_id") not in (None, ""):
         payment_link_id = int(payload.get("payment_link_id") or 0) or None
     if proxy_id is None and payload.get("proxy_id") not in (None, ""):

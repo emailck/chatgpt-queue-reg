@@ -23,6 +23,7 @@ from sqlmodel import Session
 from backend.core.db import engine
 from backend.core.job_context import JobContext
 from backend.core.settings import settings
+from backend.core.proxy import resolve_workpool_proxy_template
 from backend.core.stages import stage
 from backend.models.account import ChatGPTAccount
 from backend.schemas.stage_io import CodexTokenInput, CodexTokenOutput
@@ -73,6 +74,12 @@ def run(ctx: JobContext) -> None:
         raise RuntimeError("codex_token requires workspace_ids/workspace_id")
 
     proxy_url = str(payload.get("proxy_url") or ctx.effective_proxy_url() or config.get("proxy_url") or "").strip()
+    if not proxy_url:
+        rendered = resolve_workpool_proxy_template("codex_token", payload=payload, extra=config)
+        if rendered is not None and rendered.url:
+            proxy_url = rendered.url
+            ctx.attach_proxy(proxy_id=None, proxy_url=proxy_url)
+            ctx.log("codex_token dynamic proxy rendered", payload={"provider": rendered.provider, "region": rendered.region, "ttl": rendered.ttl, "sid": rendered.sid})
     verify_tls = not _as_bool(payload.get("insecure", config.get("insecure", False)))
     dry_run = _as_bool(payload.get("dry_run", config.get("dry_run", False)))
     interval_ms = _read_int(payload.get("interval_ms", config.get("interval_ms")), default=1500, minimum=0, maximum=300000)

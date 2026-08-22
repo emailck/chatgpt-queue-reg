@@ -14,6 +14,8 @@ interface Proxy {
   url: string
   label: string
   region: string
+  provider: string
+  duration: string
   enabled: boolean
   success_count: number
   fail_count: number
@@ -57,6 +59,7 @@ export default function Proxies() {
 
   const summary = useMemo(() => {
     const regions = new Set(rows.map((row) => row.region).filter(Boolean))
+    const providers = new Set(rows.map((row) => row.provider).filter(Boolean))
     return {
       total: rows.length,
       enabled: rows.filter((row) => row.enabled).length,
@@ -64,6 +67,7 @@ export default function Proxies() {
       success: rows.reduce((sum, row) => sum + Number(row.success_count || 0), 0),
       failed: rows.reduce((sum, row) => sum + Number(row.fail_count || 0), 0),
       regions: regions.size,
+      providers: providers.size,
     }
   }, [rows])
 
@@ -91,7 +95,7 @@ export default function Proxies() {
     try {
       const resp = await apiFetch<{ added: number; skipped: number }>('/proxies/bulk', {
         method: 'POST',
-        body: JSON.stringify({ proxies: lines, region: values.region || '' }),
+        body: JSON.stringify({ proxies: lines, region: values.region || '', provider: values.provider || '', duration: values.duration || '' }),
       })
       setBulkResult(resp)
       message.success(`新增 ${resp.added}，跳过 ${resp.skipped}`)
@@ -158,10 +162,22 @@ export default function Proxies() {
       render: (value: string) => <CopyableText value={value} label="代理" />,
     },
     {
+      title: 'Provider',
+      dataIndex: 'provider',
+      width: 120,
+      render: (value: string) => <Tag color="purple">{value || 'default'}</Tag>,
+    },
+    {
       title: 'Region',
       dataIndex: 'region',
       width: 120,
       render: (value: string) => <Tag color="blue">{value || 'no-region'}</Tag>,
+    },
+    {
+      title: '时间',
+      dataIndex: 'duration',
+      width: 90,
+      render: (value: string) => <Tag>{value || '-'}</Tag>,
     },
     {
       title: '启用',
@@ -213,6 +229,7 @@ export default function Proxies() {
         <StatCard label="success total" value={summary.success} tone="success" />
         <StatCard label="failure total" value={summary.failed} tone={summary.failed ? 'danger' : 'default'} />
         <StatCard label="regions" value={summary.regions} tone="info" />
+        <StatCard label="providers" value={summary.providers} tone="info" />
       </SummaryGrid>
 
       <ActionCard
@@ -255,7 +272,9 @@ export default function Proxies() {
         <Form form={form} layout="vertical">
           <Form.Item name="url" label="URL" rules={[{ required: true }]}><Input placeholder="http://user:pass@host:port" /></Form.Item>
           <Form.Item name="label" label="标签"><Input /></Form.Item>
-          <Form.Item name="region" label="区域"><Input /></Form.Item>
+          <Form.Item name="provider" label="厂商"><Input placeholder="arxlabs / 1024proxy" /></Form.Item>
+          <Form.Item name="region" label="区域"><Input placeholder="US / JP / BR" /></Form.Item>
+          <Form.Item name="duration" label="持续时间"><Input placeholder="5" /></Form.Item>
         </Form>
       </PopupCard>
 
@@ -263,7 +282,9 @@ export default function Proxies() {
         <Typography.Paragraph type="secondary">每行一个代理 URL，例如 <Text code>http://user:pass@host:port</Text>、<Text code>socks5://user:pass@host:port</Text>。重复 URL 会自动跳过。</Typography.Paragraph>
         <Form form={bulkForm} layout="vertical">
           <Form.Item name="content" label="代理列表" rules={[{ required: true }]}><Input.TextArea rows={10} placeholder="http://user:pass@1.2.3.4:1080" /></Form.Item>
-          <Form.Item name="region" label="区域（可选）"><Input /></Form.Item>
+          <Form.Item name="provider" label="厂商（可选）"><Input placeholder="arxlabs / 1024proxy" /></Form.Item>
+          <Form.Item name="region" label="区域（可选）"><Input placeholder="US / JP / BR" /></Form.Item>
+          <Form.Item name="duration" label="持续时间（可选）"><Input placeholder="5" /></Form.Item>
         </Form>
         {bulkResult && <Alert type="success" message={`新增 ${bulkResult.added}，跳过 ${bulkResult.skipped}`} showIcon style={{ marginTop: 12 }} />}
       </PopupCard>

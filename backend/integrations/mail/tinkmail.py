@@ -46,6 +46,8 @@ BASE_URL = "https://tinkmail.me"
 DEFAULT_X_SIGN = "51b52c1d420e0dafb11da6677095f3fc"
 ACCOUNT_TYPE_TINKMAIL = "tinkmail"
 PROVIDER_TINKMAIL = "tinkmail"
+DEFAULT_IMAP_HOST = "imap.tinkmail.me"
+DEFAULT_IMAP_PORT = 993
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
@@ -109,7 +111,7 @@ def register_tinkmail_account(
     log: LogFn | None = None,
 ) -> TinkMailRegistrationResult:
     account = _normalize_local_part(account) or _random_account()
-    password = str(password or "").strip() or f"{account}@tinkmail.me"
+    password = str(password or "").strip() or _random_password()
     secure_email = str(secure_email or "").strip() or _default_secure_email(account)
     x_sign = settings.get("tinkmail.x_sign", settings.get("tinkmail_x_sign", DEFAULT_X_SIGN)) or DEFAULT_X_SIGN
     ua = settings.get("tinkmail.user_agent", settings.get("tinkmail_user_agent", DEFAULT_UA)) or DEFAULT_UA
@@ -192,6 +194,13 @@ def _register_with_camoufox(
                 page.set_extra_http_headers({"accept-language": "en-US,en;q=0.9", "x-sign": x_sign})
             except Exception:
                 pass
+            try:
+                runtime_ua = str(page.evaluate("() => navigator.userAgent") or "").strip()
+                if runtime_ua:
+                    user_agent = runtime_ua
+                    _emit(log, f"TinkMail: runtime UA {user_agent[:120]}")
+            except Exception:
+                pass
             _emit(log, "TinkMail: navigating sign-up")
             page.goto(f"{BASE_URL}/sign-up", wait_until="domcontentloaded", timeout=60_000)
             _wait_ready(page, log)
@@ -209,6 +218,7 @@ def _register_with_camoufox(
             if not token:
                 raise RuntimeError("TinkMail Turnstile token empty（可配置 tinkmail.turnstile_token 或 tinkmail.captcha_api_key/CTF_CAPTCHA_API_KEY）")
             _emit(log, "TinkMail: Turnstile token acquired")
+            _human_pause("before_signup", log)
 
             payload = {
                 "isBusiness": False,
@@ -236,24 +246,29 @@ def _register_with_camoufox(
             email_addr = str(data.get("account") or f"{account}@tinkmail.me").strip()
             user_id = int(data.get("id") or 0)
             _emit(log, f"TinkMail: registered {email_addr} user_id={user_id or '-'}")
+            _human_pause("after_signup", log)
 
             # Hydrate post-signup state and create a client token.  The web API
             # uses the authenticated browser state; keeping cookies/storage lets
             # later OTP polling replay the same state.
             try:
                 page.goto(f"{BASE_URL}/home/inbox", wait_until="domcontentloaded", timeout=60_000)
+                _wait_ready(page, log)
+                _human_browse_mailbox(page, x_sign=x_sign, log=log)
             except Exception:
                 pass
             folders = _api_fetch_in_page(page, "/api/list-folder", x_sign=x_sign, referer=f"{BASE_URL}/home/inbox")
             inbox_id = _find_inbox_id(folders)
+            _human_pause("before_client_token", log)
             client_token = ""
             client_token_id: int | None = None
             try:
+                remark = _random_token_remark()
                 created = _api_fetch_in_page(
                     page,
                     "/api/client-token/create-token",
                     method="POST",
-                    body={"remark": "chatgpt-queue-reg"},
+                    body={"remark": remark},
                     x_sign=x_sign,
                     referer=f"{BASE_URL}/home/settings/client-tokens",
                 )
@@ -261,7 +276,16 @@ def _register_with_camoufox(
                 client_token = str((cdata or {}).get("token") or "")
                 client_token_id = int((cdata or {}).get("id") or 0) or None
             except Exception as exc:
-                _emit(log, f"TinkMail: client-token create skipped: {exc}")
+                msg = str(exc)
+                _emit(log, f"TinkMail: client-token create failed: {msg}")
+                # If TinkMail says the freshly created mailbox is banned, the
+                # mailbox cannot be used reliably for later OTP polling.  Treat
+                # this as a failed registration instead of adding a poisoned
+                # mailbox to the pool.
+                if "banned" in msg.lower() or settings.get_bool("tinkmail.require_client_token", True):
+                    raise RuntimeError(f"TinkMail client-token create failed: {msg}") from exc
+            if settings.get_bool("tinkmail.require_client_token", True) and not client_token:
+                raise RuntimeError("TinkMail client-token missing after registration")
             cookies = ctx.cookies([BASE_URL]) if hasattr(ctx, "cookies") else []
             local_storage = _storage_dump(page, "localStorage")
             session_storage = _storage_dump(page, "sessionStorage")
@@ -346,6 +370,20 @@ def build_metadata(result: TinkMailRegistrationResult | None = None, **kwargs: A
     return meta
 
 
+def build_imap_metadata(*, email: str, client_token: str, host: str = DEFAULT_IMAP_HOST, port: int = DEFAULT_IMAP_PORT) -> dict[str, Any]:
+    token = str(client_token or "").strip().replace(" ", "")
+    return {
+        "account_type": "tinkmail_imap",
+        "account": str(email or "").strip(),
+        "client_token": token,
+        "imap_host": str(host or DEFAULT_IMAP_HOST),
+        "imap_port": int(port or DEFAULT_IMAP_PORT),
+        "imap_auth_code": token,
+        "imap_login_email": str(email or "").strip(),
+        "pool_status": "available",
+    }
+
+
 def wait_for_tinkmail_otp(
     account: EmailAccount,
     *,
@@ -358,6 +396,20 @@ def wait_for_tinkmail_otp(
     log: LogFn | None = None,
 ) -> dict[str, Any]:
     meta = json_loads(account.metadata_json, fallback={}) or {}
+    imap_token = str(meta.get("imap_auth_code") or meta.get("client_token") or account.refresh_token or "").strip().replace(" ", "")
+    if imap_token:
+        return _wait_for_tinkmail_otp_imap(
+            account,
+            meta=meta,
+            keyword=keyword,
+            code_pattern=code_pattern,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            since_dt=since_dt,
+            exclude_codes=exclude_codes,
+            log=log,
+        )
+
     deadline = time.time() + max(1, int(timeout or 180))
     excluded = {str(code or "").strip() for code in (exclude_codes or ()) if str(code or "").strip()}
     last_error = ""
@@ -400,6 +452,71 @@ def wait_for_tinkmail_otp(
         )
     except TimeoutError:
         raise TimeoutError(f"TinkMail OTP not received within {timeout}s" + (f": {last_error}" if last_error else ""))
+
+
+def _wait_for_tinkmail_otp_imap(
+    account: EmailAccount,
+    *,
+    meta: dict[str, Any],
+    keyword: str = "",
+    code_pattern: str | None = None,
+    timeout: int = 180,
+    poll_interval: float = 5.0,
+    since_dt: datetime | None = None,
+    exclude_codes=None,
+    log: LogFn | None = None,
+) -> dict[str, Any]:
+    from backend.integrations.mail import imap163 as common
+
+    deadline = time.time() + max(1, int(timeout or 180))
+    excluded = {str(code or "").strip() for code in (exclude_codes or ()) if str(code or "").strip()}
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            for data in list_tinkmail_imap_messages(account, limit=30, meta=meta):
+                received = common._parse_dt(data.get("received_at"))  # noqa: SLF001
+                if since_dt is not None and received is not None and received < since_dt.astimezone(timezone.utc):
+                    continue
+                hay = f"{data.get('subject') or ''}\n{data.get('sender') or ''}\n{data.get('body_text') or ''}"
+                if keyword and keyword.lower() not in hay.lower():
+                    continue
+                code = common._extract_code(hay, code_pattern=code_pattern, exclude_codes=excluded)  # noqa: SLF001
+                if code:
+                    data["code"] = code
+                    _emit(log, f"TinkMail IMAP received OTP subject={data.get('subject')!r}")
+                    return data
+            _emit(log, "TinkMail IMAP no matching OTP yet; polling again")
+        except Exception as exc:
+            last_error = str(exc)
+            _emit(log, f"TinkMail IMAP poll error: {last_error}")
+        time.sleep(float(poll_interval or 5.0))
+    raise TimeoutError(f"TinkMail IMAP OTP not received within {timeout}s" + (f": {last_error}" if last_error else ""))
+
+
+def list_tinkmail_imap_messages(account: EmailAccount, *, limit: int = 10, meta: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    from backend.integrations.mail import imap163 as common
+
+    meta = meta or (json_loads(account.metadata_json, fallback={}) or {})
+    host = str(meta.get("imap_host") or DEFAULT_IMAP_HOST)
+    port = int(meta.get("imap_port") or DEFAULT_IMAP_PORT)
+    token = str(meta.get("imap_auth_code") or meta.get("client_token") or account.refresh_token or "").strip().replace(" ", "")
+    login_email = str(meta.get("imap_login_email") or account.email).strip()
+    if not token:
+        raise RuntimeError("TinkMail 缺少 Client Token")
+    with common._imap_login(login_email, token, host, port) as client:  # noqa: SLF001
+        client.select("INBOX", readonly=True)
+        typ, payload = client.search(None, "ALL")
+        if typ != "OK":
+            raise RuntimeError(f"TinkMail IMAP search failed: {typ}")
+        ids = (payload[0] or b"").split()[-max(1, int(limit or 10)):]
+        out: list[dict[str, Any]] = []
+        for msg_id in reversed(ids):
+            msg = common._fetch_message(client, msg_id)  # noqa: SLF001
+            data = common._message_to_data(account.email, msg, raw_id=msg_id.decode(errors="ignore"))  # noqa: SLF001
+            data["provider"] = PROVIDER_TINKMAIL
+            data["email"] = account.email
+            out.append(data)
+        return out
 
 
 class TinkMailAuthError(RuntimeError):
@@ -777,8 +894,10 @@ def _solve_turnstile_external(*, site_key: str, page_url: str, proxy_url: str, u
         "websiteURL": page_url,
         "websiteKey": site_key,
         "userAgent": user_agent or DEFAULT_UA,
-        "action": "sign-up",
     }
+    action = str(settings.get("tinkmail.captcha_action", "") or "").strip()
+    if action:
+        task["action"] = action
     if settings.get_bool("tinkmail.captcha_use_proxy", False) and proxy_url:
         parsed = _proxy_parts_for_solver(proxy_url)
         if parsed:
@@ -820,12 +939,21 @@ def _solve_turnstile_external(*, site_key: str, page_url: str, proxy_url: str, u
 
 def _proxy_parts_for_solver(proxy_url: str) -> dict[str, Any]:
     try:
+        import socket
         from urllib.parse import urlparse
         parsed = urlparse(proxy_url)
         if not parsed.hostname or not parsed.port:
             return {}
+        host = parsed.hostname
+        # Anti-Captcha proxy tasks reject DNS names for some task types; pass a
+        # concrete proxy IP while keeping the original login/password.
+        if not re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", host):
+            try:
+                host = socket.gethostbyname(host)
+            except Exception:
+                pass
         ptype = (parsed.scheme or "http").replace("socks5h", "socks5").lower()
-        out: dict[str, Any] = {"proxyType": ptype, "proxyAddress": parsed.hostname, "proxyPort": int(parsed.port)}
+        out: dict[str, Any] = {"proxyType": ptype, "proxyAddress": host, "proxyPort": int(parsed.port)}
         if parsed.username:
             out["proxyLogin"] = parsed.username
         if parsed.password:
@@ -958,7 +1086,72 @@ def _default_secure_email(account: str) -> str:
     configured = settings.get("tinkmail.secure_email", settings.get("tinkmail_secure_email", ""))
     if configured:
         return configured.strip()
-    return f"{account}.recovery@hotmail.com"
+    domains = [x.strip() for x in re.split(r"[,\s]+", settings.get("tinkmail.secure_email_domains", "")) if x.strip()]
+    if not domains:
+        domains = ["hotmail.com", "outlook.com", "gmail.com"]
+    local = _normalize_local_part(account)
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(5, 9)))
+    sep = random.choice([".", "_", ""])
+    return f"{local}{sep}{suffix}@{random.choice(domains)}"
+
+
+def _random_password(length: int = 14) -> str:
+    chars = string.ascii_letters + string.digits + "!@#$%^&*"
+    while True:
+        value = "".join(random.SystemRandom().choice(chars) for _ in range(max(10, length)))
+        if (
+            any(c.islower() for c in value)
+            and any(c.isupper() for c in value)
+            and any(c.isdigit() for c in value)
+            and any(c in "!@#$%^&*" for c in value)
+        ):
+            return value
+
+
+def _random_token_remark() -> str:
+    prefix = random.choice(["mail", "api", "client", "inbox", "sync"])
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(5, 9)))
+    return f"{prefix}-{suffix}"
+
+
+def _human_pause(label: str, log: LogFn | None = None) -> None:
+    raw = settings.get(f"tinkmail.pause.{label}", "")
+    if raw:
+        try:
+            low_s, _, high_s = str(raw).partition("-")
+            low = float(low_s)
+            high = float(high_s or low_s)
+        except Exception:
+            low, high = 1.0, 3.0
+    elif label == "before_client_token":
+        low = float(settings.get_int("tinkmail.client_token_delay_min_seconds", 25))
+        high = float(settings.get_int("tinkmail.client_token_delay_max_seconds", 60))
+    elif label == "after_signup":
+        low, high = 4.0, 12.0
+    else:
+        low, high = 1.5, 4.0
+    if high < low:
+        high = low
+    delay = random.uniform(low, high)
+    _emit(log, f"TinkMail: human pause {label} {delay:.1f}s")
+    time.sleep(delay)
+
+
+def _human_browse_mailbox(page: Any, *, x_sign: str, log: LogFn | None = None) -> None:
+    try:
+        page.mouse.move(random.randint(120, 600), random.randint(120, 500), steps=random.randint(8, 20))
+    except Exception:
+        pass
+    try:
+        _api_fetch_in_page(page, "/api/list-folder", x_sign=x_sign, referer=f"{BASE_URL}/home/inbox")
+        time.sleep(random.uniform(1.0, 3.0))
+        page.goto(f"{BASE_URL}/home/settings", wait_until="domcontentloaded", timeout=60_000)
+        _wait_ready(page, log)
+        time.sleep(random.uniform(1.0, 3.0))
+        page.goto(f"{BASE_URL}/home/settings/client-tokens", wait_until="domcontentloaded", timeout=60_000)
+        _wait_ready(page, log)
+    except Exception as exc:
+        _emit(log, f"TinkMail: human browse skipped: {str(exc)[:120]}")
 
 
 def _build_camoufox_proxy(proxy_url: str) -> dict[str, str] | None:

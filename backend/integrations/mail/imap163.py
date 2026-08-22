@@ -85,6 +85,9 @@ class NetEase163EmailService:
         exclude_codes: set[str] | list[str] | tuple[str, ...] | None = None,
         **_kwargs: Any,
     ) -> str | None:
+        initial_delay = max(0, min(settings.get_int("email_otp_initial_delay_seconds", 5), 60))
+        if initial_delay:
+            time.sleep(initial_delay)
         row = get_163_account(email)
         request_dt = _otp_request_datetime(otp_sent_at)
         try:
