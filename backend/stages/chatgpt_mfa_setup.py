@@ -198,6 +198,7 @@ def run(ctx) -> None:
     if mfa_code_provider in {"2fauth", "twofauth", "external"}:
         mfa_provider = create_twofauth_adapter_from_uri(
             enrollment.qr_code_secret_url,
+            account_label=account_email,
             factor_id=enrollment.factor_id,
             config=config,
             log_fn=lambda msg: ctx.log(str(msg or "")),

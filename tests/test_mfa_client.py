@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
+from urllib.parse import unquote
 
 from backend.integrations.chatgpt.mfa_client import (
     build_totp_adapter_from_metadata,
@@ -20,7 +21,7 @@ class MfaClientTests(unittest.TestCase):
 
     def test_otpauth_roundtrip(self) -> None:
         url = build_otpauth_url("ABC123", email="user@example.com")
-        self.assertIn("otpauth://totp/ChatGPT:user@example.com", url)
+        self.assertIn("otpauth://totp/ChatGPT:user@example.com", unquote(url))
         self.assertEqual(extract_secret_from_otpauth(url), "ABC123")
 
     def test_build_totp_adapter_from_metadata(self) -> None:
@@ -77,6 +78,7 @@ class MfaClientTests(unittest.TestCase):
         with patch("backend.integrations.chatgpt.mfa_client.requests.Session", return_value=fake_session):
             adapter = create_twofauth_adapter_from_uri(
                 "otpauth://totp/ChatGPT:user@example.com?secret=ABC123&issuer=ChatGPT",
+                account_label="user@example.com",
                 factor_id="factor-x",
                 config={
                     "mfa_code_provider": "twofauth",

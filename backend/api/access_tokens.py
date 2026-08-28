@@ -21,7 +21,10 @@ from sqlmodel import Session
 from backend.api.schemas import access_token_account_to_dict
 from backend.core.constants import JOB_STATUS_QUEUED, JOB_STATUS_RUNNING
 from backend.core.db import engine, session_scope
+from backend.core.settings import settings
 from backend.core.queue import enqueue_job
+from backend.integrations.chatgpt.mfa_client import build_totp_adapter_from_metadata
+from backend.models.account import ChatGPTAccount
 from backend.models.access_token import AccessTokenAccount
 from backend.models.openai_refresh_token import OpenAIRefreshToken
 from backend.models.job import Job
@@ -179,6 +182,30 @@ def fetch_access_token_refresh_token(at_id: int):
         proxy_url=proxy_url,
     )
     return {"job_id": job_id, "already_has_refresh_token": False, "already_running": False}
+
+
+@router.get("/api/access-tokens/{at_id}/mfa", tags=["access-tokens"])
+def get_access_token_mfa(at_id: int):
+    with Session(engine) as s:
+        row = s.get(AccessTokenAccount, at_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="not found")
+        account_id = int(row.chatgpt_account_id or 0)
+        if not account_id:
+            raise HTTPException(status_code=409, detail="该 AT 行未关联 ChatGPT 账号，无法获取 MFA")
+        account = s.get(ChatGPTAccount, account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="linked ChatGPT account not found")
+        metadata = json.loads(account.metadata_json or "{}")
+        adapter = build_totp_adapter_from_metadata(
+            metadata if isinstance(metadata, dict) else {},
+            config=settings.get_all(),
+            timeout_seconds=30,
+        )
+        if adapter is None:
+            raise HTTPException(status_code=404, detail="linked account has no mfa")
+        code = adapter.get_code(str(account.email or ""))
+    return {"code": code}
 
 
 @router.patch("/api/access-tokens/{at_id}", tags=["access-tokens"])

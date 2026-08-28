@@ -17,9 +17,11 @@ from backend.core.constants import (
     PAYMENT_LINK_STATUS_PAID_UNKNOWN,
 )
 from backend.core.db import engine, session_scope
+from backend.core.settings import settings
 from backend.core.browser_debug import open_debug_session
 from backend.core.queue import enqueue_job
 from backend.core.time_utils import utcnow
+from backend.integrations.chatgpt.mfa_client import build_totp_adapter_from_metadata
 from backend.integrations.sub2api import Sub2ApiNotConfigured, get_sub2api_client
 from backend.models.account import ChatGPTAccount
 from backend.models.openai_refresh_token import OpenAIRefreshToken
@@ -180,6 +182,24 @@ def get_account(account_id: int):
         refresh_token = _refresh_tokens_by_account(s, [account_id_value]).get(account_id_value)
         sub2api_binding = _sub2api_bindings_by_account(s, [account_id_value]).get(account_id_value)
     return _with_sub2api_binding(_with_refresh_token(account_to_dict(row, last_payment_link_url=link_url), refresh_token), sub2api_binding)
+
+
+@router.get("/api/accounts/{account_id}/mfa", tags=["accounts"])
+def get_account_mfa(account_id: int):
+    with Session(engine) as s:
+        row = s.get(ChatGPTAccount, account_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="account not found")
+        metadata = json.loads(row.metadata_json or "{}")
+        adapter = build_totp_adapter_from_metadata(
+            metadata if isinstance(metadata, dict) else {},
+            config=settings.get_all(),
+            timeout_seconds=30,
+        )
+        if adapter is None:
+            raise HTTPException(status_code=404, detail="account has no mfa")
+        code = adapter.get_code(str(row.email or ""))
+    return {"code": code}
 
 
 @router.post("/api/accounts/sub2api-status-refresh", tags=["accounts"])

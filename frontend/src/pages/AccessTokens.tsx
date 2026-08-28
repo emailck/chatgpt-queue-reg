@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, Form, Input, Popconfirm, Select, Space, Switch, Tag, Typography, message } from 'antd'
-import { DeleteOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
+import { DeleteOutlined, DownloadOutlined, KeyOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import { API_BASE, apiFetch, formatDateTime } from '@/lib/api'
 import { ActionCard, CardToolbar, EntityCard, EntityGrid, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
@@ -59,6 +59,10 @@ export default function AccessTokens() {
   const [selected, setSelected] = useState<React.Key[]>([])
   const [exportOpen, setExportOpen] = useState(false)
   const [detail, setDetail] = useState<AccessTokenAccount | null>(null)
+  const [mfaOpen, setMfaOpen] = useState(false)
+  const [mfaDetail, setMfaDetail] = useState<AccessTokenAccount | null>(null)
+  const [mfaCode, setMfaCode] = useState('')
+  const [mfaLoading, setMfaLoading] = useState(false)
   const [fetchingRtId, setFetchingRtId] = useState<number | null>(null)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(18)
@@ -96,6 +100,26 @@ export default function AccessTokens() {
       setDetail(full)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载详情失败')
+    }
+  }, [])
+
+  const openMfa = useCallback(async (row: AccessTokenAccount) => {
+    setMfaOpen(true)
+    setMfaDetail(null)
+    setMfaCode('')
+    setMfaLoading(true)
+    try {
+      const [full, data] = await Promise.all([
+        apiFetch<AccessTokenAccount>(`/access-tokens/${row.id}?include_secrets=true`),
+        apiFetch<{ code: string }>(`/access-tokens/${row.id}/mfa`),
+      ])
+      setMfaDetail(full)
+      setMfaCode(String(data.code || '').trim())
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '获取 MFA 失败')
+      setMfaOpen(false)
+    } finally {
+      setMfaLoading(false)
     }
   }, [])
 
@@ -222,6 +246,7 @@ export default function AccessTokens() {
             actions={(
               <>
                 <Button size="small" onClick={() => openDetail(row)}>详情</Button>
+                <Button size="small" icon={<KeyOutlined />} onClick={() => openMfa(row)}>MFA</Button>
                 {!row.refresh_token_has_token && <Button size="small" type="primary" loading={fetchingRtId === row.id} onClick={() => fetchRefreshToken(row)}>获取 RT</Button>}
                 <Popconfirm title="删除该 token?" onConfirm={() => deleteOne(row)}>
                   <Button size="small" danger>删除</Button>
@@ -284,6 +309,35 @@ export default function AccessTokens() {
             <ErrorCallout error={detail.refresh_token_last_error} />
           </Space>
         )}
+      </PopupCard>
+
+      <PopupCard
+        open={mfaOpen}
+        onCancel={() => { setMfaOpen(false); setMfaCode(''); setMfaDetail(null) }}
+        width={520}
+        title="MFA"
+        footer={null}
+      >
+        <Space direction="vertical" size={18} style={{ width: '100%' }}>
+          <div>
+            <Text type="secondary">密码</Text>
+            <div style={{ marginTop: 8, fontSize: 16, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
+              {mfaDetail?.password || '------'}
+            </div>
+          </div>
+          <div>
+            <Text type="secondary">6 位验证码</Text>
+            <div style={{ marginTop: 8, minHeight: 56, display: 'flex', alignItems: 'center' }}>
+              {mfaLoading ? (
+                <Text type="secondary">获取中…</Text>
+              ) : (
+                <div style={{ fontSize: 44, fontWeight: 700, letterSpacing: 6, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
+                  {mfaCode || '------'}
+                </div>
+              )}
+            </div>
+          </div>
+        </Space>
       </PopupCard>
     </PageScaffold>
   )

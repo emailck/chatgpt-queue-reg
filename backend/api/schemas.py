@@ -65,6 +65,15 @@ def pipeline_to_dict(pipeline) -> dict[str, Any]:
 
 
 def account_to_dict(account, *, last_payment_link_url: str = "") -> dict[str, Any]:
+    metadata = json_loads(account.metadata_json, fallback={})
+    mfa = metadata.get("mfa") if isinstance(metadata, dict) and isinstance(metadata.get("mfa"), dict) else {}
+    mfa_provider = str(mfa.get("provider") or "").strip().lower()
+    mfa_enabled = bool(mfa.get("enabled"))
+    mfa_twofauth_account_id = str(mfa.get("twofauth_account_id") or "").strip()
+    if not mfa_twofauth_account_id:
+        nested = mfa.get("twofauth") if isinstance(mfa.get("twofauth"), dict) else {}
+        if isinstance(nested, dict):
+            mfa_twofauth_account_id = str(nested.get("account_id") or nested.get("id") or "").strip()
     return {
         "id": account.id,
         "email": account.email,
@@ -81,6 +90,9 @@ def account_to_dict(account, *, last_payment_link_url: str = "") -> dict[str, An
         "last_payment_link_id": account.last_payment_link_id,
         "last_payment_link_url": last_payment_link_url,
         "user_agent": account.user_agent,
+        "mfa_provider": mfa_provider,
+        "mfa_enabled": mfa_enabled,
+        "mfa_twofauth_account_id": mfa_twofauth_account_id,
         "has_access_token": bool(account.access_token),
         "has_refresh_token": False,
         "has_session_token": bool(account.session_token),

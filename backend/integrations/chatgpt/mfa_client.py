@@ -16,7 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 
@@ -383,12 +383,27 @@ def generate_totp_code(secret: str, *, for_time: float | None = None, period: in
     return str(code_int % code_mod).zfill(max(1, int(digits or 6)))
 
 
-def build_otpauth_url(secret: str, *, email: str = "", issuer: str = "ChatGPT") -> str:
+def build_otpauth_url(
+    secret: str,
+    *,
+    email: str = "",
+    issuer: str = "ChatGPT",
+    algorithm: str = "SHA1",
+    digits: int = 6,
+    period: int = 30,
+) -> str:
     secret = str(secret or "").strip()
     if not secret:
         return ""
     label = issuer if not email else f"{issuer}:{email}"
-    return f"otpauth://totp/{label}?secret={secret}&issuer={issuer}"
+    query = (
+        f"secret={quote(secret)}"
+        f"&issuer={quote(str(issuer or '').strip())}"
+        f"&algorithm={quote(str(algorithm or 'SHA1').strip())}"
+        f"&digits={int(digits or 6)}"
+        f"&period={int(period or 30)}"
+    )
+    return f"otpauth://totp/{quote(label, safe=':')}?{query}"
 
 
 def extract_secret_from_otpauth(url: str) -> str:
@@ -399,9 +414,36 @@ def extract_secret_from_otpauth(url: str) -> str:
     return str((query.get("secret") or [""])[0] or "").strip()
 
 
+def parse_otpauth_uri(uri: str) -> dict[str, Any]:
+    parsed = urlparse(str(uri or "").strip())
+    if parsed.scheme.lower() != "otpauth":
+        return {}
+    query = parse_qs(parsed.query)
+    label = unquote(parsed.path.lstrip("/"))
+    issuer = str((query.get("issuer") or [""])[0] or "").strip()
+    if ":" in label and not issuer:
+        issuer, _, _ = label.partition(":")
+        issuer = issuer.strip()
+    account_label = ""
+    if ":" in label:
+        _, _, account_label = label.partition(":")
+        account_label = account_label.strip()
+    else:
+        account_label = label.strip()
+    return {
+        "secret": str((query.get("secret") or [""])[0] or "").strip(),
+        "issuer": issuer,
+        "account_label": account_label,
+        "algorithm": str((query.get("algorithm") or ["SHA1"])[0] or "SHA1").strip(),
+        "digits": int(str((query.get("digits") or ["6"])[0] or "6").strip() or 6),
+        "period": int(str((query.get("period") or ["30"])[0] or "30").strip() or 30),
+    }
+
+
 def create_twofauth_adapter_from_uri(
     uri: str,
     *,
+    account_label: str = "",
     factor_id: str = "",
     config: dict[str, Any] | None = None,
     log_fn=None,
@@ -427,6 +469,16 @@ def create_twofauth_adapter_from_uri(
         "workpool.chatgpt_mfa_setup.twofauth_preview_before_create",
         default=True,
     )
+    parsed = parse_otpauth_uri(uri)
+    if parsed and account_label:
+        uri = build_otpauth_url(
+            parsed.get("secret", ""),
+            email=account_label,
+            issuer=str(parsed.get("issuer") or "ChatGPT"),
+            algorithm=str(parsed.get("algorithm") or "SHA1"),
+            digits=int(parsed.get("digits") or 6),
+            period=int(parsed.get("period") or 30),
+        )
     if preview_before_create:
         client.preview_uri(uri)
     created = client.create_account(uri)

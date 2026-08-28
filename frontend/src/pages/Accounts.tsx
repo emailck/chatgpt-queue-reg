@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { TableColumnsType } from 'antd'
 import { Button, Dropdown, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd'
-import { BugOutlined, CloudDownloadOutlined, CloudSyncOutlined, DeleteOutlined, MailOutlined, ReloadOutlined } from '@ant-design/icons'
+import { BugOutlined, CloudDownloadOutlined, CloudSyncOutlined, DeleteOutlined, KeyOutlined, MailOutlined, ReloadOutlined } from '@ant-design/icons'
 
 import { JobLogPanel } from '@/components/JobLogPanel'
 import { ActionCard, CardToolbar, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
@@ -89,6 +89,9 @@ export default function Accounts() {
   const [emailModalAccount, setEmailModalAccount] = useState<Account | null>(null)
   const [emailHistory, setEmailHistory] = useState<EmailHistoryMessage[]>([])
   const [emailHistoryLoading, setEmailHistoryLoading] = useState(false)
+  const [mfaModalAccount, setMfaModalAccount] = useState<Account | null>(null)
+  const [mfaCode, setMfaCode] = useState('')
+  const [mfaLoading, setMfaLoading] = useState(false)
   const [selected, setSelected] = useState<React.Key[]>([])
   const [soldFilter, setSoldFilter] = useState<SoldFilter>('all')
   const [sub2apiStatusFilter, setSub2ApiStatusFilter] = useState<Sub2ApiStatusFilter>('all')
@@ -179,6 +182,21 @@ export default function Accounts() {
       message.error(err instanceof Error ? err.message : '读取邮件历史失败')
     } finally {
       setEmailHistoryLoading(false)
+    }
+  }
+
+  const showMfaCode = async (account: Account) => {
+    setMfaModalAccount(account)
+    setMfaCode('')
+    setMfaLoading(true)
+    try {
+      const data = await apiFetch<{ code: string }>(`/accounts/${account.id}/mfa`)
+      setMfaCode(String(data.code || '').trim())
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '获取 MFA 失败')
+      setMfaModalAccount(null)
+    } finally {
+      setMfaLoading(false)
     }
   }
 
@@ -468,6 +486,7 @@ export default function Accounts() {
         <Space size={6} wrap>
           <Button size="small" icon={<CloudSyncOutlined />} onClick={() => refreshSub2ApiStatus([row.id])}>刷新状态</Button>
           <Button size="small" icon={<ReloadOutlined />} onClick={() => refreshAccessToken([row.id])}>重新获取 AT</Button>
+          <Button size="small" icon={<KeyOutlined />} onClick={() => showMfaCode(row)}>获取 MFA</Button>
           <Dropdown
             menu={{
               items: [
@@ -572,6 +591,35 @@ export default function Accounts() {
           scroll={{ x: 900, y: 480 }}
           size="small"
         />
+      </PopupCard>
+
+      <PopupCard
+        open={!!mfaModalAccount}
+        onCancel={() => { setMfaModalAccount(null); setMfaCode('') }}
+        title={mfaModalAccount ? `${mfaModalAccount.email} MFA` : ''}
+        footer={null}
+        width={420}
+      >
+        <Space direction="vertical" size={18} style={{ width: '100%' }}>
+          <div>
+            <Typography.Text type="secondary">密码</Typography.Text>
+            <div style={{ marginTop: 8, fontSize: 16, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
+              {mfaModalAccount?.password || '-'}
+            </div>
+          </div>
+          <div>
+            <Typography.Text type="secondary">6 位验证码</Typography.Text>
+            <div style={{ marginTop: 8, minHeight: 56, display: 'flex', alignItems: 'center' }}>
+              {mfaLoading ? (
+                <Typography.Text type="secondary">获取中…</Typography.Text>
+              ) : (
+                <div style={{ fontSize: 42, fontWeight: 700, letterSpacing: 6, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>
+                  {mfaCode || '------'}
+                </div>
+              )}
+            </div>
+          </div>
+        </Space>
       </PopupCard>
 
       <PopupCard open={logJobId !== null} onCancel={() => setLogJobId(null)} width={900} title={logJobId ? `Job #${logJobId} 原始日志` : ''} footer={null}>
