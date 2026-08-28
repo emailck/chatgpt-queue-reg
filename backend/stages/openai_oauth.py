@@ -19,7 +19,6 @@ from backend.core.time_utils import utcnow
 from backend.models.account import ChatGPTAccount
 from backend.models.openai_refresh_token import OpenAIRefreshToken
 from backend.schemas.stage_io import OpenAIOAuthInput, OpenAIOAuthOutput
-from backend.stages.chatgpt_session import refresh_or_relogin_account_session
 
 
 @stage(
@@ -111,29 +110,6 @@ def run(ctx: JobContext) -> None:
         log_fn=_emit_log,
         timeout_seconds=oauth_timeout,
     )
-
-    # Password resets / step-up flows can revoke the previous AT. Repair the
-    # session first so the OAuth protocol starts from a live browser identity.
-    refresh_or_relogin_account_session(
-        account_id,
-        ctx,
-        password=password,
-        otp_provider=email_service,
-        mfa_provider=mfa_provider,
-        proxy_url_override=proxy_url,
-        max_attempts=5,
-    )
-
-    with Session(engine) as s:
-        account_row = s.get(ChatGPTAccount, account_id)
-        if account_row is None:
-            raise RuntimeError(f"account {account_id} not found after session refresh")
-        email = str(account_row.email or "")
-        password = str(account_row.password or password or "")
-        account_user_agent = str(account_row.user_agent or "")
-        account_metadata = json_loads(account_row.metadata_json, fallback={}) or {}
-        if not proxy_url:
-            proxy_url = str(account_row.proxy_url or "").strip()
 
     last_error = ""
     token_data: dict[str, Any] | None = None

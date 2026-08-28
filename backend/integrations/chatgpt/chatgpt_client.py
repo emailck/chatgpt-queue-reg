@@ -773,17 +773,19 @@ class ChatGPTClient:
                 self._log(f"登录状态: {describe_flow_state(state)}")
                 continue
             if self._state_is_login_password(state):
-                if otp_provider is not None:
-                    ok, next_state = self.request_login_email_otp(state, return_state=True)
+                if password:
+                    ok, next_state = self.verify_login_password(password, state, return_state=True)
                     if not ok:
-                        return False, f"登录邮箱验证码发送失败: {next_state}"
-                    otp_sent_at = time.time()
+                        return False, f"登录密码验证失败: {next_state}"
                     state = next_state
                     self._log(f"登录状态: {describe_flow_state(state)}")
                     continue
-                ok, next_state = self.verify_login_password(password, state, return_state=True)
+                if otp_provider is None:
+                    return False, "登录需要密码或邮箱验证码提供器，但两者都未提供"
+                ok, next_state = self.request_login_email_otp(state, return_state=True)
                 if not ok:
-                    return False, f"登录密码验证失败: {next_state}"
+                    return False, f"登录邮箱验证码发送失败: {next_state}"
+                otp_sent_at = time.time()
                 state = next_state
                 self._log(f"登录状态: {describe_flow_state(state)}")
                 continue
