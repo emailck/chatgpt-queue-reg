@@ -90,6 +90,30 @@ class ProtocolOAuthClient:
                     path=str(cookie.get("path") or "/"),
                 )
 
+    def export_identity_state(self) -> dict[str, Any]:
+        cookies = []
+        for cookie in self.session.cookies.jar:
+            cookies.append({
+                "name": getattr(cookie, "name", ""),
+                "value": getattr(cookie, "value", ""),
+                "domain": getattr(cookie, "domain", "") or ".chatgpt.com",
+                "path": getattr(cookie, "path", "") or "/",
+                "expires": getattr(cookie, "expires", None),
+                "secure": bool(getattr(cookie, "secure", False)),
+                "httpOnly": bool(getattr(cookie, "has_nonstandard_attr", lambda _name: False)("HttpOnly")),
+            })
+        return {
+            "user_agent": self.user_agent,
+            "browser_fingerprint": self.config.get("browser_fingerprint") if isinstance(self.config.get("browser_fingerprint"), dict) else {},
+            "cookies": cookies,
+            "local_storage": self.config.get("local_storage") if isinstance(self.config.get("local_storage"), dict) else {},
+            "device_id": self.device_id,
+            "oai_session_id": self.config.get("oai_session_id") or "",
+            "impersonate": self.impersonate,
+            "oai_client_version": self.config.get("oai_client_version") or "",
+            "oai_client_build_number": self.config.get("oai_client_build_number") or "",
+        }
+
     def run(
         self,
         oauth: OAuthSession,
@@ -97,6 +121,7 @@ class ProtocolOAuthClient:
         email: str,
         password: str,
         otp_provider: OAuthOtpAdapter,
+        mfa_provider=None,
         phone_provider=None,
     ) -> dict[str, Any]:
         self._log("OAuth RT: bootstrap oauth session")
@@ -130,6 +155,22 @@ class ProtocolOAuthClient:
                 self._log(f"OAuth RT state: {describe_flow_state(state)}")
                 continue
 
+            if self._is_add_phone(state):
+                if phone_provider is None:
+                    raise RuntimeError(f"phone verification required for OAuth RT: {describe_flow_state(state)}")
+                state = self._verify_phone(phone_provider, state)
+                state_started_at = time.time()
+                self._log(f"OAuth RT state: {describe_flow_state(state)}")
+                continue
+
+            if self._is_mfa_challenge(state):
+                if mfa_provider is None:
+                    raise RuntimeError(f"OAuth RT requires MFA challenge but no mfa_provider configured: {describe_flow_state(state)}")
+                state = self._mfa_verify(email, mfa_provider, state)
+                state_started_at = time.time()
+                self._log(f"OAuth RT state: {describe_flow_state(state)}")
+                continue
+
             if self._requires_navigation(state):
                 code, state = self._follow_state(state)
                 if code:
@@ -144,14 +185,6 @@ class ProtocolOAuthClient:
                 if code:
                     callback_url = state.continue_url or state.current_url or f"{oauth.redirect_uri}?code={code}&state={oauth.state}"
                     return exchange_code(oauth, callback_url, user_agent=self.user_agent, proxy=self.proxy)
-                state_started_at = time.time()
-                self._log(f"OAuth RT state: {describe_flow_state(state)}")
-                continue
-
-            if self._is_add_phone(state):
-                if phone_provider is None:
-                    raise RuntimeError(f"phone verification required for OAuth RT: {describe_flow_state(state)}")
-                state = self._verify_phone(phone_provider, state)
                 state_started_at = time.time()
                 self._log(f"OAuth RT state: {describe_flow_state(state)}")
                 continue
@@ -403,6 +436,59 @@ class ProtocolOAuthClient:
             raise RuntimeError(f"phone-otp/validate failed: HTTP {response.status_code} {body[:240]}")
         return extract_flow_state(response.json(), current_url=str(response.url))
 
+    def _mfa_verify(self, email: str, mfa_provider, state: FlowState) -> FlowState:
+        factor_id = ""
+        if hasattr(mfa_provider, "get_factor_id"):
+            try:
+                factor_id = str(mfa_provider.get_factor_id() or "").strip()
+            except Exception:
+                factor_id = ""
+        if not factor_id:
+            factor_id = str(getattr(mfa_provider, "factor_id", "") or "").strip()
+        if not factor_id:
+            raise RuntimeError("OAuth RT MFA provider missing factor_id")
+        code = mfa_provider.get_code(email, otp_sent_at=time.time() - 30)
+        url = f"{AUTH_BASE}/api/accounts/mfa/verify"
+        headers = self._headers(
+            url,
+            accept="application/json",
+            referer=state.current_url or state.continue_url or f"{AUTH_BASE}/mfa",
+            origin=AUTH_BASE,
+            content_type="application/json",
+            extra={
+                "oai-device-id": self.device_id,
+                "openai-sentinel-token": self._sentinel("authorize_continue"),
+            },
+        )
+        headers.update(generate_datadog_trace())
+        response = self.session.post(
+            url,
+            json={"id": factor_id, "type": "totp", "code": str(code or "").strip()},
+            headers=headers,
+            allow_redirects=False,
+            timeout=45,
+        )
+        body = response.text or ""
+        self._log(f"OAuth RT mfa/verify -> {response.status_code}")
+        if response.status_code in (301, 302, 303, 307, 308):
+            location = normalize_flow_url(response.headers.get("Location", ""), auth_base=AUTH_BASE)
+            if location:
+                return _state_from_url(location)
+            return _state_from_url(str(response.url))
+        if response.status_code != 200:
+            lowered = body.lower()
+            if "invalid_auth_step" in lowered or "invalid authorization step" in lowered or "redirect_uri" in lowered and "log-in" in lowered:
+                raise PhoneAuthStaleError(f"mfa/verify stale auth step: HTTP {response.status_code} {body[:240]}")
+            raise RuntimeError(f"mfa/verify failed: HTTP {response.status_code} {body[:240]}")
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+        next_state = extract_flow_state(payload if isinstance(payload, dict) else {}, current_url=str(response.url))
+        if next_state.continue_url or next_state.current_url:
+            return next_state
+        return _state_from_url(str(response.url))
+
     def _refresh_phone_state(self, state: FlowState) -> FlowState:
         target = state.continue_url or state.current_url or f"{AUTH_BASE}/add-phone"
         _code, parsed = self._follow_state(_state_from_url(target))
@@ -579,6 +665,15 @@ class ProtocolOAuthClient:
         return "add_phone" in target or "add-phone" in target
 
     @staticmethod
+    def _is_mfa_challenge(state: FlowState) -> bool:
+        target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
+        if "add_phone" in target or "add-phone" in target:
+            return False
+        if state.page_type in {"mfa_challenge", "mfa_verification", "totp_verification", "two_factor"}:
+            return True
+        return any(marker in target for marker in ("/mfa", "/2fa", "/authenticator"))
+
+    @staticmethod
     def _requires_navigation(state: FlowState) -> bool:
         if (state.method or "GET").upper() != "GET":
             return False
@@ -625,13 +720,21 @@ def run_protocol_oauth(
     email: str,
     password: str,
     otp_provider: OAuthOtpAdapter,
+    mfa_provider=None,
     phone_provider=None,
     config: dict[str, Any] | None = None,
     proxy: str = "",
     log_fn=None,
 ) -> dict[str, Any]:
     client = ProtocolOAuthClient(config, proxy=proxy, log_fn=log_fn)
-    return client.run(oauth, email=email, password=password, otp_provider=otp_provider, phone_provider=phone_provider)
+    return client.run(
+        oauth,
+        email=email,
+        password=password,
+        otp_provider=otp_provider,
+        mfa_provider=mfa_provider,
+        phone_provider=phone_provider,
+    )
 
 
 def _query_params(url: str) -> dict[str, str]:

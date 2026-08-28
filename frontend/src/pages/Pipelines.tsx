@@ -22,6 +22,8 @@ const STOP_OPTIONS = [
   { value: 'pp_long_link', label: 'PP 长链接后停止' },
   { value: 'payment', label: '付款模块后停止' },
   { value: 'chatgpt_session', label: 'Session 标准化后停止' },
+  { value: 'chatgpt_mfa_setup', label: '2FA 设置后停止' },
+  { value: 'chatgpt_password_setup', label: '设置密码后停止' },
   { value: 'sub2api_sync', label: 'sub2api 同步后停止' },
   { value: 'openai_oauth', label: 'OpenAI OAuth RT 后停止' },
   { value: 'sso_oauth', label: 'SSO OAuth RT 后停止' },
@@ -38,6 +40,8 @@ const STAGE_OPTIONS: { value: string; label: string }[] = [
   { value: 'pp_long_link', label: 'PP 长链接' },
   { value: 'payment', label: '付款' },
   { value: 'chatgpt_session', label: 'ChatGPT Session' },
+  { value: 'chatgpt_mfa_setup', label: 'ChatGPT 2FA 设置' },
+  { value: 'chatgpt_password_setup', label: 'ChatGPT 设置密码' },
   { value: 'openai_oauth', label: 'OpenAI OAuth RT' },
   { value: 'sso_oauth', label: 'SSO OAuth RT' },
   { value: 'codex_invitation', label: 'Codex 邀请' },
@@ -53,6 +57,12 @@ const PRESET_OPTIONS: { value: string; label: string }[] = [
   { value: 'register_only', label: '仅注册 register' },
   { value: 'tinkmail_email_register', label: '自动注册 TinkMail 邮箱 tinkmail_email_register' },
   { value: 'register_with_refresh_token', label: '注册+RT register→chatgpt_session→openai_oauth→sub2api_sync' },
+  { value: 'chatgpt_mfa_setup_only', label: '仅 2FA 设置 chatgpt_mfa_setup' },
+  { value: 'register_with_mfa_setup', label: '注册+2FA register→chatgpt_session→chatgpt_mfa_setup' },
+  { value: 'register_with_mfa_setup_sub2api', label: '注册+2FA+sub register→chatgpt_session→chatgpt_mfa_setup→sub2api_sync' },
+  { value: 'chatgpt_password_setup_only', label: '仅设置密码 chatgpt_password_setup' },
+  { value: 'register_with_password_setup', label: '注册+设置密码 register→chatgpt_password_setup' },
+  { value: 'register_with_password_setup_sub2api', label: '注册+设置密码+sub register→chatgpt_password_setup→chatgpt_session→sub2api_sync' },
   { value: 'account_paid', label: '全自动付费 register→payment_link→payment' },
   { value: 'account_paid_with_refresh_token', label: '付费+RT 全部6步' },
   { value: 'link_only', label: '只到长链 register→payment_link' },
@@ -190,6 +200,11 @@ function jobResultHighlights(job: Job): { label: string; value: string }[] {
     add('失败数', 'failed_count')
     add('已切换空间', 'switched_workspace_id')
     add('切换结果', 'workspace_session_switched')
+  } else if (job.type === 'chatgpt_password_setup') {
+    add('邮箱', 'email')
+    add('设置结果', 'password_set')
+    add('验证码结果', 'email_otp_verified')
+    add('密码页', 'password_page_url')
   } else if (job.type === 'codex_token') {
     add('邮箱', 'email')
     add('Workspace', 'workspace_ids')
@@ -731,11 +746,30 @@ function CreateForm({ form }: { form: FormInstance }) {
     ? selectedPreset === 'refresh_token_only' || selectedPreset === 'sso_rt_only'
     : Array.isArray(selectedStages) && (selectedStages.includes('openai_oauth') || selectedStages.includes('sso_oauth') || selectedStages.includes('chatgpt_session'))
   const showRegisterFields = selectedMode === 'preset'
-    ? ['full_chain', 'register_only', 'register_with_refresh_token', 'account_paid', 'account_paid_with_refresh_token', 'link_only', 'register_pp_long_link', 'register_workspace_request', 'register_team_codex_token_sub2api'].includes(String(selectedPreset || ''))
+    ? [
+        'full_chain',
+        'register_only',
+        'register_with_refresh_token',
+        'register_with_mfa_setup',
+        'register_with_mfa_setup_sub2api',
+        'register_with_password_setup',
+        'register_with_password_setup_sub2api',
+        'account_paid',
+        'account_paid_with_refresh_token',
+        'link_only',
+        'register_pp_long_link',
+        'register_workspace_request',
+        'register_team_codex_token_sub2api',
+      ].includes(String(selectedPreset || ''))
     : Array.isArray(selectedStages) && selectedStages.includes('register')
   const showTinkMailFields = selectedMode === 'preset'
     ? selectedPreset === 'tinkmail_email_register'
     : Array.isArray(selectedStages) && selectedStages.includes('tinkmail_email_register')
+  const showPasswordSetupFields = selectedMode === 'preset'
+    ? selectedPreset === 'chatgpt_password_setup_only'
+      || selectedPreset === 'register_with_password_setup'
+      || selectedPreset === 'register_with_password_setup_sub2api'
+    : Array.isArray(selectedStages) && selectedStages.includes('chatgpt_password_setup')
 
   const loadConfigs = useCallback(async () => {
     setLoadingConfigs(true)
@@ -934,6 +968,55 @@ function CreateForm({ form }: { form: FormInstance }) {
             <Col span={12}>
               <Form.Item label="注册密码覆盖（可选）" name="password">
                 <Input.Password placeholder="留空则自动生成/使用邮箱策略" />
+              </Form.Item>
+            </Col>
+          </Row>
+        </>
+      )}
+
+      {showPasswordSetupFields && (
+        <>
+          <ActionCard
+            title="ChatGPT 设置密码参数"
+            description="先进入设置密码流程，等待一次邮箱验证码，然后回到 reset-password/new-password 页面提交密码。一般会复用注册后写入的 account.password。"
+          />
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item
+                label="已有账号 ID"
+                name="account_id"
+                dependencies={["email"]}
+                rules={[{
+                  validator: async () => {
+                    if (selectedPreset !== 'chatgpt_password_setup_only') return
+                    if (oauthAccountId || String(oauthEmail || '').trim()) return
+                    throw new Error('仅设置密码流程必须填账号ID')
+                  },
+                }]}
+              >
+                <InputNumber min={1} style={{ width: '100%' }} placeholder="账号池 account_id；注册后链路可省略" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="密码覆盖（可选）" name="password">
+                <Input.Password placeholder="留空则使用账号池里的 password" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="首次等待验证码秒数" name="otp_wait_timeout">
+                <InputNumber min={30} max={3600} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="重发后等待验证码秒数" name="otp_resend_wait_timeout">
+                <InputNumber min={30} max={3600} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="最大步数" name="max_steps">
+                <InputNumber min={3} max={50} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           </Row>

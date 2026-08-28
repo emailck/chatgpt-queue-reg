@@ -64,6 +64,7 @@ def run(ctx) -> None:
         if account is None:
             raise RuntimeError(f"account {account_id} not found")
         snapshot = _account_snapshot(account)
+        account_metadata = json_loads(account.metadata_json, fallback={}) or {}
 
     ctx.log("validating ChatGPT access token", payload={"account_id": account_id, "force_refresh": force_refresh, "force_relogin": force_relogin})
     with Session(engine) as s:
@@ -133,12 +134,26 @@ def run(ctx) -> None:
             raise RuntimeError(f"account {account_id} not found")
         email = str(account.email or "").strip()
         password = str(account.password or "").strip()
+        account_metadata = json_loads(account.metadata_json, fallback={}) or {}
         relogin_proxy_id, relogin_proxy_url, relogin_proxy_region = _acquire_relogin_proxy(ctx, account)
         client = _build_client_from_account(account, ctx, load_cookies=False, proxy_url_override=relogin_proxy_url)
     ctx.attach_proxy(proxy_id=relogin_proxy_id, proxy_url=relogin_proxy_url)
     ctx.log("chatgpt_session relogin proxy acquired", payload={"account_id": account_id, "proxy_id": relogin_proxy_id, "region": relogin_proxy_region})
-    otp_provider = _build_otp_provider(email)
-    ok, session_or_error = client.relogin_existing_user(email, password=password, otp_provider=otp_provider, max_steps=16)
+    otp_provider = None if password else _build_otp_provider(email)
+    from backend.integrations.chatgpt.mfa_client import build_totp_adapter_from_metadata
+    mfa_provider = build_totp_adapter_from_metadata(
+        account_metadata,
+        config=settings.get_all(),
+        log_fn=lambda msg: ctx.log(str(msg or "")),
+        timeout_seconds=30,
+    )
+    ok, session_or_error = client.relogin_existing_user(
+        email,
+        password=password,
+        otp_provider=otp_provider,
+        mfa_provider=mfa_provider,
+        max_steps=16,
+    )
     if not ok:
         error = str(session_or_error or "ChatGPT relogin failed")
         _record_session_failure(account_id, error)
@@ -468,6 +483,89 @@ def _record_session_valid(account_id: int, me_data: dict[str, Any], status: str)
         s.commit()
         s.refresh(row)
         return _account_snapshot(row)
+
+
+def refresh_or_relogin_account_session(
+    account_id: int,
+    ctx: JobContext,
+    *,
+    password: str = "",
+    otp_provider=None,
+    mfa_provider=None,
+    proxy_url_override: str = "",
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Best-effort session repair after token revocation.
+
+    Tries cached /api/auth/session first, then falls back to a full relogin
+    using the account password + email OTP provider when the session token was
+    revoked by a password change or other step-up event.
+    """
+    with Session(engine) as s:
+        account = s.get(ChatGPTAccount, account_id)
+        if account is None:
+            raise RuntimeError(f"account {account_id} not found")
+        email = str(account.email or "").strip()
+        password_value = str(password or account.password or "").strip()
+        if not email:
+            raise RuntimeError(f"account {account_id} has no email")
+        client = _build_client_from_account(account, ctx, load_cookies=True, proxy_url_override=proxy_url_override)
+
+    ok, session_or_error = client.fetch_chatgpt_session(max_attempts=max(1, int(max_attempts or 3)), retry_delay=1.2)
+    if ok:
+        session_data = session_or_error if isinstance(session_or_error, dict) else {}
+        access_token = str(session_data.get("accessToken") or "").strip()
+        if access_token:
+            valid, me_or_error = _validate_access_token(client, access_token, ctx, label="session_repair")
+            if valid:
+                identity_state = client.export_identity_state()
+                return _persist_session_data(
+                    account_id,
+                    session_data,
+                    identity_state,
+                    me_or_error if isinstance(me_or_error, dict) else {},
+                    status="session_repaired",
+                )
+            ctx.log(
+                "cached session repair access token invalid; falling back to relogin",
+                level="warning",
+                payload={"account_id": account_id, "error": str(me_or_error or "")[:240]},
+            )
+        else:
+            ctx.log("cached session repair returned no access token; falling back to relogin", level="warning", payload={"account_id": account_id})
+    else:
+        ctx.log(
+            "cached session repair failed; falling back to relogin",
+            level="warning",
+            payload={"account_id": account_id, "error": str(session_or_error or "")[:240]},
+        )
+
+    if not password_value:
+        raise RuntimeError("session repair failed and no password available for relogin")
+    ok, session_or_error = client.relogin_existing_user(
+        email,
+        password=password_value,
+        otp_provider=otp_provider,
+        mfa_provider=mfa_provider,
+        max_steps=20,
+    )
+    if not ok:
+        raise RuntimeError(f"session relogin failed: {session_or_error}")
+    session_data = session_or_error if isinstance(session_or_error, dict) else {}
+    access_token = str(session_data.get("accessToken") or "").strip()
+    if not access_token:
+        raise RuntimeError("session relogin returned no accessToken")
+    valid, me_or_error = _validate_access_token(client, access_token, ctx, label="session_relogin")
+    if not valid:
+        raise RuntimeError(f"session relogin access token invalid: {me_or_error}")
+    identity_state = client.export_identity_state()
+    return _persist_session_data(
+        account_id,
+        session_data,
+        identity_state,
+        me_or_error if isinstance(me_or_error, dict) else {},
+        status="relogin_refreshed",
+    )
 
 
 def _build_otp_provider(email: str):

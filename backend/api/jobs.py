@@ -225,6 +225,31 @@ def _ensure_oauth_account_id(stages: list[str], request_payload: dict[str, Any])
     return account_id
 
 
+def _ensure_password_setup_account_id(stages: list[str], request_payload: dict[str, Any]) -> int | None:
+    """For chatgpt_password_setup without account_id, resolve an existing account by email."""
+    if "chatgpt_password_setup" not in stages:
+        return None
+    if "register" in stages:
+        return None
+    if request_payload.get("account_id") not in (None, ""):
+        return int(request_payload.get("account_id") or 0) or None
+    email = str(request_payload.get("email") or "").strip()
+    if not email:
+        return None
+    with Session(engine) as s:
+        row = s.exec(
+            sa_select(ChatGPTAccount)
+            .where(ChatGPTAccount.email == email)
+            .order_by(ChatGPTAccount.id.desc())
+        ).scalars().first()
+    if row is None:
+        return None
+    account_id = int(row.id or 0) or None
+    if account_id:
+        request_payload["account_id"] = account_id
+    return account_id
+
+
 # ---- pipeline endpoints -----------------------------------------------------
 
 
@@ -302,6 +327,7 @@ def create_pipeline_endpoint(body: CreatePipelineRequest):
         if value not in (None, "", []):
             request_payload[key] = value
     _ensure_oauth_account_id(stages, request_payload)
+    _ensure_password_setup_account_id(stages, request_payload)
     stage_inputs = dict(body.stage_inputs or {})
     if request_payload and "codex_invitation" in stages:
         stage_inputs["codex_invitation"] = {
@@ -494,6 +520,8 @@ def enqueue_job_endpoint(body: JobEnqueueRequest):
     if account_id is None and stage_name == "openai_oauth" and payload.get("email") not in (None, ""):
         account_id = _oauth_placeholder_account_id(str(payload.get("email") or ""))
         payload["account_id"] = account_id
+    if account_id is None and stage_name == "chatgpt_password_setup" and payload.get("email") not in (None, ""):
+        account_id = _ensure_password_setup_account_id([stage_name], payload)
     if payment_link_id is None and payload.get("payment_link_id") not in (None, ""):
         payment_link_id = int(payload.get("payment_link_id") or 0) or None
     if proxy_id is None and payload.get("proxy_id") not in (None, ""):

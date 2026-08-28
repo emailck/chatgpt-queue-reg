@@ -7,6 +7,8 @@ from . import payment_link  # noqa: F401
 from . import pp_long_link  # noqa: F401
 from . import payment  # noqa: F401
 from . import chatgpt_session  # noqa: F401
+from . import chatgpt_mfa_setup  # noqa: F401
+from . import chatgpt_password_setup  # noqa: F401
 from . import openai_oauth  # noqa: F401
 from . import sso_oauth  # noqa: F401
 from . import codex_invitation  # noqa: F401

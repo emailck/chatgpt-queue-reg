@@ -4,6 +4,8 @@ export const STAGE_LABELS: Record<string, string> = {
   pp_long_link: 'PP 长链接',
   payment: '付款',
   chatgpt_session: 'ChatGPT Session',
+  chatgpt_mfa_setup: 'ChatGPT 2FA 设置',
+  chatgpt_password_setup: 'ChatGPT 设置密码',
   sub2api_sync: 'sub2api 同步',
   openai_oauth: 'OpenAI OAuth RT',
   sso_oauth: 'SSO OAuth RT',

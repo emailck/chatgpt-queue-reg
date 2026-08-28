@@ -56,6 +56,7 @@ def _flow_page_url(flow: str) -> str:
         "authorize_continue": "https://auth.openai.com/create-account",
         "username_password_create": "https://auth.openai.com/create-account/password",
         "password_verify": "https://auth.openai.com/log-in/password",
+        "password_reset": "https://auth.openai.com/reset-password/new-password",
         "email_otp_validate": "https://auth.openai.com/email-verification",
         "oauth_create_account": "https://auth.openai.com/about-you",
     }

@@ -142,6 +142,58 @@ class ChatGPTSessionOutput(StageOutput):
     plan_type: str = ""
 
 
+class ChatGPTMfaSetupInput(StageInput):
+    account_id: int
+    factor_type: str = "totp"
+    force_reenroll: bool = False
+    verify_login_challenge: bool = False
+    api_base_url: str = ""
+    auth_base_url: str = ""
+    mfa_code_provider: str = ""
+    twofauth_base_url: str = ""
+    twofauth_pat: str = ""
+    twofauth_preview_before_create: bool = True
+    twofauth_timeout_seconds: int = 30
+    extra_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatGPTMfaSetupOutput(StageOutput):
+    account_id: int
+    email: str = ""
+    factor_type: str = "totp"
+    mfa_enabled: bool = False
+    mfa_provider: str = ""
+    factor_id: str = ""
+    enrollment_session_id: str = ""
+    qr_code_secret_url: str = ""
+    twofauth_account_id: str = ""
+    native_default_factor_id: str = ""
+    totp_factor_count: int = 0
+    login_verify_ok: bool = False
+    login_verify_error: str = ""
+    mfa_info: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatGPTPasswordSetupInput(StageInput):
+    account_id: int
+    password: str = ""
+    otp_wait_timeout: int = 300
+    otp_resend_wait_timeout: int = 300
+    max_steps: int = 16
+    api_base_url: str = ""
+    auth_base_url: str = ""
+    extra_config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatGPTPasswordSetupOutput(StageOutput):
+    account_id: int
+    email: str = ""
+    password_set: bool = False
+    email_otp_verified: bool = False
+    password_page_url: str = ""
+    proxy_url: str = ""
+
+
 class Sub2ApiSyncInput(StageInput):
     account_id: Optional[int] = None
     refresh_token_id: Optional[int] = None
@@ -339,6 +391,8 @@ STAGE_INPUT_SCHEMAS = {
     "pp_long_link": PPLongLinkInput,
     "payment": PaymentInput,
     "chatgpt_session": ChatGPTSessionInput,
+    "chatgpt_mfa_setup": ChatGPTMfaSetupInput,
+    "chatgpt_password_setup": ChatGPTPasswordSetupInput,
     "openai_oauth": OpenAIOAuthInput,
     "sso_oauth": OpenAIOAuthInput,
     "codex_invitation": CodexInvitationInput,
@@ -355,6 +409,8 @@ STAGE_OUTPUT_SCHEMAS = {
     "pp_long_link": PPLongLinkOutput,
     "payment": PaymentOutput,
     "chatgpt_session": ChatGPTSessionOutput,
+    "chatgpt_mfa_setup": ChatGPTMfaSetupOutput,
+    "chatgpt_password_setup": ChatGPTPasswordSetupOutput,
     "openai_oauth": OpenAIOAuthOutput,
     "sso_oauth": OpenAIOAuthOutput,
     "codex_invitation": CodexInvitationOutput,

@@ -135,6 +135,51 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       { key: 'workpool.chatgpt_session.proxy_ttl', label: '重登代理持续时间 t', type: 'number', placeholder: '默认 5' },
     ],
   },
+  chatgpt_mfa_setup: {
+    id: 'workpool.chatgpt_mfa_setup',
+    title: 'WorkPool: chatgpt_mfa_setup 配置',
+    description: '为已注册的 ChatGPT 账号开启 TOTP 2FA；可选使用 2FAuth 外部验证码模块。',
+    fields: [
+      { key: 'worker_concurrency.chatgpt_mfa_setup', label: 'chatgpt_mfa_setup 并发', type: 'number', placeholder: '默认 2' },
+      { key: 'workpool.chatgpt_mfa_setup.api_base_url', label: 'MFA API Base URL', placeholder: '默认 https://chatgpt.com' },
+      { key: 'workpool.chatgpt_mfa_setup.auth_base_url', label: 'MFA Auth Base URL', placeholder: '默认 https://auth.openai.com' },
+      {
+        key: 'workpool.chatgpt_mfa_setup.mfa_code_provider',
+        label: '验证码提供方式',
+        type: 'select',
+        options: [
+          { value: 'local', label: '本地 TOTP' },
+          { value: 'twofauth', label: '2FAuth 外部服务' },
+        ],
+      },
+      { key: 'workpool.chatgpt_mfa_setup.factor_type', label: 'Factor Type', type: 'select', options: [{ value: 'totp', label: 'totp' }] },
+      { key: 'workpool.chatgpt_mfa_setup.twofauth_base_url', label: '2FAuth Base URL', placeholder: '默认 https://2fa.oai-gpt.com' },
+      { key: 'workpool.chatgpt_mfa_setup.twofauth_pat', label: '2FAuth PAT', type: 'password' },
+      { key: 'workpool.chatgpt_mfa_setup.twofauth_preview_before_create', label: '创建前先预览 URI', type: 'switch' },
+      { key: 'workpool.chatgpt_mfa_setup.twofauth_timeout_seconds', label: '2FAuth 超时秒数', type: 'number', placeholder: '30' },
+      { key: 'workpool.chatgpt_mfa_setup.force_reenroll', label: '强制重新 enrollment', type: 'switch' },
+      { key: 'workpool.chatgpt_mfa_setup.verify_login_challenge', label: '激活后顺手验证登录 challenge', type: 'switch' },
+      { key: 'workpool.chatgpt_mfa_setup.proxy_provider', label: '代理厂商', type: 'select', options: PROXY_PROVIDER_OPTIONS },
+      { key: 'workpool.chatgpt_mfa_setup.proxy_region', label: '代理 region', placeholder: 'US / JP / BR' },
+      { key: 'workpool.chatgpt_mfa_setup.proxy_ttl', label: '代理持续时间 t', type: 'number', placeholder: '默认 5' },
+      { key: 'workpool.chatgpt_mfa_setup.proxy_url', label: '显式代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空优先复用账号代理' },
+    ],
+  },
+  chatgpt_password_setup: {
+    id: 'workpool.chatgpt_password_setup',
+    title: 'WorkPool: chatgpt_password_setup 配置',
+    description: '设置 ChatGPT 密码流程；会先等待邮箱验证码，再回到 reset-password/new-password 页面提交密码。',
+    fields: [
+      { key: 'worker_concurrency.chatgpt_password_setup', label: 'chatgpt_password_setup 并发', type: 'number', placeholder: '默认 2' },
+      { key: 'workpool.chatgpt_password_setup.otp_wait_timeout_seconds', label: '首次等待验证码秒数', type: 'number', placeholder: '300' },
+      { key: 'workpool.chatgpt_password_setup.otp_resend_wait_timeout_seconds', label: '重发后等待验证码秒数', type: 'number', placeholder: '300' },
+      { key: 'workpool.chatgpt_password_setup.max_steps', label: '流程最大步数', type: 'number', placeholder: '16' },
+      { key: 'workpool.chatgpt_password_setup.proxy_provider', label: '代理厂商', type: 'select', options: PROXY_PROVIDER_OPTIONS },
+      { key: 'workpool.chatgpt_password_setup.proxy_region', label: '代理 region', placeholder: 'US / JP / BR' },
+      { key: 'workpool.chatgpt_password_setup.proxy_ttl', label: '代理持续时间 t', type: 'number', placeholder: '默认 5' },
+      { key: 'workpool.chatgpt_password_setup.proxy_url', label: '显式代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空优先复用账号代理' },
+    ],
+  },
   sub2api_sync: {
     id: 'workpool.sub2api_sync',
     title: 'WorkPool: sub2api_sync 配置',
@@ -171,6 +216,7 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
       { key: 'workpool.openai_oauth.proxy_region', label: 'OAuth 代理 region', placeholder: 'US / JP / BR' },
       { key: 'workpool.openai_oauth.proxy_ttl', label: 'OAuth 代理持续时间 t', type: 'number', placeholder: '默认 5' },
       { key: 'workpool.openai_oauth.proxy_url', label: 'OAuth 显式代理 URL', type: 'proxy_select', placeholder: '从代理池选择；留空优先复用账号代理' },
+      { key: 'workpool.openai_oauth.oauth_prompt', label: 'OAuth prompt', placeholder: '留空=优先复用登录态；可填 login / none' },
       { key: 'workpool.openai_oauth.sms_project', label: 'OAuth 短信项目', placeholder: 'openai_oauth' },
       { key: 'workpool.openai_oauth.phone_verification_enabled', label: '启用 add-phone 接码', type: 'switch' },
       {
@@ -310,6 +356,26 @@ export const WORKPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
 }
 
 export const RESOURCEPOOL_SETTING_GROUPS: Record<string, PoolSettingGroup> = {
+  mfa: {
+    id: 'resource.mfa',
+    title: 'ResourcePool: mfa 配置',
+    description: '全局 MFA 取码配置。所有 ChatGPT 相关步骤默认共用这一套，不再按步骤分开配置。',
+    fields: [
+      {
+        key: 'mfa_code_provider',
+        label: '验证码提供方式',
+        type: 'select',
+        options: [
+          { value: 'local', label: '本地 TOTP' },
+          { value: 'twofauth', label: '2FAuth 外部服务' },
+        ],
+      },
+      { key: 'twofauth_base_url', label: '2FAuth Base URL', placeholder: '默认 https://2fa.oai-gpt.com' },
+      { key: 'twofauth_pat', label: '2FAuth PAT', type: 'password' },
+      { key: 'twofauth_preview_before_create', label: '创建前先预览 URI', type: 'switch' },
+      { key: 'twofauth_timeout_seconds', label: '2FAuth 超时秒数', type: 'number', placeholder: '30' },
+    ],
+  },
   email_pool: {
     id: 'resource.email_pool',
     title: 'ResourcePool: email_pool 配置',

@@ -427,6 +427,23 @@ class ChatGPTClient:
             or "email-otp" in target
         )
 
+    def _state_is_password_setup(self, state: FlowState):
+        target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
+        return (
+            state.page_type in {"reset_password_new_password", "password_setup"}
+            or "reset-password/new-password" in target
+            or "/api/accounts/password/add" in target
+            or "/password/add" in target
+        )
+
+    def _state_is_mfa_challenge(self, state: FlowState):
+        target = f"{state.page_type} {state.continue_url} {state.current_url}".lower()
+        if "add_phone" in target or "add-phone" in target:
+            return False
+        if state.page_type in {"mfa_challenge", "mfa_verification", "totp_verification", "two_factor"}:
+            return True
+        return any(marker in target for marker in ("/mfa", "/2fa", "/authenticator"))
+
     def _state_is_about_you(self, state: FlowState):
         target = f"{state.continue_url} {state.current_url}".lower()
         return state.page_type == "about_you" or "about-you" in target
@@ -682,7 +699,46 @@ class ChatGPTClient:
             data["sessionToken"] = session_cookie
         return True, data
 
-    def relogin_existing_user(self, email, password="", otp_provider=None, max_steps=16):
+    def export_identity_state(self):
+        cookies = []
+        for cookie in self.session.cookies.jar:
+            cookies.append(
+                {
+                    "name": getattr(cookie, "name", ""),
+                    "value": getattr(cookie, "value", ""),
+                    "domain": getattr(cookie, "domain", "") or ".chatgpt.com",
+                    "path": getattr(cookie, "path", "") or "/",
+                    "expires": getattr(cookie, "expires", None),
+                    "secure": bool(getattr(cookie, "secure", False)),
+                    "httpOnly": bool(getattr(cookie, "has_nonstandard_attr", lambda _name: False)("HttpOnly")),
+                }
+            )
+        return {
+            "user_agent": self.ua,
+            "browser_fingerprint": {
+                "user_agent": self.ua,
+                "sec_ch_ua": self.sec_ch_ua,
+                "accept_language": self.accept_language,
+                "platform": getattr(self._fingerprint, "platform", ""),
+                "platform_version": getattr(self._fingerprint, "platform_version", ""),
+                "chrome_major": getattr(self._fingerprint, "chrome_major", ""),
+                "chrome_full": getattr(self._fingerprint, "chrome_full", ""),
+                "impersonate": self.impersonate,
+                "device_id": self.device_id,
+                "viewport_width": self.viewport_width,
+                "viewport_height": self.viewport_height,
+                "is_firefox": self.is_firefox,
+            },
+            "cookies": cookies,
+            "local_storage": {},
+            "device_id": self.device_id,
+            "oai_session_id": self.oai_session_id,
+            "impersonate": self.impersonate,
+            "oai_client_version": self.oai_client_version,
+            "oai_client_build_number": self.oai_client_build_number,
+        }
+
+    def relogin_existing_user(self, email, password="", otp_provider=None, mfa_provider=None, max_steps=16):
         self._enter_stage("login", f"email={email}")
         if not email:
             return False, "missing email"
@@ -745,6 +801,66 @@ class ChatGPTClient:
                 state = next_state
                 self._log(f"登录状态: {describe_flow_state(state)}")
                 continue
+            if self._state_is_mfa_challenge(state):
+                if mfa_provider is None:
+                    return False, f"登录需要 MFA 验证，但未提供 mfa_provider: {describe_flow_state(state)}"
+                factor_id = ""
+                if hasattr(mfa_provider, "get_factor_id"):
+                    try:
+                        factor_id = str(mfa_provider.get_factor_id() or "").strip()
+                    except Exception:
+                        factor_id = ""
+                if not factor_id:
+                    factor_id = str(getattr(mfa_provider, "factor_id", "") or "").strip()
+                if not factor_id:
+                    return False, "登录 MFA 验证缺少 factor_id"
+                code = mfa_provider.get_code(email, otp_sent_at=time.time() - 30)
+                url = f"{self.AUTH}/api/accounts/mfa/verify"
+                headers = self._headers(
+                    url,
+                    accept="*/*",
+                    referer=state.current_url or state.continue_url or f"{self.AUTH}/mfa",
+                    origin=self.AUTH,
+                    content_type="application/json",
+                    extra_headers={
+                        "oai-device-id": self.device_id,
+                        "openai-sentinel-token": self._protocol_sentinel_token("authorize_continue"),
+                    },
+                )
+                headers.update(generate_datadog_trace())
+                try:
+                    self._browser_pause()
+                    response = self._session_post(
+                        url,
+                        json={"id": factor_id, "type": "totp", "code": str(code or "").strip()},
+                        headers=headers,
+                        allow_redirects=False,
+                        timeout=45,
+                    )
+                except Exception as exc:
+                    return False, f"登录 MFA 验证异常: {exc}"
+                body = response.text or ""
+                self._log(f"登录 MFA 验证 -> {response.status_code}")
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location", "") or response.headers.get("location", "")
+                    next_state = self._state_from_url(location or str(response.url))
+                    state = next_state
+                    continue
+                if response.status_code != 200:
+                    lowered = body.lower()
+                    if "invalid_auth_step" in lowered or "invalid authorization step" in lowered or "redirect_uri" in lowered and "log-in" in lowered:
+                        return False, f"登录 MFA 验证 stale auth step: HTTP {response.status_code} {body[:240]}"
+                    return False, f"登录 MFA 验证失败: HTTP {response.status_code} {body[:240]}"
+                try:
+                    payload = response.json()
+                except Exception:
+                    payload = {}
+                next_state = self._state_from_payload(payload if isinstance(payload, dict) else {}, current_url=str(response.url))
+                if not next_state.continue_url and not next_state.current_url:
+                    next_state = self._state_from_url(str(response.url))
+                state = next_state
+                self._log(f"登录状态: {describe_flow_state(state)}")
+                continue
             if self._state_is_workspace_selection(state):
                 ok, next_state = self.select_login_workspace(state, return_state=True)
                 if not ok:
@@ -763,6 +879,155 @@ class ChatGPTClient:
                 return False, "登录需要手机验证"
             return False, f"未支持的登录状态: {describe_flow_state(state)}"
         return False, "登录状态机超出最大步数"
+
+    def setup_password_existing_user(
+        self,
+        email,
+        password,
+        otp_provider=None,
+        mfa_provider=None,
+        access_token="",
+        max_steps=16,
+        otp_wait_timeout=600,
+        otp_resend_wait_timeout=300,
+    ):
+        self._enter_stage("chatgpt_password_setup", f"email={email}")
+        if not email:
+            return False, "missing email"
+        if not password:
+            return False, "missing password"
+        self.check_password_setup_eligibility()
+        csrf_token = self.get_csrf_token()
+        if not csrf_token:
+            return False, "获取 CSRF token 失败"
+        authorize_url = self.signin_password_setup(email, csrf_token)
+        if not authorize_url:
+            return False, "signin/openai 未返回 authorize URL"
+        final_url = self.authorize(authorize_url)
+        if not final_url:
+            return False, "authorize 跳转失败"
+        state = self._state_from_url(final_url)
+        otp_sent_at = 0.0
+        self._log(f"设置密码状态起点: {describe_flow_state(state)}")
+        seen = {}
+        password_submitted = False
+        for _ in range(max(1, int(max_steps or 1))):
+            signature = self._state_signature(state)
+            seen[signature] = seen.get(signature, 0) + 1
+            if seen[signature] > 3:
+                return False, f"设置密码状态卡住: {describe_flow_state(state)}"
+            if password_submitted:
+                self.last_registration_state = state
+                return True, "设置密码成功"
+            if self._state_is_password_setup(state):
+                ok, next_state = self.add_password(password, state, return_state=True)
+                if not ok:
+                    return False, f"设置密码失败: {next_state}"
+                password_submitted = True
+                state = next_state
+                self.last_registration_state = state
+                continue
+            if self._state_is_mfa_challenge(state):
+                if mfa_provider is None:
+                    return False, f"设置密码后出现 MFA 挑战，但未提供 mfa_provider: {describe_flow_state(state)}"
+                factor_id = ""
+                if hasattr(mfa_provider, "get_factor_id"):
+                    try:
+                        factor_id = str(mfa_provider.get_factor_id() or "").strip()
+                    except Exception:
+                        factor_id = ""
+                if not factor_id:
+                    factor_id = str(getattr(mfa_provider, "factor_id", "") or "").strip()
+                if not factor_id:
+                    return False, "设置密码后出现 MFA 挑战，但未找到 factor_id"
+                code = mfa_provider.get_code(email, otp_sent_at=time.time() - 30)
+                from backend.integrations.chatgpt.mfa_client import ChatGPTMfaClient
+                identity_state = self.export_identity_state()
+                mfa_client = ChatGPTMfaClient(
+                    access_token=str(access_token or ""),
+                    cookies=identity_state.get("cookies") or [],
+                    user_agent=str(getattr(self, "ua", "") or ""),
+                    oai_session_id=str(getattr(self, "oai_session_id", "") or ""),
+                    oai_client_version=str(getattr(self, "oai_client_version", "") or ""),
+                    oai_client_build_number=str(getattr(self, "oai_client_build_number", "") or ""),
+                    device_id=str(getattr(self, "device_id", "") or ""),
+                    proxy_url=str(getattr(self, "proxy", "") or ""),
+                    api_base_url=self.BASE,
+                    auth_base_url=self.AUTH,
+                    log_fn=lambda msg: self._log(msg),
+                )
+                try:
+                    verify_resp = mfa_client.verify_totp_login(factor_id=factor_id, code=code, factor_type="totp")
+                except Exception as exc:
+                    return False, f"MFA 验证失败: {exc}"
+                try:
+                    self.session.cookies.update(mfa_client.session.cookies)
+                except Exception:
+                    pass
+                self._log(f"设置密码 MFA 验证成功: {verify_resp}")
+                next_state = self._state_from_payload(
+                    verify_resp if isinstance(verify_resp, dict) else {},
+                    current_url=state.current_url or state.continue_url or self.AUTH,
+                )
+                if not next_state.continue_url and not next_state.current_url:
+                    _, next_state = self._follow_flow_state(
+                        state,
+                        referer=state.current_url or state.continue_url or self.AUTH,
+                    )
+                state = next_state
+                continue
+            if self._state_is_email_otp(state):
+                if otp_provider is None:
+                    return False, "设置密码需要邮箱验证码，但未提供 otp_provider"
+                if not otp_sent_at:
+                    otp_sent_at = time.time()
+                code = self._get_login_otp_code(
+                    otp_provider,
+                    email,
+                    timeout=int(otp_wait_timeout or 600),
+                    otp_sent_at=otp_sent_at,
+                )
+                if not code:
+                    self._log("首次等待未收到验证码，尝试重发一次 email-otp/send 后再等待")
+                    resend_ok = self.send_email_otp(
+                        referer=state.current_url or state.continue_url or f"{self.AUTH}/email-verification"
+                    )
+                    if resend_ok:
+                        self._log("重发验证码成功")
+                    else:
+                        self._log("重发验证码失败")
+                    otp_sent_at = time.time()
+                    code = self._get_login_otp_code(
+                        otp_provider,
+                        email,
+                        timeout=int(otp_resend_wait_timeout or 300),
+                        otp_sent_at=otp_sent_at,
+                    )
+                if not code:
+                    return False, "未收到验证码"
+                success, next_state = self.verify_email_otp(code, return_state=True)
+                if not success:
+                    return False, f"验证码失败: {next_state}"
+                state = next_state
+                self.last_registration_state = state
+                continue
+            if self._state_requires_navigation(state):
+                success, next_state = self._follow_flow_state(
+                    state,
+                    referer=state.current_url or f"{self.AUTH}/reset-password/new-password",
+                )
+                if not success:
+                    return False, f"跳转失败: {next_state}"
+                state = next_state
+                self.last_registration_state = state
+                continue
+            if self._is_registration_complete_state(state):
+                if password_submitted:
+                    self.last_registration_state = state
+                    return True, "设置密码成功"
+                return False, f"设置密码尚未提交但已到完成态: {describe_flow_state(state)}"
+            return False, f"未支持的设置密码状态: {describe_flow_state(state)}"
+        return False, "设置密码状态机超出最大步数"
 
     def _protocol_sentinel_token(self, flow):
         return build_sentinel_token(
@@ -1278,6 +1543,125 @@ class ChatGPTClient:
             self._log(f"提交邮箱失败: {e}")
 
         return None
+
+    def signin_password_setup(self, email, csrf_token):
+        """提交邮箱，进入设置密码的 authorize flow。"""
+        self._log(f"提交设置密码邮箱: {email}")
+        url = f"{self.BASE}/api/auth/signin/openai"
+
+        params = {
+            "connection": "password",
+            "login_hint": email,
+            "reauth": "password",
+            "post_login_add_password": "true",
+            "max_age": "0",
+            "ext-oai-did": self.device_id,
+            "auth_session_logging_id": str(uuid.uuid4()),
+            "ext-passkey-client-capabilities": compute_passkey_capabilities(self.ua),
+        }
+
+        form_data = {
+            "callbackUrl": f"{self.BASE}/",
+            "csrfToken": csrf_token,
+            "json": "true",
+        }
+
+        try:
+            self._browser_pause()
+            r = self._session_post(
+                url,
+                params=params,
+                data=form_data,
+                headers=self._headers(
+                    url,
+                    accept="*/*",
+                    referer=f"{self.BASE}/",
+                    origin=self.BASE,
+                    content_type="application/x-www-form-urlencoded",
+                    fetch_site="same-origin",
+                ),
+                timeout=30,
+            )
+
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except Exception:
+                    data = {}
+                authorize_url = data.get("url", "")
+                if authorize_url:
+                    self._log("获取到设置密码 authorize URL")
+                    return authorize_url
+        except Exception as e:
+            self._log(f"提交设置密码邮箱失败: {e}")
+
+        return None
+
+    def check_password_setup_eligibility(self):
+        """预热设置密码页面所需的 eligibility 请求。"""
+        for path in ("change_password/eligibility", "add_password/eligibility"):
+            url = f"{self.BASE}/backend-api/accounts/{path}"
+            try:
+                self._browser_pause()
+                r = self._session_get(
+                    url,
+                    headers=self._headers(
+                        url,
+                        accept="application/json, text/plain, */*",
+                        referer=f"{self.BASE}/",
+                        fetch_site="same-origin",
+                    ),
+                    timeout=30,
+                )
+                self._log(f"{path} -> {r.status_code}")
+            except Exception as e:
+                self._log(f"{path} 请求失败: {e}")
+
+    def add_password(self, password, state, return_state=False):
+        """在 reset-password/new-password 页面提交新密码。"""
+        self._enter_stage("chatgpt_password_setup", "add password")
+        url = f"{self.AUTH}/api/accounts/password/add"
+        sentinel_token = self._protocol_sentinel_token("password_reset")
+        headers = self._headers(
+            url,
+            accept="application/json",
+            referer=state.current_url or state.continue_url or f"{self.AUTH}/reset-password/new-password",
+            origin=self.AUTH,
+            content_type="application/json",
+            fetch_site="same-origin",
+            extra_headers={
+                "oai-device-id": self.device_id,
+                "openai-sentinel-token": sentinel_token,
+            },
+        )
+        headers.update(generate_datadog_trace())
+        try:
+            self._browser_pause()
+            response = self._session_post(
+                url,
+                json={"password": password},
+                headers=headers,
+                allow_redirects=False,
+                timeout=45,
+            )
+        except Exception as exc:
+            return False, str(exc)
+
+        self._log(f"password/add -> {response.status_code}")
+        if response.status_code != 200:
+            return False, f"HTTP {response.status_code}: {response.text[:240]}"
+
+        next_state = None
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                next_state = self._state_from_payload(payload, current_url=str(response.url) or url)
+        except Exception:
+            next_state = None
+
+        if next_state is None:
+            next_state = self._state_from_url(str(response.url) or f"{self.AUTH}/reset-password/new-password")
+        return (True, next_state) if return_state else (True, "ok")
 
     def _bootstrap_chatgpt_entry(self, email, csrf_token=""):
         """完成 HAR 对齐的 ChatGPT 入口预热并返回 authorize 最终 URL。"""

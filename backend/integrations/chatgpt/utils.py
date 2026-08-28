@@ -155,6 +155,10 @@ def infer_page_type_from_url(url):
         return "callback"
     if "create-account/password" in path:
         return "create_account_password"
+    if "reset-password/new-password" in path:
+        return "reset_password_new_password"
+    if "/api/accounts/password/add" in path:
+        return "reset_password_new_password"
     if "email-verification" in path or "email-otp" in path:
         return "email_otp_verification"
     if "about-you" in path:
@@ -169,6 +173,8 @@ def infer_page_type_from_url(url):
         return "organization_selection"
     if "add-phone" in path:
         return "add_phone"
+    if any(marker in path for marker in ("mfa", "2fa", "totp", "authenticator")):
+        return "mfa_verification"
     if "callback" in path:
         return "callback"
     if "chatgpt.com" in host and path in {"", "/"}:

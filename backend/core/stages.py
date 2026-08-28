@@ -30,6 +30,8 @@ ALLOWED_STAGE_NAMES: tuple[str, ...] = (
     "pp_long_link",
     "payment",
     "chatgpt_session",
+    "chatgpt_password_setup",
+    "chatgpt_mfa_setup",
     "openai_oauth",
     "sso_oauth",
     "codex_invitation",

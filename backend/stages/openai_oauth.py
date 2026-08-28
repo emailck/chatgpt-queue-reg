@@ -1,6 +1,7 @@
 """OpenAI OAuth refresh-token stage."""
 from __future__ import annotations
 
+import json
 import time
 from datetime import timedelta
 from typing import Any
@@ -10,6 +11,7 @@ from sqlmodel import Session
 from backend.core.db import engine, session_scope
 from backend.core.errors import JobCancelled
 from backend.core.job_context import JobContext
+from backend.core.json_utils import json_loads
 from backend.core.settings import settings
 from backend.core.proxy import resolve_workpool_proxy_template
 from backend.core.stages import stage
@@ -17,6 +19,7 @@ from backend.core.time_utils import utcnow
 from backend.models.account import ChatGPTAccount
 from backend.models.openai_refresh_token import OpenAIRefreshToken
 from backend.schemas.stage_io import OpenAIOAuthInput, OpenAIOAuthOutput
+from backend.stages.chatgpt_session import refresh_or_relogin_account_session
 
 
 @stage(
@@ -46,6 +49,7 @@ def run(ctx: JobContext) -> None:
         email = str(account_row.email or "")
         password = str(account_row.password or "")
         account_user_agent = str(account_row.user_agent or "")
+        account_metadata = json_loads(account_row.metadata_json, fallback={}) or {}
 
     if not email:
         raise RuntimeError(f"account {account_id} has no email")
@@ -91,15 +95,45 @@ def run(ctx: JobContext) -> None:
     )
 
     from backend.integrations.chatgpt.oauth import create_oauth_session
+    from backend.integrations.chatgpt.mfa_client import build_totp_adapter_from_metadata
     from backend.integrations.chatgpt.oauth_protocol import (
         OAuthOtpAdapter,
-        run_protocol_oauth,
+        ProtocolOAuthClient,
     )
 
     email_service = _resolve_email_service({
         "fixed_email": email or None,
         "fixed_password": password or None,
     })
+    mfa_provider = build_totp_adapter_from_metadata(
+        account_metadata,
+        config=merged_extra,
+        log_fn=_emit_log,
+        timeout_seconds=oauth_timeout,
+    )
+
+    # Password resets / step-up flows can revoke the previous AT. Repair the
+    # session first so the OAuth protocol starts from a live browser identity.
+    refresh_or_relogin_account_session(
+        account_id,
+        ctx,
+        password=password,
+        otp_provider=email_service,
+        mfa_provider=mfa_provider,
+        proxy_url_override=proxy_url,
+        max_attempts=5,
+    )
+
+    with Session(engine) as s:
+        account_row = s.get(ChatGPTAccount, account_id)
+        if account_row is None:
+            raise RuntimeError(f"account {account_id} not found after session refresh")
+        email = str(account_row.email or "")
+        password = str(account_row.password or password or "")
+        account_user_agent = str(account_row.user_agent or "")
+        account_metadata = json_loads(account_row.metadata_json, fallback={}) or {}
+        if not proxy_url:
+            proxy_url = str(account_row.proxy_url or "").strip()
 
     last_error = ""
     token_data: dict[str, Any] | None = None
@@ -116,24 +150,33 @@ def run(ctx: JobContext) -> None:
                 timeout_seconds=oauth_timeout,
             )
             identity = ctx.require_identity()
-            token_data = run_protocol_oauth(
-                oauth,
-                email=email,
-                password=password,
-                otp_provider=otp_provider,
-                phone_provider=_build_phone_provider(merged_extra, _emit_log, proxy_url),
-                config={
+            client = ProtocolOAuthClient(
+                {
                     **merged_extra,
                     "user_agent": account_user_agent,
                     "browser_fingerprint": identity.fingerprint,
                     "cookies": identity.cookies,
+                    "local_storage": identity.local_storage,
+                    "device_id": account_metadata.get("device_id") or "",
+                    "oai_session_id": account_metadata.get("oai_session_id") or "",
+                    "oai_client_version": account_metadata.get("oai_client_version") or "",
+                    "oai_client_build_number": account_metadata.get("oai_client_build_number") or "",
                 },
                 proxy=proxy_url or "",
                 log_fn=_emit_log,
             )
+            token_data = client.run(
+                oauth,
+                email=email,
+                password=password,
+                otp_provider=otp_provider,
+                mfa_provider=mfa_provider,
+                phone_provider=_build_phone_provider(merged_extra, _emit_log, proxy_url),
+            )
             refresh_token = str((token_data or {}).get("refresh_token") or "").strip()
             if not refresh_token:
                 raise RuntimeError("OAuth token response missing refresh_token")
+            _persist_identity_from_oauth(account_id, client.export_identity_state())
             _emit_log("OAuth refresh_token 获取完成")
             break
         except Exception as exc:
@@ -286,3 +329,26 @@ def _persist_refresh_token_error(account_id: int, error: str) -> None:
         existing.consecutive_failures = int(existing.consecutive_failures or 0) + 1
         existing.updated_at = now
         s.add(existing)
+
+
+def _persist_identity_from_oauth(account_id: int, identity_state: dict[str, Any]) -> None:
+    now = utcnow()
+    with session_scope() as s:
+        row = s.get(ChatGPTAccount, int(account_id))
+        if row is None:
+            return
+        if identity_state.get("cookies"):
+            row.cookies_json = json.dumps(identity_state.get("cookies") or [], ensure_ascii=False)
+        if identity_state.get("local_storage") is not None:
+            row.local_storage_json = json.dumps(identity_state.get("local_storage") or {}, ensure_ascii=False)
+        if identity_state.get("browser_fingerprint"):
+            row.browser_fingerprint_json = json.dumps(identity_state.get("browser_fingerprint") or {}, ensure_ascii=False)
+        if identity_state.get("user_agent"):
+            row.user_agent = str(identity_state.get("user_agent") or "")
+        metadata = json_loads(row.metadata_json, fallback={}) or {}
+        metadata["oauth_identity_refreshed_at"] = now.isoformat()
+        row.metadata_json = json.dumps(metadata, ensure_ascii=False)
+        row.updated_at = now
+        s.add(row)
+        s.commit()
+        s.refresh(row)
