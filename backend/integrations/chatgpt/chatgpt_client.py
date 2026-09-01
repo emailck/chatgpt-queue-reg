@@ -619,6 +619,13 @@ class ChatGPTClient:
                     continue
                 return False, last_error
 
+            if isinstance(data, dict):
+                self._log(
+                    "/api/auth/session 响应摘要: "
+                    f"keys={sorted(list(data.keys()))[:12]} "
+                    f"sessionToken={'yes' if str(data.get('sessionToken') or '').strip() else 'no'} "
+                    f"accessToken={'yes' if str(data.get('accessToken') or '').strip() else 'no'}"
+                )
             access_token = str(data.get("accessToken") or "").strip()
             if access_token:
                 return True, data
@@ -649,6 +656,35 @@ class ChatGPTClient:
             return False, last_error
 
         return False, last_error or "/api/auth/session 未返回 accessToken"
+
+    def _await_chatgpt_session_after_landing(
+        self,
+        state=None,
+        *,
+        wait_seconds=5.0,
+        max_attempts=5,
+    ):
+        """像浏览器一样，回到 chatgpt.com 后先等一会儿再读 /api/auth/session。"""
+        wait_seconds = max(0.0, float(wait_seconds or 0))
+        if wait_seconds:
+            self._log(f"已回到 ChatGPT，等待 {wait_seconds:.1f}s 让 session 落地")
+            time.sleep(wait_seconds)
+        if state is not None:
+            try:
+                self._session_get(
+                    f"{self.BASE}/",
+                    headers=self._headers(
+                        f"{self.BASE}/",
+                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        referer=state.current_url or f"{self.AUTH}/about-you",
+                        navigation=True,
+                    ),
+                    allow_redirects=True,
+                    timeout=30,
+                )
+            except Exception as exc:
+                self._log(f"回到 ChatGPT 首页触达异常（继续等 session）: {exc}")
+        return self._fetch_session_with_cookie_token(max_attempts=max_attempts)
 
     def fetch_backend_me(self, access_token, max_attempts=2, retry_delay=1.0):
         url = f"{self.BASE}/backend-api/me"
@@ -764,7 +800,11 @@ class ChatGPTClient:
                 return False, f"登录状态卡住: {describe_flow_state(state)}"
             if self._is_registration_complete_state(state):
                 self.last_registration_state = state
-                return self._fetch_session_with_cookie_token(max_attempts=3)
+                return self._await_chatgpt_session_after_landing(
+                    state,
+                    wait_seconds=5,
+                    max_attempts=5,
+                )
             if self._state_is_login_start(state):
                 ok, next_state = self.authorize_continue_login(email, state, return_state=True)
                 if not ok:
@@ -1374,6 +1414,8 @@ class ChatGPTClient:
             self._log("未检测到 session-token cookie，继续直访 /api/auth/session 尝试提取 accessToken")
 
         self._log("步骤 3/4: 请求 ChatGPT /api/auth/session ...")
+        self._log("步骤 3/4: 先等待 5s 让 callback 后的 session 落地")
+        time.sleep(5)
         ok, session_or_error = self.fetch_chatgpt_session()
         if not ok:
             return False, session_or_error

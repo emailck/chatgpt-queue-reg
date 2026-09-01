@@ -659,7 +659,10 @@ def _record_success(
                 row.next_sync_at = now + timedelta(hours=STATUS_SYNC_INTERVAL_HOURS)
                 row.last_sync_at = now
                 row.consecutive_failures = 0
-                row.enabled = status.lower() not in INVALID_SUB2API_STATUSES and not relogin_required
+                # Successful upload should stop the automatic RT poller from
+                # re-uploading the same token every 24h. Manual sync/toggle can
+                # re-enable it later if needed.
+                row.enabled = False
                 row.last_error = last_error if relogin_required else ""
                 row.updated_at = now
                 s.add(row)
