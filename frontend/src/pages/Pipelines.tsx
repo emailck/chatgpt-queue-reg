@@ -390,8 +390,24 @@ export default function Pipelines() {
     const includesRegister = mode === 'custom'
       ? Array.isArray(body.stages) && body.stages.includes('register')
       : String(body.preset || '').startsWith('register') || ['full_chain', 'account_paid', 'account_paid_with_refresh_token', 'link_only'].includes(String(body.preset || ''))
+    const includesPasswordSetup = mode === 'custom'
+      ? Array.isArray(body.stages) && body.stages.includes('chatgpt_password_setup')
+      : body.preset === 'chatgpt_password_setup_only'
+        || body.preset === 'register_with_password_setup'
+        || body.preset === 'register_with_password_setup_sub2api'
+        || body.preset === 'register_with_password_setup_mfa'
+        || body.preset === 'register_with_password_setup_mfa_sub2api'
     if (includesRegister) {
       for (const key of ['email', 'password']) {
+        const value = values[key]
+        if (value !== undefined && value !== null && value !== '') {
+          body[key] = value
+        }
+      }
+    }
+
+    if (includesPasswordSetup) {
+      for (const key of ['account_id', 'password', 'otp_wait_timeout', 'otp_resend_wait_timeout', 'max_steps']) {
         const value = values[key]
         if (value !== undefined && value !== null && value !== '') {
           body[key] = value
