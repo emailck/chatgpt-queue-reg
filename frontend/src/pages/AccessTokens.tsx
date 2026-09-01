@@ -307,14 +307,6 @@ export default function AccessTokens() {
     },
     ]
 
-    if (isMobile) {
-      return [
-        base[0],
-        base[2],
-        base[5],
-      ]
-    }
-
     return base
   }, [fetchingRtId, isMobile, openDetail, openMfa, rerunOauth, showSecrets])
 
@@ -363,7 +355,7 @@ export default function AccessTokens() {
         columns={columns}
         dataSource={rows}
         loading={loading}
-        scroll={isMobile ? undefined : { x: 1500 }}
+        scroll={{ x: isMobile ? 1180 : 1500 }}
         pagination={{ defaultPageSize: 18, showSizeChanger: true, pageSizeOptions: [18, 36, 72, 144], showTotal: (total) => `共 ${total} 条` }}
         rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys) }}
       />
