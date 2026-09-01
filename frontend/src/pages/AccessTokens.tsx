@@ -53,7 +53,24 @@ const TXT_FIELD_OPTIONS = [
   'user_agent',
 ] as const
 
+function useIsMobile(breakpoint = 900) {
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth <= breakpoint : false,
+  )
+
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${breakpoint}px)`)
+    const onChange = (event: MediaQueryListEvent) => setIsMobile(event.matches)
+    setIsMobile(mq.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [breakpoint])
+
+  return isMobile
+}
+
 export default function AccessTokens() {
+  const isMobile = useIsMobile()
   const [rows, setRows] = useState<AccessTokenAccount[]>([])
   const [loading, setLoading] = useState(false)
   const [showSecrets, setShowSecrets] = useState(false)
@@ -213,12 +230,12 @@ export default function AccessTokens() {
 
   const secretValue = (value: string, label: string) => showSecrets ? <CopyableText value={value} label={label} code /> : <Tag>{value ? 'present' : 'missing'}</Tag>
 
-  const columns = useMemo<TableColumnsType<AccessTokenAccount>>(() => [
+  const columns = useMemo<TableColumnsType<AccessTokenAccount>>(() => {
+    const base: TableColumnsType<AccessTokenAccount> = [
     {
       title: '邮箱',
       dataIndex: 'email',
-      width: 220,
-      fixed: 'left',
+      width: isMobile ? 180 : 220,
       render: (value: string, row) => (
         <Space direction="vertical" size={2}>
           <CopyableText value={value} label="邮箱" />
@@ -266,12 +283,6 @@ export default function AccessTokens() {
       ),
     },
     {
-      title: '代理',
-      dataIndex: 'proxy_url',
-      ellipsis: true,
-      render: (value: string) => <CopyableText value={value} label="代理" />,
-    },
-    {
       title: '更新时间',
       dataIndex: 'updated_at',
       width: 180,
@@ -280,8 +291,8 @@ export default function AccessTokens() {
     {
       title: '操作',
       key: 'actions',
-      fixed: 'right',
-      width: 240,
+      fixed: isMobile ? undefined : 'right',
+      width: isMobile ? 220 : 240,
       render: (_: unknown, row) => (
         <Space size={6} wrap>
           <Button size="small" onClick={() => openDetail(row)}>详情</Button>
@@ -294,7 +305,18 @@ export default function AccessTokens() {
         </Space>
       ),
     },
-  ], [fetchingRtId, openDetail, openMfa, rerunOauth, showSecrets])
+    ]
+
+    if (isMobile) {
+      return [
+        base[0],
+        base[2],
+        base[5],
+      ]
+    }
+
+    return base
+  }, [fetchingRtId, isMobile, openDetail, openMfa, rerunOauth, showSecrets])
 
   return (
     <PageScaffold
@@ -341,7 +363,7 @@ export default function AccessTokens() {
         columns={columns}
         dataSource={rows}
         loading={loading}
-        scroll={{ x: 1500 }}
+        scroll={isMobile ? undefined : { x: 1500 }}
         pagination={{ defaultPageSize: 18, showSizeChanger: true, pageSizeOptions: [18, 36, 72, 144], showTotal: (total) => `共 ${total} 条` }}
         rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys) }}
       />
