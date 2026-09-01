@@ -230,16 +230,7 @@ export default function AccessTokens() {
         </Space>
       ),
     },
-    {
-      title: '账户',
-      width: 170,
-      render: (_: unknown, row) => (
-        <Space direction="vertical" size={2}>
-          <CopyableText value={row.account_id} label="account_id" code />
-          <CopyableText value={row.workspace_id} label="workspace_id" code />
-        </Space>
-      ),
-    },
+
     {
       title: 'Token',
       width: 220,
