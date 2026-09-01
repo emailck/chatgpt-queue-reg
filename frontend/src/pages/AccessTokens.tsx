@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Button, Form, Input, Popconfirm, Select, Space, Switch, Tag, Typography, message } from 'antd'
-import { DeleteOutlined, DownloadOutlined, KeyOutlined, ReloadOutlined } from '@ant-design/icons'
+import { Button, Form, Input, Popconfirm, Select, Space, Switch, Table, Tag, Typography, message } from 'antd'
+import type { TableColumnsType } from 'antd'
+import { DeleteOutlined, DownloadOutlined, KeyOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 
 import { API_BASE, apiFetch, formatDateTime } from '@/lib/api'
-import { ActionCard, CardToolbar, EntityCard, EntityGrid, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
+import { ActionCard, CardToolbar, KeyValue, KeyValueGrid, PageScaffold, PopupCard, StatCard, SummaryGrid } from '@/components/ui/CardPrimitives'
 import { CopyableText, ErrorCallout, LinkedIdBadges, SelectionSummary, Sub2ApiBadge, TokenBadges } from '@/components/ui/DomainBits'
 
 const { Text, Paragraph } = Typography
@@ -64,21 +65,26 @@ export default function AccessTokens() {
   const [mfaCode, setMfaCode] = useState('')
   const [mfaLoading, setMfaLoading] = useState(false)
   const [fetchingRtId, setFetchingRtId] = useState<number | null>(null)
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(18)
+  const [searchInput, setSearchInput] = useState('')
+  const [search, setSearch] = useState('')
   const [exportForm] = Form.useForm()
 
   const reload = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await apiFetch<AccessTokenAccount[]>(`/access-tokens?pool=at&include_secrets=${showSecrets}`)
+      const params = new URLSearchParams()
+      params.set('pool', 'at')
+      params.set('include_secrets', String(showSecrets))
+      if (search.trim()) params.set('search', search.trim())
+      params.set('limit', '2000')
+      const data = await apiFetch<AccessTokenAccount[]>(`/access-tokens?${params.toString()}`)
       setRows(data)
     } catch (err) {
       message.error(err instanceof Error ? err.message : '加载失败')
     } finally {
       setLoading(false)
     }
-  }, [showSecrets])
+  }, [showSecrets, search])
 
   useEffect(() => {
     const initial = setTimeout(reload, 0)
@@ -89,8 +95,8 @@ export default function AccessTokens() {
     total: rows.length,
     at: rows.filter((row) => row.has_access_token).length,
     rt: rows.filter((row) => row.has_refresh_token || row.refresh_token_has_token).length,
+    used: rows.filter((row) => row.refresh_token_id && !row.refresh_token_enabled).length,
     sub2api: rows.filter((row) => ['active', 'alive', 'ok', 'uploaded'].includes(String(row.sub2api_status || '').toLowerCase())).length,
-    invalid: rows.filter((row) => row.refresh_token_id && !row.refresh_token_enabled).length,
     errors: rows.filter((row) => row.refresh_token_last_error).length,
   }), [rows])
 
@@ -152,6 +158,23 @@ export default function AccessTokens() {
     }
   }
 
+  const rerunOauth = async (row: AccessTokenAccount) => {
+    setFetchingRtId(row.id)
+    try {
+      const resp = await apiFetch<{ job_id: number | null; already_running: boolean }>(`/access-tokens/${row.id}/oauth`, { method: 'POST' })
+      if (resp.already_running) {
+        message.info(`OAuth 任务已在运行：#${resp.job_id}`)
+      } else {
+        message.success(`已提交 OAuth 任务：#${resp.job_id}`)
+      }
+      reload()
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '提交 OAuth 失败')
+    } finally {
+      setFetchingRtId(null)
+    }
+  }
+
   const batchDelete = async () => {
     if (!selected.length) return
     try {
@@ -190,6 +213,98 @@ export default function AccessTokens() {
 
   const secretValue = (value: string, label: string) => showSecrets ? <CopyableText value={value} label={label} code /> : <Tag>{value ? 'present' : 'missing'}</Tag>
 
+  const columns = useMemo<TableColumnsType<AccessTokenAccount>>(() => [
+    {
+      title: '邮箱',
+      dataIndex: 'email',
+      width: 220,
+      fixed: 'left',
+      render: (value: string, row) => (
+        <Space direction="vertical" size={2}>
+          <CopyableText value={value} label="邮箱" />
+          <Space size={4} wrap>
+            <Tag color="green">FREE AT</Tag>
+            {row.refresh_token_id && !row.refresh_token_enabled && <Tag color="orange">已使用</Tag>}
+            {row.refresh_token_id && row.refresh_token_enabled && <Tag color="blue">RT</Tag>}
+          </Space>
+        </Space>
+      ),
+    },
+    {
+      title: '账户',
+      width: 170,
+      render: (_: unknown, row) => (
+        <Space direction="vertical" size={2}>
+          <CopyableText value={row.account_id} label="account_id" code />
+          <CopyableText value={row.workspace_id} label="workspace_id" code />
+        </Space>
+      ),
+    },
+    {
+      title: 'Token',
+      width: 220,
+      render: (_: unknown, row) => (
+        <Space direction="vertical" size={2}>
+          <div>AT：{secretValue(row.access_token, 'access_token')}</div>
+          <div>RT：{secretValue(row.refresh_token, 'refresh_token')}</div>
+          <div>Session：{secretValue(row.session_token, 'session_token')}</div>
+        </Space>
+      ),
+    },
+    {
+      title: '状态',
+      width: 180,
+      render: (_: unknown, row) => (
+        <Space direction="vertical" size={2} wrap>
+          <TokenBadges accessToken={row.has_access_token ? 'yes' : ''} refreshToken={(row.has_refresh_token || row.refresh_token_has_token) ? 'yes' : ''} />
+          {row.sub2api_status ? <Sub2ApiBadge status={row.sub2api_status} /> : <Tag>未同步</Tag>}
+          {row.refresh_token_last_error ? <Tag color="red">有错误</Tag> : null}
+        </Space>
+      ),
+    },
+    {
+      title: '链接',
+      width: 160,
+      render: (_: unknown, row) => (
+        <Space direction="vertical" size={2}>
+          <LinkedIdBadges pipelineId={row.pipeline_id} accountId={row.chatgpt_account_id} />
+          <Tag color={row.refresh_token_id ? (row.refresh_token_enabled ? 'green' : 'orange') : 'default'}>
+            {row.refresh_token_id ? (row.refresh_token_enabled ? 'enabled' : 'used') : 'no rt'}
+          </Tag>
+        </Space>
+      ),
+    },
+    {
+      title: '代理',
+      dataIndex: 'proxy_url',
+      ellipsis: true,
+      render: (value: string) => <CopyableText value={value} label="代理" />,
+    },
+    {
+      title: '更新时间',
+      dataIndex: 'updated_at',
+      width: 180,
+      render: (value: string | null) => formatDateTime(value),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      fixed: 'right',
+      width: 240,
+      render: (_: unknown, row) => (
+        <Space size={6} wrap>
+          <Button size="small" onClick={() => openDetail(row)}>详情</Button>
+          <Button size="small" icon={<KeyOutlined />} onClick={() => openMfa(row)}>MFA</Button>
+          <Button size="small" loading={fetchingRtId === row.id} onClick={() => rerunOauth(row)}>OAuth</Button>
+          {!row.refresh_token_has_token && <Button size="small" type="primary" loading={fetchingRtId === row.id} onClick={() => fetchRefreshToken(row)}>获取 RT</Button>}
+          <Popconfirm title="删除该 token?" onConfirm={() => deleteOne(row)}>
+            <Button size="small" danger>删除</Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ], [fetchingRtId, openDetail, openMfa, rerunOauth, showSecrets])
+
   return (
     <PageScaffold
       title="Free 池（已注册 AT）"
@@ -200,8 +315,8 @@ export default function AccessTokens() {
         <StatCard label="Free AT" value={summary.total} hint="已注册账号" tone="primary" />
         <StatCard label="AT present" value={summary.at} tone="success" />
         <StatCard label="RT present" value={summary.rt} tone="info" />
+        <StatCard label="已使用" value={summary.used} tone={summary.used ? 'warning' : 'default'} />
         <StatCard label="sub2api active" value={summary.sub2api} tone="success" />
-        <StatCard label="invalid/dead" value={summary.invalid} tone={summary.invalid ? 'danger' : 'default'} />
         <StatCard label="errors" value={summary.errors} tone={summary.errors ? 'danger' : 'default'} />
       </SummaryGrid>
 
@@ -212,6 +327,15 @@ export default function AccessTokens() {
           <CardToolbar>
             <SelectionSummary count={selected.length} />
             <Space size={6}><Switch checked={showSecrets} onChange={setShowSecrets} /><Text>显示完整 token</Text></Space>
+            <Input.Search
+              allowClear
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onSearch={(value) => setSearch(value.trim())}
+              placeholder="搜索邮箱 / account / workspace"
+              enterButton={<SearchOutlined />}
+              style={{ width: 300 }}
+            />
             <Button icon={<DownloadOutlined />} type="primary" onClick={() => setExportOpen(true)}>导出{selected.length ? `（${selected.length}）` : '全部'}</Button>
             <Popconfirm title={`确认删除选中的 ${selected.length} 条?`} onConfirm={batchDelete} disabled={!selected.length}>
               <Button icon={<DeleteOutlined />} danger disabled={!selected.length}>批量删除</Button>
@@ -220,53 +344,15 @@ export default function AccessTokens() {
         )}
       />
 
-      <EntityGrid
-        items={rows}
-        page={page}
-        pageSize={pageSize}
-        onPageChange={(nextPage, nextPageSize) => { setPage(nextPage); setPageSize(nextPageSize) }}
-        showSizeChanger
-        renderItem={(row) => (
-          <EntityCard
-            key={row.id}
-            title={<CopyableText value={row.email} label="邮箱" />}
-            subtitle={`Token #${row.id}`}
-            status={<Tag color="green">FREE AT</Tag>}
-            tone={row.refresh_token_id && !row.refresh_token_enabled ? 'danger' : row.refresh_token_has_token ? 'success' : 'default'}
-            selected={selected.includes(row.id)}
-            onSelect={(checked) => toggleSelected(row.id, checked)}
-            badges={(
-              <Space size={4} wrap>
-                <TokenBadges accessToken={row.has_access_token ? 'yes' : ''} refreshToken={(row.has_refresh_token || row.refresh_token_has_token) ? 'yes' : ''} />
-                <LinkedIdBadges pipelineId={row.pipeline_id} accountId={row.chatgpt_account_id} />
-                {row.sub2api_status && <Sub2ApiBadge status={row.sub2api_status} />}
-              </Space>
-            )}
-            footer={formatDateTime(row.created_at)}
-            actions={(
-              <>
-                <Button size="small" onClick={() => openDetail(row)}>详情</Button>
-                <Button size="small" icon={<KeyOutlined />} onClick={() => openMfa(row)}>MFA</Button>
-                {!row.refresh_token_has_token && <Button size="small" type="primary" loading={fetchingRtId === row.id} onClick={() => fetchRefreshToken(row)}>获取 RT</Button>}
-                <Popconfirm title="删除该 token?" onConfirm={() => deleteOne(row)}>
-                  <Button size="small" danger>删除</Button>
-                </Popconfirm>
-              </>
-            )}
-          >
-            <Space direction="vertical" size="small" style={{ width: '100%' }}>
-              <KeyValueGrid>
-                <KeyValue label="access_token" value={secretValue(row.access_token, 'access_token')} />
-                <KeyValue label="refresh_token" value={secretValue(row.refresh_token, 'refresh_token')} />
-                <KeyValue label="session_token" value={secretValue(row.session_token, 'session_token')} />
-                <KeyValue label="workspace" value={<CopyableText value={row.workspace_id} label="workspace" code />} />
-                <KeyValue label="代理" value={<CopyableText value={row.proxy_url} label="代理" />} />
-                <KeyValue label="sub2api external" value={<CopyableText value={row.sub2api_account_id} label="sub2api external" code />} />
-              </KeyValueGrid>
-              <ErrorCallout error={row.refresh_token_last_error} />
-            </Space>
-          </EntityCard>
-        )}
+      <Table
+        className="surface-table"
+        rowKey="id"
+        columns={columns}
+        dataSource={rows}
+        loading={loading}
+        scroll={{ x: 1500 }}
+        pagination={{ defaultPageSize: 18, showSizeChanger: true, pageSizeOptions: [18, 36, 72, 144], showTotal: (total) => `共 ${total} 条` }}
+        rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys) }}
       />
 
       <PopupCard open={exportOpen} title="导出 Free AT 池" onCancel={() => setExportOpen(false)} onOk={submitExport} okText="下载" width={620}>

@@ -15,7 +15,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select as sa_select
+from sqlalchemy import String, cast, func, or_, select as sa_select
 from sqlmodel import Session
 
 from backend.api.schemas import access_token_account_to_dict
@@ -46,12 +46,26 @@ class UpdateRequest(BaseModel):
 def list_access_tokens(
     include_secrets: bool = False,
     pool: str = Query("all", pattern="^(all|at|rt)$"),
+    search: Optional[str] = Query(default=None, description="email / account / workspace search"),
     limit: int = Query(500, ge=1, le=2000),
 ):
+    search_term = str(search or "").strip().lower()
     with Session(engine) as s:
         stmt = sa_select(AccessTokenAccount)
         if pool == "at":
             stmt = stmt.where(AccessTokenAccount.access_token != "")
+        if search_term:
+            pattern = f"%{search_term}%"
+            stmt = stmt.where(
+                or_(
+                    func.lower(AccessTokenAccount.email).like(pattern),
+                    func.lower(AccessTokenAccount.account_id).like(pattern),
+                    func.lower(AccessTokenAccount.workspace_id).like(pattern),
+                    func.lower(AccessTokenAccount.note).like(pattern),
+                    func.lower(AccessTokenAccount.metadata_json).like(pattern),
+                    cast(AccessTokenAccount.chatgpt_account_id, String).like(pattern),
+                )
+            )
         rows = list(s.exec(stmt.order_by(AccessTokenAccount.id.desc()).limit(limit)).scalars())
         refresh_tokens_by_account = _refresh_tokens_by_account(s, [int(r.chatgpt_account_id or 0) for r in rows])
     items = [_with_refresh_token(access_token_account_to_dict(r, include_secrets=include_secrets), refresh_tokens_by_account.get(int(r.chatgpt_account_id or 0)), include_secrets=include_secrets) for r in rows]
@@ -182,6 +196,35 @@ def fetch_access_token_refresh_token(at_id: int):
         proxy_url=proxy_url,
     )
     return {"job_id": job_id, "already_has_refresh_token": False, "already_running": False}
+
+
+@router.post("/api/access-tokens/{at_id}/oauth", tags=["access-tokens"])
+def rerun_access_token_oauth(at_id: int):
+    with Session(engine) as s:
+        row = s.get(AccessTokenAccount, at_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="not found")
+        account_id = int(row.chatgpt_account_id or 0)
+        if not account_id:
+            raise HTTPException(status_code=409, detail="该 AT 行未关联 ChatGPT 账号，无法执行 OAuth")
+        running = s.exec(
+            sa_select(Job)
+            .where(Job.account_id == account_id)
+            .where(Job.type == "openai_oauth")
+            .where(Job.status.in_([JOB_STATUS_QUEUED, JOB_STATUS_RUNNING]))
+        ).scalars().first()
+        if running is not None:
+            return {"job_id": int(running.id or 0), "already_running": True}
+        proxy_id = row.proxy_id
+        proxy_url = row.proxy_url or ""
+    job_id = enqueue_job(
+        type="openai_oauth",
+        input={"account_id": account_id, "access_token_account_id": at_id, "force_refresh": True},
+        account_id=account_id,
+        proxy_id=proxy_id,
+        proxy_url=proxy_url,
+    )
+    return {"job_id": job_id, "already_running": False}
 
 
 @router.get("/api/access-tokens/{at_id}/mfa", tags=["access-tokens"])
