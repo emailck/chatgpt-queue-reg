@@ -90,7 +90,7 @@ export default function AccessTokens() {
     setLoading(true)
     try {
       const params = new URLSearchParams()
-      params.set('pool', 'at')
+      params.set('pool', 'all')
       params.set('include_secrets', String(showSecrets))
       if (search.trim()) params.set('search', search.trim())
       params.set('limit', '2000')
@@ -178,11 +178,11 @@ export default function AccessTokens() {
   const rerunOauth = async (row: AccessTokenAccount) => {
     setFetchingRtId(row.id)
     try {
-      const resp = await apiFetch<{ job_id: number | null; already_running: boolean }>(`/access-tokens/${row.id}/oauth`, { method: 'POST' })
+      const resp = await apiFetch<{ job_id: number | null; pipeline_id: number | null; already_running: boolean }>(`/access-tokens/${row.id}/oauth`, { method: 'POST' })
       if (resp.already_running) {
         message.info(`OAuth 任务已在运行：#${resp.job_id}`)
       } else {
-        message.success(`已提交 OAuth 任务：#${resp.job_id}`)
+        message.success(`已创建 OAuth pipeline：#${resp.pipeline_id ?? '?'}`)
       }
       reload()
     } catch (err) {

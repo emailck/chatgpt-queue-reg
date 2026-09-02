@@ -21,6 +21,7 @@ from sqlmodel import Session
 from backend.api.schemas import access_token_account_to_dict
 from backend.core.constants import JOB_STATUS_QUEUED, JOB_STATUS_RUNNING
 from backend.core.db import engine, session_scope
+from backend.core.pipeline import create_pipeline
 from backend.core.settings import settings
 from backend.core.queue import enqueue_job
 from backend.integrations.chatgpt.mfa_client import build_totp_adapter_from_metadata
@@ -214,17 +215,21 @@ def rerun_access_token_oauth(at_id: int):
             .where(Job.status.in_([JOB_STATUS_QUEUED, JOB_STATUS_RUNNING]))
         ).scalars().first()
         if running is not None:
-            return {"job_id": int(running.id or 0), "already_running": True}
+            return {
+                "job_id": int(running.id or 0),
+                "pipeline_id": int(running.pipeline_id or 0) or None,
+                "already_running": True,
+            }
         proxy_id = row.proxy_id
         proxy_url = row.proxy_url or ""
-    job_id = enqueue_job(
-        type="openai_oauth",
-        input={"account_id": account_id, "access_token_account_id": at_id, "force_refresh": True},
-        account_id=account_id,
+    pipeline_id = create_pipeline(
+        stages=["openai_oauth"],
+        preset="access_token_oauth",
+        request_payload={"account_id": account_id, "access_token_account_id": at_id, "force_refresh": True},
         proxy_id=proxy_id,
         proxy_url=proxy_url,
     )
-    return {"job_id": job_id, "already_running": False}
+    return {"job_id": None, "pipeline_id": pipeline_id, "already_running": False}
 
 
 @router.get("/api/access-tokens/{at_id}/mfa", tags=["access-tokens"])
