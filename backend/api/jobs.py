@@ -115,6 +115,18 @@ class CreatePipelineRequest(BaseModel):
     switch_after_join: Optional[bool] = None
     switch_all_workspaces: Optional[bool] = None
     upload_multiple: Optional[bool] = None
+    factor_type: Optional[str] = None
+    force_reenroll: Optional[bool] = None
+    verify_login_challenge: Optional[bool] = None
+    api_base_url: Optional[str] = None
+    auth_base_url: Optional[str] = None
+    mfa_code_provider: Optional[str] = None
+    twofauth_base_url: Optional[str] = None
+    twofauth_pat: Optional[str] = None
+    twofauth_preview_before_create: Optional[bool] = None
+    twofauth_timeout_seconds: Optional[int] = None
+    mfa_account_id: Optional[int] = None
+    mfa_email: Optional[str] = None
     token_name: Optional[str] = None
     ttl: Optional[int] = None
     scope: Optional[str] = None
@@ -250,6 +262,39 @@ def _ensure_password_setup_account_id(stages: list[str], request_payload: dict[s
     return account_id
 
 
+def _ensure_mfa_account_id(stages: list[str], request_payload: dict[str, Any]) -> int | None:
+    """For chatgpt_mfa_setup without account_id, resolve by mfa_email or email."""
+    if "chatgpt_mfa_setup" not in stages:
+        return None
+    if "register" in stages:
+        return None
+
+    explicit = request_payload.get("mfa_account_id")
+    if explicit not in (None, ""):
+        account_id = int(explicit or 0) or None
+        if account_id:
+            request_payload["account_id"] = account_id
+        return account_id
+    if request_payload.get("account_id") not in (None, ""):
+        return int(request_payload.get("account_id") or 0) or None
+
+    email = str(request_payload.get("mfa_email") or request_payload.get("email") or "").strip()
+    if not email:
+        return None
+    with Session(engine) as s:
+        row = s.exec(
+            sa_select(ChatGPTAccount)
+            .where(ChatGPTAccount.email == email)
+            .order_by(ChatGPTAccount.id.desc())
+        ).scalars().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"未找到邮箱 {email} 对应的 ChatGPT 账号")
+    account_id = int(row.id or 0) or None
+    if account_id:
+        request_payload["account_id"] = account_id
+    return account_id
+
+
 # ---- pipeline endpoints -----------------------------------------------------
 
 
@@ -322,12 +367,25 @@ def create_pipeline_endpoint(body: CreatePipelineRequest):
         "ttl",
         "scope",
         "scopes",
+        "factor_type",
+        "force_reenroll",
+        "verify_login_challenge",
+        "api_base_url",
+        "auth_base_url",
+        "mfa_code_provider",
+        "twofauth_base_url",
+        "twofauth_pat",
+        "twofauth_preview_before_create",
+        "twofauth_timeout_seconds",
+        "mfa_account_id",
+        "mfa_email",
     ):
         value = getattr(body, key)
         if value not in (None, "", []):
             request_payload[key] = value
     _ensure_oauth_account_id(stages, request_payload)
     _ensure_password_setup_account_id(stages, request_payload)
+    _ensure_mfa_account_id(stages, request_payload)
     stage_inputs = dict(body.stage_inputs or {})
     if request_payload and "codex_invitation" in stages:
         stage_inputs["codex_invitation"] = {

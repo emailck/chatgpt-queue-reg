@@ -415,6 +415,22 @@ export default function Pipelines() {
       }
     }
 
+    const includesMfaSetup = mode === 'custom'
+      ? Array.isArray(body.stages) && body.stages.includes('chatgpt_mfa_setup')
+      : body.preset === 'chatgpt_mfa_setup_only'
+        || body.preset === 'register_with_mfa_setup'
+        || body.preset === 'register_with_mfa_setup_sub2api'
+        || body.preset === 'register_with_password_setup_mfa'
+        || body.preset === 'register_with_password_setup_mfa_sub2api'
+    if (includesMfaSetup) {
+      for (const key of ['mfa_account_id', 'mfa_email', 'factor_type', 'force_reenroll', 'verify_login_challenge', 'api_base_url', 'auth_base_url', 'mfa_code_provider', 'twofauth_base_url', 'twofauth_pat', 'twofauth_preview_before_create', 'twofauth_timeout_seconds']) {
+        const value = values[key]
+        if (value !== undefined && value !== null && value !== '') {
+          body[key] = value
+        }
+      }
+    }
+
     const includesTinkMailRegister = mode === 'custom'
       ? Array.isArray(body.stages) && body.stages.includes('tinkmail_email_register')
       : body.preset === 'tinkmail_email_register'
@@ -786,6 +802,13 @@ function CreateForm({ form }: { form: FormInstance }) {
       || selectedPreset === 'register_with_password_setup'
       || selectedPreset === 'register_with_password_setup_sub2api'
     : Array.isArray(selectedStages) && selectedStages.includes('chatgpt_password_setup')
+  const showMfaSetupFields = selectedMode === 'preset'
+    ? selectedPreset === 'chatgpt_mfa_setup_only'
+      || selectedPreset === 'register_with_mfa_setup'
+      || selectedPreset === 'register_with_mfa_setup_sub2api'
+      || selectedPreset === 'register_with_password_setup_mfa'
+      || selectedPreset === 'register_with_password_setup_mfa_sub2api'
+    : Array.isArray(selectedStages) && selectedStages.includes('chatgpt_mfa_setup')
 
   const loadConfigs = useCallback(async () => {
     setLoadingConfigs(true)
@@ -1033,6 +1056,77 @@ function CreateForm({ form }: { form: FormInstance }) {
             <Col span={8}>
               <Form.Item label="最大步数" name="max_steps">
                 <InputNumber min={3} max={50} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+        </>
+      )}
+
+      {showMfaSetupFields && (
+        <>
+          <ActionCard
+            title="ChatGPT 2FA 设置参数"
+            description="可填账号 ID；如果没有账号 ID，也可以填邮箱，后台会按邮箱解析已存在的 ChatGPT 账号。"
+          />
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="已有账号 ID" name="mfa_account_id">
+                <InputNumber min={1} style={{ width: '100%' }} placeholder="账号池 account_id" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="邮箱" name="mfa_email">
+                <Input placeholder="账号邮箱；没有账号 ID 时填这里" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item label="Factor type" name="factor_type" initialValue="totp">
+                <Input placeholder="totp" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="强制重新绑定" name="force_reenroll">
+                <Radio.Group>
+                  <Radio value={true}>是</Radio>
+                  <Radio value={false}>否</Radio>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item label="验证登录挑战" name="verify_login_challenge">
+                <Radio.Group>
+                  <Radio value={true}>是</Radio>
+                  <Radio value={false}>否</Radio>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="2FAuth Base URL（可选）" name="twofauth_base_url">
+                <Input placeholder="留空使用本地配置" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="2FAuth PAT（可选）" name="twofauth_pat">
+                <Input.Password placeholder="留空使用本地配置" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="2FAuth 预览后创建" name="twofauth_preview_before_create">
+                <Radio.Group>
+                  <Radio value={true}>是</Radio>
+                  <Radio value={false}>否</Radio>
+                </Radio.Group>
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="2FAuth 超时秒数" name="twofauth_timeout_seconds">
+                <InputNumber min={30} max={3600} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
           </Row>
