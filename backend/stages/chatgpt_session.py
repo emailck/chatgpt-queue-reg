@@ -494,6 +494,7 @@ def refresh_or_relogin_account_session(
     mfa_provider=None,
     proxy_url_override: str = "",
     max_attempts: int = 3,
+    force_relogin: bool = False,
 ) -> dict[str, Any]:
     """Best-effort session repair after token revocation.
 
@@ -511,34 +512,37 @@ def refresh_or_relogin_account_session(
             raise RuntimeError(f"account {account_id} has no email")
         client = _build_client_from_account(account, ctx, load_cookies=True, proxy_url_override=proxy_url_override)
 
-    ok, session_or_error = client.fetch_chatgpt_session(max_attempts=max(1, int(max_attempts or 3)), retry_delay=1.2)
-    if ok:
-        session_data = session_or_error if isinstance(session_or_error, dict) else {}
-        access_token = str(session_data.get("accessToken") or "").strip()
-        if access_token:
-            valid, me_or_error = _validate_access_token(client, access_token, ctx, label="session_repair")
-            if valid:
-                identity_state = client.export_identity_state()
-                return _persist_session_data(
-                    account_id,
-                    session_data,
-                    identity_state,
-                    me_or_error if isinstance(me_or_error, dict) else {},
-                    status="session_repaired",
+    if not force_relogin:
+        ok, session_or_error = client.fetch_chatgpt_session(max_attempts=max(1, int(max_attempts or 3)), retry_delay=1.2)
+        if ok:
+            session_data = session_or_error if isinstance(session_or_error, dict) else {}
+            access_token = str(session_data.get("accessToken") or "").strip()
+            if access_token:
+                valid, me_or_error = _validate_access_token(client, access_token, ctx, label="session_repair")
+                if valid:
+                    identity_state = client.export_identity_state()
+                    return _persist_session_data(
+                        account_id,
+                        session_data,
+                        identity_state,
+                        me_or_error if isinstance(me_or_error, dict) else {},
+                        status="session_repaired",
+                    )
+                ctx.log(
+                    "cached session repair access token invalid; falling back to relogin",
+                    level="warning",
+                    payload={"account_id": account_id, "error": str(me_or_error or "")[:240]},
                 )
-            ctx.log(
-                "cached session repair access token invalid; falling back to relogin",
-                level="warning",
-                payload={"account_id": account_id, "error": str(me_or_error or "")[:240]},
-            )
+            else:
+                ctx.log("cached session repair returned no access token; falling back to relogin", level="warning", payload={"account_id": account_id})
         else:
-            ctx.log("cached session repair returned no access token; falling back to relogin", level="warning", payload={"account_id": account_id})
+            ctx.log(
+                "cached session repair failed; falling back to relogin",
+                level="warning",
+                payload={"account_id": account_id, "error": str(session_or_error or "")[:240]},
+            )
     else:
-        ctx.log(
-            "cached session repair failed; falling back to relogin",
-            level="warning",
-            payload={"account_id": account_id, "error": str(session_or_error or "")[:240]},
-        )
+        ctx.log("force_relogin enabled; skip cached session repair", payload={"account_id": account_id})
 
     if not password_value:
         raise RuntimeError("session repair failed and no password available for relogin")

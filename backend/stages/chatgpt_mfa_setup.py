@@ -117,36 +117,37 @@ def run(ctx) -> None:
         max_attempts=5,
     )
 
-    with session_scope() as s:
-        account = s.get(ChatGPTAccount, account_id)
-        if account is None:
-            raise RuntimeError(f"account {account_id} not found after session refresh")
-        access_token = str(account.access_token or "").strip()
-        metadata = json_loads(account.metadata_json, fallback={}) or {}
-        cookies = json_loads(account.cookies_json, fallback=[]) or []
-        user_agent = str(account.user_agent or metadata.get("user_agent") or "").strip()
-        device_id = str(metadata.get("device_id") or account.account_id or account.id or "").strip()
-        oai_session_id = str(metadata.get("oai_session_id") or "").strip()
-        oai_client_version = str(metadata.get("oai_client_version") or metadata.get("client_version") or "").strip()
-        oai_client_build_number = str(metadata.get("oai_client_build_number") or "").strip()
-        raw_account = metadata.get("account") if isinstance(metadata.get("account"), dict) else {}
-        chatgpt_account_id = str(account.account_id or raw_account.get("id") or "").strip()
+    def _load_client() -> tuple[ChatGPTMfaClient, dict[str, Any]]:
+        with session_scope() as s:
+            account_row = s.get(ChatGPTAccount, account_id)
+            if account_row is None:
+                raise RuntimeError(f"account {account_id} not found after session refresh")
+            access_token = str(account_row.access_token or "").strip()
+            metadata = json_loads(account_row.metadata_json, fallback={}) or {}
+            cookies = json_loads(account_row.cookies_json, fallback=[]) or []
+            user_agent = str(account_row.user_agent or metadata.get("user_agent") or "").strip()
+            device_id = str(metadata.get("device_id") or account_row.account_id or account_row.id or "").strip()
+            oai_session_id = str(metadata.get("oai_session_id") or "").strip()
+            oai_client_version = str(metadata.get("oai_client_version") or metadata.get("client_version") or "").strip()
+            oai_client_build_number = str(metadata.get("oai_client_build_number") or "").strip()
+            raw_account = metadata.get("account") if isinstance(metadata.get("account"), dict) else {}
+            chatgpt_account_id = str(account_row.account_id or raw_account.get("id") or "").strip()
+        return ChatGPTMfaClient(
+            access_token=access_token,
+            cookies=cookies if isinstance(cookies, list) else [],
+            user_agent=user_agent,
+            oai_session_id=oai_session_id,
+            oai_client_version=oai_client_version,
+            oai_client_build_number=oai_client_build_number,
+            device_id=device_id,
+            chatgpt_account_id=chatgpt_account_id,
+            proxy_url=proxy_url,
+            api_base_url=api_base_url,
+            auth_base_url=auth_base_url,
+            log_fn=lambda msg: ctx.log(str(msg or "")),
+        ), metadata
 
-    client = ChatGPTMfaClient(
-        access_token=access_token,
-        cookies=cookies if isinstance(cookies, list) else [],
-        user_agent=user_agent,
-        oai_session_id=oai_session_id,
-        oai_client_version=oai_client_version,
-        oai_client_build_number=oai_client_build_number,
-        device_id=device_id,
-        chatgpt_account_id=chatgpt_account_id,
-        proxy_url=proxy_url,
-        api_base_url=api_base_url,
-        auth_base_url=auth_base_url,
-        log_fn=lambda msg: ctx.log(str(msg or "")),
-    )
-
+    client, metadata = _load_client()
     before_info = client.get_mfa_info(factor_type=factor_type)
     before_summary = _summarize_mfa_info(before_info)
     if before_summary["mfa_enabled"] and not force_reenroll:
@@ -178,7 +179,31 @@ def run(ctx) -> None:
         )
         return
 
-    enrollment = client.enroll_totp(factor_type=factor_type)
+    enrollment = None
+    enroll_error = ""
+    for attempt in range(2):
+        try:
+            enrollment = client.enroll_totp(factor_type=factor_type)
+            break
+        except Exception as exc:
+            enroll_error = str(exc)
+            if attempt == 0 and "recent_auth_required" in enroll_error:
+                ctx.log("mfa/enroll requires recent auth; forcing relogin and retry", level="warning")
+                refresh_or_relogin_account_session(
+                    account_id,
+                    ctx,
+                    password=account_password,
+                    otp_provider=email_service,
+                    mfa_provider=mfa_provider,
+                    proxy_url_override=proxy_url,
+                    max_attempts=5,
+                    force_relogin=True,
+                )
+                client, metadata = _load_client()
+                continue
+            raise
+    if enrollment is None:
+        raise RuntimeError(f"mfa/enroll failed: {enroll_error}")
     if not enrollment.session_id:
         raise RuntimeError("mfa/enroll did not return session_id")
     if not enrollment.secret:

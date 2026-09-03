@@ -1149,16 +1149,42 @@ class ChatGPTClient:
             next_state = self._state_from_url(f"{self.AUTH}/email-verification")
         return (True, next_state) if return_state else (True, "ok")
 
-    @staticmethod
-    def _get_login_otp_code(otp_provider, email, *, timeout, otp_sent_at):
+    def _get_login_otp_code(self, otp_provider, email, *, timeout, otp_sent_at):
         # Login re-auth and account registration can happen back-to-back.
         # The mailbox then contains both "verification code" (registration)
         # and "login code" (re-login).  Prefer the login-code subject/body so
         # we do not submit the just-used registration OTP to email-otp/validate.
+        initial_delay = 5
+        try:
+            from backend.core.settings import settings as _settings
+
+            initial_delay = max(
+                0,
+                min(
+                    int(
+                        _settings.get_int(
+                            "chatgpt_email_otp_initial_delay_seconds",
+                            _settings.get_int("email_otp_initial_delay_seconds", 5),
+                        )
+                    ),
+                    60,
+                ),
+            )
+        except Exception:
+            initial_delay = 5
+        if initial_delay:
+            self._log(f"等待 {initial_delay}s 后再拉取邮箱验证码")
+            time.sleep(initial_delay)
         wait_fn = getattr(otp_provider, "wait_for_verification_code", None)
         if callable(wait_fn):
             try:
-                code = wait_fn(email, timeout=timeout, otp_sent_at=otp_sent_at, keyword="login code")
+                code = wait_fn(
+                    email,
+                    timeout=timeout,
+                    otp_sent_at=otp_sent_at,
+                    keyword="login code",
+                    skip_initial_delay=True,
+                )
             except TypeError:
                 code = wait_fn(email, timeout=timeout, otp_sent_at=otp_sent_at)
             if code:
@@ -1166,7 +1192,13 @@ class ChatGPTClient:
         get_fn = getattr(otp_provider, "get_verification_code", None)
         if callable(get_fn):
             try:
-                code = get_fn(email=email, timeout=timeout, otp_sent_at=otp_sent_at, keyword="login code")
+                code = get_fn(
+                    email=email,
+                    timeout=timeout,
+                    otp_sent_at=otp_sent_at,
+                    keyword="login code",
+                    skip_initial_delay=True,
+                )
             except TypeError:
                 code = get_fn(email=email, timeout=timeout, otp_sent_at=otp_sent_at)
             if code:

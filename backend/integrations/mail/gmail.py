@@ -162,8 +162,9 @@ class GmailEmailService:
         return {"email": row.email}
 
     def get_verification_code(self, email: str, *, keyword: str = "", timeout: int = 300, code_pattern: str | None = None, otp_sent_at: float | datetime | None = None, exclude_codes=None, **_kwargs: Any) -> str | None:
+        skip_initial_delay = bool(_kwargs.get("skip_initial_delay"))
         initial_delay = max(0, min(settings.get_int("email_otp_initial_delay_seconds", 5), 60))
-        if initial_delay:
+        if initial_delay and not skip_initial_delay:
             time.sleep(initial_delay)
         row = get_gmail_account(email)
         request_dt = common._otp_request_datetime(otp_sent_at)  # noqa: SLF001
