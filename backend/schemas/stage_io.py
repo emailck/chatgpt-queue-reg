@@ -154,6 +154,8 @@ class ChatGPTMfaSetupInput(StageInput):
     twofauth_pat: str = ""
     twofauth_preview_before_create: bool = True
     twofauth_timeout_seconds: int = 30
+    login_otp_wait_timeout: int = 30
+    login_otp_resend_wait_timeout: int = 30
     extra_config: dict[str, Any] = Field(default_factory=dict)
 
 

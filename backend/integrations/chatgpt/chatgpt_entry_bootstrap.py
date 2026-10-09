@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
+from urllib.parse import urlparse
 
 from .backend_headers import (
     ACCOUNTS_CHECK_VERSION,
@@ -417,7 +418,7 @@ def _follow_authorize(
                     authorize_url,
                     user_agent=user_agent,
                     sec_ch_ua=sec_ch_ua,
-                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                     referer=f"{CHATGPT_BASE}/",
                     navigation=True,
                 ),
@@ -431,6 +432,30 @@ def _follow_authorize(
             client._log(f"ChatGPT entry: auth country_code_hint={country} cached")
         final_url = str(getattr(response, "url", "") or authorize_url)
         client._log(f"ChatGPT entry: authorize 最终跳转 {final_url[:160]}")
+        final_path = urlparse(final_url).path
+        if "api/accounts/authorize" in final_path or final_path == "/error":
+            client._log(f"ChatGPT entry: authorize 中间页响应摘要: {_response_summary(response, max_body_chars=800)}")
+            fallback = ""
+            try:
+                fallback = client.authorize_via_browser(authorize_url)
+            except Exception as exc:
+                client._log(f"ChatGPT entry: authorize browser fallback 异常: {exc}")
+            fallback_path = urlparse(fallback or "").path
+            if fallback and "api/accounts/authorize" not in fallback_path and fallback_path != "/error":
+                try:
+                    client.record_fingerprint_outcome(True, reason="authorize_browser_fallback", final_url=fallback)
+                except Exception:
+                    pass
+                return fallback
+            try:
+                client.record_fingerprint_outcome(False, reason="authorize_cf_or_error", final_url=fallback or final_url)
+            except Exception:
+                pass
+            return final_url
+        try:
+            client.record_fingerprint_outcome(True, reason="authorize_direct", final_url=final_url)
+        except Exception:
+            pass
         return final_url
     except Exception as exc:
         client._log(f"ChatGPT entry: authorize 异常: {exc}")

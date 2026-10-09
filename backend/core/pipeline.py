@@ -57,6 +57,7 @@ DEFAULT_PRESET = "full_chain"
 
 PRESETS: dict[str, tuple[str, ...]] = {
     DEFAULT_PRESET:                         FULL_CHAIN_STAGES,
+    "fingerprint_probe_only":              ("fingerprint_probe",),
     "tinkmail_email_register":             ("tinkmail_email_register",),
     "register_only":                       ("register",),
     "register_with_sub2api":               ("register", "chatgpt_session", "sub2api_sync"),

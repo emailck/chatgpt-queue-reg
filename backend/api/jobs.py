@@ -125,6 +125,8 @@ class CreatePipelineRequest(BaseModel):
     twofauth_pat: Optional[str] = None
     twofauth_preview_before_create: Optional[bool] = None
     twofauth_timeout_seconds: Optional[int] = None
+    login_otp_wait_timeout: Optional[int] = None
+    login_otp_resend_wait_timeout: Optional[int] = None
     mfa_account_id: Optional[int] = None
     mfa_email: Optional[str] = None
     token_name: Optional[str] = None
@@ -377,6 +379,8 @@ def create_pipeline_endpoint(body: CreatePipelineRequest):
         "twofauth_pat",
         "twofauth_preview_before_create",
         "twofauth_timeout_seconds",
+        "login_otp_wait_timeout",
+        "login_otp_resend_wait_timeout",
         "mfa_account_id",
         "mfa_email",
     ):

@@ -25,6 +25,7 @@ StageHandler = Callable[[JobContext], None]
 
 ALLOWED_STAGE_NAMES: tuple[str, ...] = (
     "register",
+    "fingerprint_probe",
     "tinkmail_email_register",
     "payment_link",
     "pp_long_link",

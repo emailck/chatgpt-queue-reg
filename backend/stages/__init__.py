@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from . import register  # noqa: F401
+from . import fingerprint_probe  # noqa: F401
 from . import tinkmail_email_register  # noqa: F401
 from . import payment_link  # noqa: F401
 from . import pp_long_link  # noqa: F401

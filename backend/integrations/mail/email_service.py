@@ -85,7 +85,18 @@ class MicrosoftEmailService:
         if not mailapi_url:
             return ""
         try:
-            return _direct_mailapi_code(_fetch_mailapi_payload(mailapi_url))
+            payload = _fetch_mailapi_payload(mailapi_url)
+            code = _direct_mailapi_code(payload)
+            if code:
+                return code
+            data = _select_mailapi_otp(
+                payload,
+                keyword="",
+                code_pattern=None,
+                since_dt=None,
+                exclude_codes=set(),
+            )
+            return str((data or {}).get("code") or "")
         except Exception as exc:
             logger.info("[email %s] mailapi prefetch current code failed: %s", email, exc)
             return ""
@@ -372,7 +383,13 @@ def _fetch_mailapi_payload(mailapi_url: str) -> dict[str, Any]:
             pass
 
     html_payload = _parse_mailapi_html(text, mailapi_url=mailapi_url)
-    if html_payload.get("emails") or re.search(r"(?is)<(?:!doctype\s+html|html)\b", stripped):
+    if html_payload.get("emails"):
+        return html_payload
+    if re.search(r"(?is)<(?:!doctype\s+html|html)\b", stripped):
+        if "ic.oai-gpt.com" in str(mailapi_url) and "/public/inbox" not in str(mailapi_url):
+            raise RuntimeError("ic.oai-gpt.com URL is management inbox HTML; import the /public/inbox link with mac")
+        if re.search(r"(?is)<div\s+id=[\"']root[\"']", stripped) and re.search(r"(?is)<script\b[^>]+/assets/", stripped):
+            raise RuntimeError("mailapi URL returned SPA shell HTML, not mailbox messages")
         return html_payload
     raise RuntimeError("mailapi response missing INITIAL_PAYLOAD/json/html messages")
 
@@ -415,22 +432,37 @@ def _normalize_mailapi_payload(body: Any, *, mailapi_url: str = "") -> dict[str,
         out = dict(body)
         out["emails"] = [_normalize_mailapi_message(item, mailapi_url=mailapi_url, envelope=body) for item in data if isinstance(item, dict)]
         return out
-    if isinstance(data, dict) and any(k in data for k in ("subject", "body", "body_text", "body_html", "from", "date")):
-        out = dict(body)
-        out["emails"] = [_normalize_mailapi_message(data, mailapi_url=mailapi_url, envelope=body)]
-        return out
+    if isinstance(data, dict):
+        for key in ("emails", "messages", "items", "list"):
+            value = data.get(key)
+            if isinstance(value, list):
+                out = dict(body)
+                out["emails"] = [
+                    _normalize_mailapi_message(item, mailapi_url=mailapi_url, envelope=body)
+                    for item in value
+                    if isinstance(item, dict)
+                ]
+                return out
+        if any(k in data for k in ("subject", "body", "body_text", "body_html", "preview", "from", "date")):
+            out = dict(body)
+            out["emails"] = [_normalize_mailapi_message(data, mailapi_url=mailapi_url, envelope=body)]
+            return out
 
     return body
 
 
 def _normalize_mailapi_message(item: dict[str, Any], *, mailapi_url: str = "", envelope: dict[str, Any] | None = None) -> dict[str, Any]:
     msg = dict(item or {})
-    body_text = str(msg.get("body") or msg.get("body_text") or "")
+    body_text = str(msg.get("body") or msg.get("body_text") or msg.get("text") or msg.get("preview") or msg.get("snippet") or msg.get("message") or "")
     body_html = str(msg.get("body_html") or msg.get("html") or "")
     if not body_text and body_html:
         body_text = _html_to_text(body_html)
-    msg.setdefault("body", body_text)
-    msg.setdefault("body_preview", body_text[:500])
+    if not str(msg.get("body") or "").strip():
+        msg["body"] = body_text
+    if not str(msg.get("body_text") or "").strip():
+        msg["body_text"] = body_text
+    if not str(msg.get("body_preview") or "").strip():
+        msg["body_preview"] = str(msg.get("preview") or body_text)[:500]
     msg.setdefault("received_at", msg.get("date") or "")
     msg.setdefault("sender", msg.get("from") or "")
     msg.setdefault("source_url", mailapi_url)
@@ -539,6 +571,37 @@ def _select_mailapi_otp(payload: dict[str, Any], *, keyword: str, code_pattern: 
     emails = list((payload or {}).get("emails") or [])
     emails.sort(key=lambda item: _mail_dt(item).timestamp() if _mail_dt(item) else 0, reverse=True)
     keyword_lower = str(keyword or "").lower().strip()
+    # Prefer genuine ChatGPT/OpenAI messages.  Some public inboxes can contain
+    # forwarded or unrelated mail with 6-digit numbers, and OpenAI subjects are
+    # localized, so an English keyword such as "login code" is not reliable.
+    chatgpt_items = [item for item in emails if isinstance(item, dict) and _is_chatgpt_mailapi_message(item)]
+    passes: list[tuple[list[Any], bool]] = []
+    if chatgpt_items:
+        passes.append((chatgpt_items, False))
+    passes.append((emails, True))
+    for pass_items, allow_non_chatgpt in passes:
+        selected = _select_mailapi_otp_from_items(
+            pass_items,
+            keyword_lower=keyword_lower,
+            code_pattern=code_pattern,
+            since_dt=since_dt,
+            exclude_codes=exclude_codes,
+            allow_non_chatgpt=allow_non_chatgpt,
+        )
+        if selected:
+            return selected
+    return None
+
+
+def _select_mailapi_otp_from_items(
+    emails: list[Any],
+    *,
+    keyword_lower: str,
+    code_pattern: str | None,
+    since_dt: datetime | None,
+    exclude_codes,
+    allow_non_chatgpt: bool,
+) -> dict[str, Any] | None:
     for item in emails:
         if not isinstance(item, dict):
             continue
@@ -548,8 +611,11 @@ def _select_mailapi_otp(payload: dict[str, Any], *, keyword: str, code_pattern: 
         # Search normalized visible text only.  Raw body_html often contains
         # CSS colors/order ids such as #333333 / #008000 that look like OTPs
         # to the generic 6-digit fallback.
-        haystack = "\n".join(str(item.get(k) or "") for k in ("subject", "body", "body_text", "body_preview", "from", "sender", "to", "message"))
-        if keyword_lower and keyword_lower not in haystack.lower():
+        haystack = "\n".join(str(item.get(k) or "") for k in ("subject", "body", "body_text", "body_preview", "preview", "from", "sender", "to", "message"))
+        is_chatgpt = _is_chatgpt_mailapi_message(item)
+        if not allow_non_chatgpt and not is_chatgpt:
+            continue
+        if keyword_lower and keyword_lower not in haystack.lower() and not is_chatgpt:
             continue
         verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
         code = _normalize_otp_code(verification.get("verification_code") or verification.get("formatted") or "")
@@ -567,6 +633,21 @@ def _select_mailapi_otp(payload: dict[str, Any], *, keyword: str, code_pattern: 
                 "raw": item,
             }
     return None
+
+
+def _is_chatgpt_mailapi_message(item: dict[str, Any]) -> bool:
+    haystack = "\n".join(
+        str(item.get(k) or "")
+        for k in ("subject", "from", "sender", "to", "body", "body_text", "body_preview", "preview", "message")
+    ).lower()
+    markers = (
+        "chatgpt",
+        "openai",
+        "noreply@tm.openai.com",
+        "noreply_at_tm_openai_com",
+        "tm_openai_com",
+    )
+    return any(marker in haystack for marker in markers)
 
 
 def _direct_mailapi_items(payload: dict[str, Any]) -> list[dict[str, Any]]:

@@ -185,6 +185,14 @@ def run(ctx: JobContext) -> None:
         raise
     _checkpoint()
 
+    result_metadata = dict(getattr(result, "metadata", None) or {})
+    final_proxy_url = str(result_metadata.get("proxy_url") or proxy_url or "").strip()
+    if final_proxy_url and final_proxy_url != proxy_url:
+        proxy_url = final_proxy_url
+        proxy_id, proxy_region = _resolve_proxy_identity(proxy_url)
+        ctx.attach_proxy(proxy_id=proxy_id, proxy_url=proxy_url)
+        ctx.log("register final proxy updated after retry")
+
     account_id = _persist_account(result, proxy_id=proxy_id, proxy_url=proxy_url)
     if account_id:
         ctx.attach_account(account_id)

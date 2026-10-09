@@ -7,9 +7,11 @@ import uuid
 import time
 import json
 import base64
+import random
 from dataclasses import asdict
 from urllib.parse import urlparse
-from backend.core.proxy import build_requests_proxy_config
+from backend.core.proxy import build_playwright_proxy_config, build_requests_proxy_config
+from backend.core.settings import settings
 
 try:
     from curl_cffi import requests as curl_requests
@@ -33,7 +35,7 @@ from .utils import (
     random_delay,
     seed_oai_device_cookie,
 )
-from .fingerprint import normalize_impersonate, random_fingerprint, BrowserFingerprint
+from .fingerprint import normalize_impersonate, random_fingerprint, random_browserforge_fingerprint, BrowserFingerprint
 from .backend_headers import (
     compute_passkey_capabilities,
     extract_oai_client_versions_from_homepage_html,
@@ -63,7 +65,7 @@ class ChatGPTClient:
         self.oai_session_id = str(uuid.uuid4())
         self.oai_client_version = ""
         self.oai_client_build_number = ""
-        fp = random_fingerprint()
+        fp = self._choose_initial_fingerprint()
         self._apply_fingerprint(fp)
 
         # 创建 session
@@ -113,6 +115,149 @@ class ChatGPTClient:
         self.is_firefox = fp.is_firefox
         self.viewport_width = fp.viewport_width
         self.viewport_height = fp.viewport_height
+
+    def reset_fingerprint(self, fp: BrowserFingerprint) -> None:
+        """Apply a new fingerprint and recreate the curl session consistently."""
+        self._apply_fingerprint(fp)
+        self.session = curl_requests.Session(impersonate=self.impersonate)
+        if self.proxy:
+            self.session.proxies = build_requests_proxy_config(self.proxy)
+        self.session.headers.update(fp.base_headers())
+        seed_oai_device_cookie(self.session, self.device_id)
+        try:
+            self.session.oai_client_version = self.oai_client_version
+            self.session.oai_client_build_number = self.oai_client_build_number
+        except Exception:
+            pass
+
+    def _choose_initial_fingerprint(self) -> BrowserFingerprint:
+        """Pick a protocol/browser fingerprint.
+
+        Learning mode: prefer fingerprints that previously reached the real
+        auth state without CF.  If none exist, explore browserforge-generated
+        Chrome fingerprints constrained to curl_cffi-supported versions.
+        Do not invent arbitrary UA versions: TLS impersonate, headers and
+        browser fallback must stay mutually consistent.
+        """
+        try:
+            if settings.get_bool("chatgpt_fingerprint_learn_enabled", True):
+                pool = self._load_good_fingerprint_pool()
+                if pool:
+                    weights = [max(1, int(item.get("success_count") or 1)) for item in pool]
+                    chosen = random.choices(pool, weights=weights, k=1)[0]
+                    fp = self._fingerprint_from_payload(chosen.get("fingerprint") or {})
+                    if fp is not None:
+                        self._log(
+                            "fingerprint learn: 使用历史成功指纹 "
+                            f"key={chosen.get('key','')} success_count={chosen.get('success_count',0)} "
+                            f"ua={fp.user_agent}"
+                        )
+                        return fp
+                # Explore Chrome only.  Probe results showed Firefox currently
+                # triggers CF consistently, while browserforge Chrome reaches
+                # /email-verification.
+                mode = "chrome"
+                fp = random_browserforge_fingerprint(mode)
+                self._log(f"fingerprint learn: browserforge 探索新指纹 mode={mode} impersonate={fp.impersonate} ua={fp.user_agent}")
+                return fp
+        except Exception as exc:
+            try:
+                self._log(f"fingerprint learn: 选择指纹失败，fallback 默认: {exc}")
+            except Exception:
+                pass
+        return random_browserforge_fingerprint("chrome")
+
+    def _fingerprint_payload(self, fp: BrowserFingerprint | None = None) -> dict:
+        fp = fp or getattr(self, "_fingerprint", None)
+        if fp is None:
+            return {}
+        return {
+            "browser_type": fp.browser_type,
+            "impersonate": fp.impersonate,
+            "user_agent": fp.user_agent,
+            "sec_ch_ua": fp.sec_ch_ua,
+            "accept_language": fp.accept_language,
+            "platform": fp.platform,
+            "platform_version": fp.platform_version,
+            "chrome_full": fp.chrome_full,
+            "viewport_width": fp.viewport_width,
+            "viewport_height": fp.viewport_height,
+        }
+
+    def _fingerprint_from_payload(self, value: dict | None) -> BrowserFingerprint | None:
+        if not isinstance(value, dict):
+            return None
+        ua = str(value.get("user_agent") or "").strip()
+        imp = str(value.get("impersonate") or "").strip()
+        if not ua or not imp:
+            return None
+        return BrowserFingerprint(
+            browser_type=str(value.get("browser_type") or ("firefox" if "Firefox" in ua else "chrome")),
+            impersonate=normalize_impersonate(imp),
+            user_agent=ua,
+            sec_ch_ua=str(value.get("sec_ch_ua") or ""),
+            accept_language=str(value.get("accept_language") or ("en-US,en;q=0.5" if "Firefox" in ua else "en-US,en;q=0.9")),
+            platform=str(value.get("platform") or ("macOS" if "Macintosh" in ua else "Windows")),
+            platform_version=str(value.get("platform_version") or ""),
+            chrome_full=str(value.get("chrome_full") or ""),
+            viewport_width=int(value.get("viewport_width") or 1920),
+            viewport_height=int(value.get("viewport_height") or 1080),
+        )
+
+    def _fingerprint_key(self, payload: dict | None = None) -> str:
+        payload = payload or self._fingerprint_payload()
+        return "|".join([
+            str(payload.get("impersonate") or ""),
+            str(payload.get("user_agent") or ""),
+            str(payload.get("sec_ch_ua") or ""),
+            str(payload.get("platform") or ""),
+        ])
+
+    def _load_good_fingerprint_pool(self) -> list[dict]:
+        try:
+            data = json.loads(settings.get("chatgpt_fingerprint_good_pool", "[]") or "[]")
+            return [item for item in data if isinstance(item, dict) and isinstance(item.get("fingerprint"), dict)]
+        except Exception:
+            return []
+
+    def record_fingerprint_outcome(self, success: bool, *, reason: str = "", final_url: str = "") -> None:
+        """Persist successful preauth fingerprints; log failed ones for analysis."""
+        if not settings.get_bool("chatgpt_fingerprint_learn_enabled", True):
+            return
+        payload = self._fingerprint_payload()
+        key = self._fingerprint_key(payload)
+        if not key.strip("|"):
+            return
+        if not success:
+            self._log(f"fingerprint learn: 指纹失败 key={key[:96]} reason={reason} final={final_url[:120]}")
+            return
+        pool = self._load_good_fingerprint_pool()
+        now = str(int(time.time()))
+        found = False
+        for item in pool:
+            if str(item.get("key") or "") == key:
+                item["success_count"] = int(item.get("success_count") or 0) + 1
+                item["last_success_at"] = now
+                item["last_reason"] = reason
+                item["last_url"] = final_url[:240]
+                found = True
+                break
+        if not found:
+            pool.append({
+                "key": key,
+                "fingerprint": payload,
+                "success_count": 1,
+                "first_success_at": now,
+                "last_success_at": now,
+                "last_reason": reason,
+                "last_url": final_url[:240],
+            })
+        pool = sorted(pool, key=lambda x: int(x.get("success_count") or 0), reverse=True)[:30]
+        try:
+            settings.set("chatgpt_fingerprint_good_pool", json.dumps(pool, ensure_ascii=False))
+            self._log(f"fingerprint learn: 保存成功指纹 key={key[:96]} count={pool[0].get('success_count') if pool else 1}")
+        except Exception as exc:
+            self._log(f"fingerprint learn: 保存成功指纹失败: {exc}")
 
     def _get_sentinel_token(
         self,
@@ -316,10 +461,7 @@ class ChatGPTClient:
                     "TLS 连接错误，重置 HTTP session 后重试 "
                     f"{attempt}/{max_retries}，等待 {delay:g}s: {host}"
                 )
-                try:
-                    self.session.close()
-                except Exception:
-                    pass
+                self._reopen_session_preserving_state()
                 time.sleep(delay)
         raise RuntimeError("unreachable TLS retry state")
 
@@ -368,6 +510,209 @@ class ChatGPTClient:
             self.session.oai_client_build_number = ""
         except Exception:
             pass
+
+    def _cookies_for_browser(self):
+        cookies = []
+        try:
+            jar = getattr(getattr(self.session, "cookies", None), "jar", []) or []
+        except Exception:
+            jar = []
+        for cookie in jar:
+            name = str(getattr(cookie, "name", "") or "")
+            value = str(getattr(cookie, "value", "") or "")
+            if not name:
+                continue
+            domain = str(getattr(cookie, "domain", "") or "")
+            path = str(getattr(cookie, "path", "") or "/") or "/"
+            item = {
+                "name": name,
+                "value": value,
+                "domain": domain or ".chatgpt.com",
+                "path": path,
+                "secure": bool(getattr(cookie, "secure", False)),
+                "httpOnly": bool(getattr(cookie, "has_nonstandard_attr", lambda _n: False)("HttpOnly")),
+            }
+            expires = getattr(cookie, "expires", None)
+            if expires:
+                try:
+                    item["expires"] = int(expires)
+                except Exception:
+                    pass
+            cookies.append(item)
+        return cookies
+
+    def _sync_browser_cookies(self, context) -> None:
+        try:
+            browser_cookies = context.cookies()
+        except Exception:
+            browser_cookies = []
+        count = 0
+        for cookie in browser_cookies or []:
+            try:
+                name = str(cookie.get("name") or "")
+                value = str(cookie.get("value") or "")
+                if not name:
+                    continue
+                self.session.cookies.set(
+                    name,
+                    value,
+                    domain=str(cookie.get("domain") or ""),
+                    path=str(cookie.get("path") or "/") or "/",
+                )
+                count += 1
+            except Exception:
+                pass
+        if count:
+            self._log(f"authorize browser fallback: 回写 {count} 个 cookies")
+
+    def authorize_via_browser(self, url: str, *, timeout_ms: int = 60000) -> str:
+        """Use a real browser to pass auth.openai.com managed challenge.
+
+        Latest HAR shows a failed GET /api/accounts/authorize returns a CF
+        challenge, then the browser auto-submits a hidden POST to the same URL
+        and receives 302 /email-verification.  curl_cffi cannot synthesize that
+        POST, so this fallback lets Camoufox execute the challenge and then
+        syncs cookies back to the protocol session.
+        """
+        if not url:
+            return ""
+        if "Firefox" not in str(getattr(self, "ua", "") or ""):
+            self._log("authorize browser fallback skipped: 当前为 Chrome/非 Firefox 指纹，避免 Camoufox Firefox 与 UA 不一致")
+            return ""
+        try:
+            from camoufox.sync_api import Camoufox  # type: ignore
+        except Exception as exc:
+            self._log(f"authorize browser fallback unavailable: {exc}")
+            return ""
+        proxy_config = build_playwright_proxy_config(self.proxy) if self.proxy else None
+        kwargs = {
+            "headless": self.browser_mode != "headed",
+            "humanize": True,
+            "locale": "en-US",
+        }
+        try:
+            from .sentinel_browser import _camoufox_os_from_ua  # type: ignore
+
+            kwargs["os"] = _camoufox_os_from_ua(self.ua)
+        except Exception:
+            pass
+        if proxy_config:
+            kwargs["proxy"] = proxy_config
+        self._log("authorize browser fallback: 启动 Camoufox 处理预授权挑战")
+        try:
+            with Camoufox(**kwargs) as browser:
+                context = browser.new_context(
+                    user_agent=self.ua,
+                    locale="en-US",
+                    viewport={"width": self.viewport_width, "height": self.viewport_height},
+                    ignore_https_errors=True,
+                )
+                cookies = self._cookies_for_browser()
+                if cookies:
+                    try:
+                        context.add_cookies(cookies)
+                    except Exception as exc:
+                        self._log(f"authorize browser fallback: 注入 cookies 失败: {exc}")
+                page = context.new_page()
+                seen_authorize_post = False
+                seen_challenge_hosts: set[str] = set()
+
+                def _on_request(req):
+                    nonlocal seen_authorize_post
+                    try:
+                        req_url = str(req.url or "")
+                        if "challenges.cloudflare.com" in req_url:
+                            seen_challenge_hosts.add("challenges.cloudflare.com")
+                        if req.method.upper() == "POST" and "/api/accounts/authorize" in req_url:
+                            seen_authorize_post = True
+                            self._log("authorize browser fallback: observed POST /api/accounts/authorize")
+                    except Exception:
+                        pass
+
+                try:
+                    page.on("request", _on_request)
+                except Exception:
+                    pass
+
+                nav_resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                try:
+                    status = getattr(nav_resp, "status", None) if nav_resp else None
+                    self._log(f"authorize browser fallback: goto status={status} url={str(page.url or '')[:160]}")
+                except Exception:
+                    pass
+                try:
+                    page.wait_for_url(lambda u: "/api/accounts/authorize" not in str(u), timeout=timeout_ms)
+                except Exception:
+                    pass
+                final_url = str(page.url or "")
+                try:
+                    title = (page.title() or "")[:120]
+                    html = page.content() or ""
+                    lower = html.lower()
+                    markers = {
+                        "turnstile": "turnstile" in lower,
+                        "sitekey": "sitekey" in lower or "data-sitekey" in lower,
+                        "cf_turnstile_response": "cf-turnstile-response" in lower,
+                        "just_a_moment": "just a moment" in lower,
+                        "cf_challenge": "challenges.cloudflare.com" in lower or "cf-chl" in lower,
+                    }
+                    frame_urls = []
+                    try:
+                        frame_urls = [str(f.url or "")[:140] for f in page.frames[:8]]
+                    except Exception:
+                        frame_urls = []
+                    self._log(
+                        "authorize browser fallback diagnostics: "
+                        f"title={title!r} markers={markers} "
+                        f"seen_authorize_post={seen_authorize_post} "
+                        f"challenge_hosts={sorted(seen_challenge_hosts)} frames={frame_urls}"
+                    )
+                except Exception as diag_exc:
+                    self._log(f"authorize browser fallback diagnostics failed: {diag_exc}")
+                self._sync_browser_cookies(context)
+                self._log(f"authorize browser fallback: final={final_url[:160]}")
+                return final_url
+        except Exception as exc:
+            self._log(f"authorize browser fallback 失败: {type(exc).__name__}: {exc}")
+            return ""
+
+    def _reopen_session_preserving_state(self):
+        """Reopen curl_cffi Session after TLS/transport errors.
+
+        Closing a curl_cffi Session makes subsequent requests fail with
+        "Session is closed".  Preserve headers/cookies where possible so the
+        current auth flow can continue after a transient TLS reset.
+        """
+        old_session = self.session
+        try:
+            old_headers = dict(getattr(old_session, "headers", {}) or {})
+        except Exception:
+            old_headers = {}
+        try:
+            old_cookies = list(getattr(getattr(old_session, "cookies", None), "jar", []) or [])
+        except Exception:
+            old_cookies = []
+        try:
+            old_session.close()
+        except Exception:
+            pass
+        self.session = curl_requests.Session(impersonate=self.impersonate)
+        if self.proxy:
+            self.session.proxies = build_requests_proxy_config(self.proxy)
+        if old_headers:
+            self.session.headers.update(old_headers)
+        else:
+            self.session.headers.update(self._fingerprint.base_headers())
+        for cookie in old_cookies:
+            try:
+                self.session.cookies.set(
+                    getattr(cookie, "name", ""),
+                    getattr(cookie, "value", ""),
+                    domain=getattr(cookie, "domain", None),
+                    path=getattr(cookie, "path", "/") or "/",
+                )
+            except Exception:
+                pass
 
     def _state_from_url(self, url, method="GET"):
         state = extract_flow_state(
@@ -774,12 +1119,23 @@ class ChatGPTClient:
             "oai_client_build_number": self.oai_client_build_number,
         }
 
-    def relogin_existing_user(self, email, password="", otp_provider=None, mfa_provider=None, max_steps=16):
+    def relogin_existing_user(self, email, password="", otp_provider=None, mfa_provider=None, max_steps=16, otp_wait_timeout=None, otp_resend_wait_timeout=None):
         self._enter_stage("login", f"email={email}")
         if not email:
             return False, "missing email"
         if otp_provider is None and not password:
             return False, "missing otp provider"
+        otp_exclude_codes: set[str] = set()
+        if otp_provider is not None:
+            peek = getattr(otp_provider, "peek_current_code", None)
+            if callable(peek):
+                try:
+                    current_code = str(peek(email) or "").strip()
+                except Exception:
+                    current_code = ""
+                if current_code:
+                    otp_exclude_codes.add(current_code)
+                    self._log(f"登录前邮箱当前验证码基线: {current_code}，等待新验证码变化")
         csrf_token = self.get_csrf_token()
         if not csrf_token:
             return False, "获取 CSRF token 失败"
@@ -833,12 +1189,51 @@ class ChatGPTClient:
                 if otp_provider is None:
                     return False, "登录需要邮箱验证码，但未提供邮箱取码服务"
                 if not otp_sent_at:
-                    otp_sent_at = time.time() - 30
-                code = self._get_login_otp_code(otp_provider, email, timeout=600, otp_sent_at=otp_sent_at)
+                    # authorize -> /email-verification usually triggers the first
+                    # email.  Use a real timestamp and exclude the mailbox baseline
+                    # so we do not submit a code that was already consumed by the
+                    # previous register/password step.
+                    otp_sent_at = time.time()
+                try:
+                    from backend.core.settings import settings as _settings
+                    configured_wait = int(otp_wait_timeout) if otp_wait_timeout is not None else _settings.get_int("chatgpt_login_otp_timeout_seconds", 30)
+                    configured_resend = int(otp_resend_wait_timeout) if otp_resend_wait_timeout is not None else _settings.get_int("chatgpt_login_otp_resend_timeout_seconds", configured_wait)
+                    login_otp_timeout = max(5, min(configured_wait, 300))
+                    login_otp_resend_timeout = max(5, min(configured_resend, 300))
+                except Exception:
+                    login_otp_timeout = 30
+                    login_otp_resend_timeout = 30
+                code = self._get_login_otp_code(
+                    otp_provider,
+                    email,
+                    timeout=login_otp_timeout,
+                    otp_sent_at=otp_sent_at,
+                    exclude_codes=otp_exclude_codes,
+                )
+                if not code:
+                    self._log("登录首次等待未收到验证码，尝试重发一次 email-otp/send 后再等待")
+                    resend_ok, resend_state = self.request_login_email_otp(state, return_state=True)
+                    if resend_ok:
+                        self._log("登录重发验证码成功")
+                        if self._state_is_email_otp(resend_state):
+                            state = resend_state
+                    else:
+                        self._log(f"登录重发验证码失败: {resend_state}")
+                    otp_sent_at = time.time()
+                    code = self._get_login_otp_code(
+                        otp_provider,
+                        email,
+                        timeout=login_otp_resend_timeout,
+                        otp_sent_at=otp_sent_at,
+                        exclude_codes=otp_exclude_codes,
+                    )
                 if not code:
                     return False, "登录邮箱验证码获取失败"
                 ok, next_state = self.verify_email_otp(code, return_state=True)
                 if not ok:
+                    # Avoid retrying the same stale/used code if caller retries
+                    # the relogin path in the same process.
+                    otp_exclude_codes.add(str(code or "").strip())
                     return False, f"登录邮箱验证码验证失败: {next_state}"
                 state = next_state
                 self._log(f"登录状态: {describe_flow_state(state)}")
@@ -933,21 +1328,70 @@ class ChatGPTClient:
         otp_wait_timeout=600,
         otp_resend_wait_timeout=300,
     ):
+        from urllib.parse import urlparse
+
         self._enter_stage("chatgpt_password_setup", f"email={email}")
         if not email:
             return False, "missing email"
         if not password:
             return False, "missing password"
-        self.check_password_setup_eligibility()
-        csrf_token = self.get_csrf_token()
-        if not csrf_token:
-            return False, "获取 CSRF token 失败"
-        authorize_url = self.signin_password_setup(email, csrf_token)
-        if not authorize_url:
-            return False, "signin/openai 未返回 authorize URL"
-        final_url = self.authorize(authorize_url)
-        if not final_url:
-            return False, "authorize 跳转失败"
+        otp_exclude_codes: set[str] = set()
+        if otp_provider is not None:
+            peek = getattr(otp_provider, "peek_current_code", None)
+            if callable(peek):
+                try:
+                    current_code = str(peek(email) or "").strip()
+                except Exception:
+                    current_code = ""
+                if current_code:
+                    otp_exclude_codes.add(current_code)
+                    self._log(f"设置密码前邮箱当前验证码基线: {current_code}，等待新验证码变化")
+        try:
+            from backend.core.settings import settings as _settings
+
+            max_auth_attempts = max(
+                1,
+                min(
+                    int(
+                        _settings.get_int(
+                            "chatgpt_password_setup_preauth_max_attempts",
+                            _settings.get_int("chatgpt_preauth_max_attempts", 3),
+                        )
+                    ),
+                    12,
+                ),
+            )
+        except Exception:
+            max_auth_attempts = 3
+
+        final_url = ""
+        for auth_attempt in range(max_auth_attempts):
+            if auth_attempt > 0:
+                self._log(f"设置密码预授权重试 {auth_attempt + 1}/{max_auth_attempts}...")
+                self._reset_session()
+            self.check_password_setup_eligibility()
+            csrf_token = self.get_csrf_token()
+            if not csrf_token:
+                if auth_attempt < max_auth_attempts - 1:
+                    continue
+                return False, "获取 CSRF token 失败"
+            authorize_url = self.signin_password_setup(email, csrf_token)
+            if not authorize_url:
+                if auth_attempt < max_auth_attempts - 1:
+                    continue
+                return False, "signin/openai 未返回 authorize URL"
+            final_url = self.authorize(authorize_url)
+            if not final_url:
+                if auth_attempt < max_auth_attempts - 1:
+                    continue
+                return False, "authorize 跳转失败"
+            final_path = urlparse(final_url).path
+            if "api/accounts/authorize" in final_path or final_path == "/error":
+                self._log(f"设置密码预授权被中间页拦截: {final_url[:160]}...")
+                if auth_attempt < max_auth_attempts - 1:
+                    continue
+                return False, f"设置密码预授权被拦截: {final_path}"
+            break
         state = self._state_from_url(final_url)
         otp_sent_at = 0.0
         self._log(f"设置密码状态起点: {describe_flow_state(state)}")
@@ -964,6 +1408,11 @@ class ChatGPTClient:
             if self._state_is_password_setup(state):
                 ok, next_state = self.add_password(password, state, return_state=True)
                 if not ok:
+                    lowered = str(next_state or "").lower()
+                    if "password_already_set" in lowered or "already have a password" in lowered:
+                        self._log("设置密码接口返回 password_already_set，按已设置密码处理")
+                        self.last_registration_state = state
+                        return True, "密码已存在"
                     return False, f"设置密码失败: {next_state}"
                 password_submitted = True
                 state = next_state
@@ -1022,28 +1471,34 @@ class ChatGPTClient:
                 if otp_provider is None:
                     return False, "设置密码需要邮箱验证码，但未提供 otp_provider"
                 if not otp_sent_at:
+                    # HAR shows password setup sends the first email OTP as a
+                    # side effect of the authorize -> /email-verification
+                    # redirect.  Do not proactively call email-otp/send here:
+                    # it can hit Cloudflare and also delays the normal mail.
                     otp_sent_at = time.time()
                 code = self._get_login_otp_code(
                     otp_provider,
                     email,
                     timeout=int(otp_wait_timeout or 600),
                     otp_sent_at=otp_sent_at,
+                    exclude_codes=otp_exclude_codes,
                 )
                 if not code:
                     self._log("首次等待未收到验证码，尝试重发一次 email-otp/send 后再等待")
-                    resend_ok = self.send_email_otp(
-                        referer=state.current_url or state.continue_url or f"{self.AUTH}/email-verification"
-                    )
+                    resend_ok, resend_state = self.request_login_email_otp(state, return_state=True)
                     if resend_ok:
                         self._log("重发验证码成功")
+                        if self._state_is_email_otp(resend_state):
+                            state = resend_state
                     else:
-                        self._log("重发验证码失败")
+                        self._log(f"重发验证码失败: {resend_state}")
                     otp_sent_at = time.time()
                     code = self._get_login_otp_code(
                         otp_provider,
                         email,
                         timeout=int(otp_resend_wait_timeout or 300),
                         otp_sent_at=otp_sent_at,
+                        exclude_codes=otp_exclude_codes,
                     )
                 if not code:
                     return False, "未收到验证码"
@@ -1149,7 +1604,7 @@ class ChatGPTClient:
             next_state = self._state_from_url(f"{self.AUTH}/email-verification")
         return (True, next_state) if return_state else (True, "ok")
 
-    def _get_login_otp_code(self, otp_provider, email, *, timeout, otp_sent_at):
+    def _get_login_otp_code(self, otp_provider, email, *, timeout, otp_sent_at, exclude_codes=None):
         # Login re-auth and account registration can happen back-to-back.
         # The mailbox then contains both "verification code" (registration)
         # and "login code" (re-login).  Prefer the login-code subject/body so
@@ -1183,6 +1638,7 @@ class ChatGPTClient:
                     timeout=timeout,
                     otp_sent_at=otp_sent_at,
                     keyword="login code",
+                    exclude_codes=exclude_codes,
                     skip_initial_delay=True,
                 )
             except TypeError:
@@ -1197,6 +1653,7 @@ class ChatGPTClient:
                     timeout=timeout,
                     otp_sent_at=otp_sent_at,
                     keyword="login code",
+                    exclude_codes=exclude_codes,
                     skip_initial_delay=True,
                 )
             except TypeError:
@@ -1774,7 +2231,7 @@ class ChatGPTClient:
                     url,
                     headers=self._headers(
                         url,
-                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
                         referer=f"{self.BASE}/",
                         navigation=True,
                     ),
@@ -1784,6 +2241,17 @@ class ChatGPTClient:
 
                 final_url = str(r.url)
                 self._log(f"重定向到: {final_url}")
+                final_path = urlparse(final_url).path
+                if "api/accounts/authorize" in final_path or final_path == "/error":
+                    self._log_response_debug("authorize 中间页响应摘要", r)
+                    fallback_url = self.authorize_via_browser(url)
+                    fallback_path = urlparse(fallback_url or "").path
+                    if fallback_url and "api/accounts/authorize" not in fallback_path and fallback_path != "/error":
+                        self.record_fingerprint_outcome(True, reason="authorize_browser_fallback", final_url=fallback_url)
+                        return fallback_url
+                    self.record_fingerprint_outcome(False, reason="authorize_cf_or_error", final_url=fallback_url or final_url)
+                else:
+                    self.record_fingerprint_outcome(True, reason="authorize_direct", final_url=final_url)
                 return final_url
 
             except Exception as e:
@@ -2249,7 +2717,18 @@ class ChatGPTClient:
         except Exception:
             otp_resend_wait_timeout = 300
 
-        max_auth_attempts = 3
+        try:
+            from backend.core.settings import settings as _settings
+
+            # Do not burn many attempts on the same proxy/session once
+            # auth.openai.com keeps returning the authorize SPA/intermediate
+            # page.  The outer registration engine can rotate the dynamic
+            # proxy SID between full-flow retries; keeping this configurable
+            # down to 1 lets us fail fast and switch exits.
+            max_auth_attempts = max(1, min(int(_settings.get_int("chatgpt_preauth_max_attempts", 2)), 12))
+        except Exception:
+            max_auth_attempts = 2
+        self._log(f"预授权最大尝试次数: {max_auth_attempts}")
         final_url = ""
         final_path = ""
 

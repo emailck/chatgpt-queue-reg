@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Optional, Protocol
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, unquote, urlparse, urlunparse
 
 
 ACCOUNT_TYPE_MICROSOFT_OAUTH = "microsoft_oauth"
@@ -46,6 +46,59 @@ def _is_valid_mailapi_url(url: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def _extract_email_from_mailapi_url(url: str) -> str:
+    text = str(url or "").strip()
+    parsed = urlparse(text)
+    candidates: list[str] = []
+    try:
+        query = parse_qs(parsed.query, keep_blank_values=True)
+    except Exception:
+        query = {}
+    for key in ("email", "alias", "mail", "to", "address"):
+        for value in query.get(key) or []:
+            candidates.append(value)
+    for segment in reversed([part for part in parsed.path.split("/") if part]):
+        candidates.append(segment)
+    for value in candidates:
+        candidate = unquote(str(value or "").strip())
+        if _is_valid_email(candidate):
+            return candidate
+    return ""
+
+
+def _normalize_mailapi_url(url: str, email: str = "") -> str:
+    text = str(url or "").strip()
+    try:
+        parsed = urlparse(text)
+        if parsed.netloc.lower() != "ic.oai-gpt.com":
+            return text
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        email_value = str(email or "").strip() or _extract_email_from_mailapi_url(text)
+        if email_value and "email" not in query and "alias" in query:
+            query["email"] = [email_value]
+            query.pop("alias", None)
+        normalized_query = urlencode(query, doseq=True)
+        return urlunparse(parsed._replace(query=normalized_query))
+    except Exception:
+        return text
+
+
+def _icloud_public_link_error(url: str) -> str:
+    text = str(url or "").strip()
+    try:
+        parsed = urlparse(text)
+        if parsed.netloc.lower() != "ic.oai-gpt.com":
+            return ""
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if parsed.path.rstrip("/") != "/public/inbox":
+            return "ic.oai-gpt.com 取件链接必须是 /public/inbox 公共链接，不能使用 /inbox 管理台页面链接"
+        if not (query.get("account_id") and (query.get("email") or query.get("alias")) and query.get("mac")):
+            return "ic.oai-gpt.com 公共取件链接缺少 account_id/email/mac 参数"
+    except Exception:
+        return ""
+    return ""
+
+
 class MicrosoftOAuthRowParser:
     def parse(self, line_number: int, line: str) -> MicrosoftMailImportRecord:
         parts = [part.strip() for part in str(line or "").split("----")]
@@ -82,13 +135,20 @@ class MicrosoftOAuthRowParser:
 class MailApiUrlRowParser:
     def parse(self, line_number: int, line: str) -> MicrosoftMailImportRecord:
         parts = [part.strip() for part in str(line or "").split("----")]
-        if len(parts) < 2:
+        if len(parts) == 1 and _is_valid_mailapi_url(parts[0]):
+            mailapi_url = parts[0]
+            email = _extract_email_from_mailapi_url(mailapi_url)
+            if not email:
+                raise ValueError(
+                    f"行 {line_number}: URL 中未解析出邮箱，请使用 邮箱----mailapi_url 格式"
+                )
+        elif len(parts) >= 2:
+            email = parts[0]
+            mailapi_url = parts[1]
+        else:
             raise ValueError(
-                f"行 {line_number}: 格式错误，MailAPI URL 导入需为 邮箱----mailapi_url"
+                f"行 {line_number}: 格式错误，MailAPI URL 导入需为 邮箱----mailapi_url 或 单独 mailapi_url（URL 内含 email 参数）"
             )
-
-        email = parts[0]
-        mailapi_url = parts[1]
 
         if not _is_valid_email(email):
             raise ValueError(f"行 {line_number}: 无效的邮箱地址: {email}")
@@ -96,6 +156,10 @@ class MailApiUrlRowParser:
             raise ValueError(
                 f"行 {line_number}: 无效的 mailapi_url（需为 http/https）：{mailapi_url}"
             )
+        mailapi_url = _normalize_mailapi_url(mailapi_url, email)
+        icloud_error = _icloud_public_link_error(mailapi_url)
+        if icloud_error:
+            raise ValueError(f"行 {line_number}: {icloud_error}")
 
         return MicrosoftMailImportRecord(
             line_number=line_number,
@@ -193,6 +257,8 @@ class AutoDetectRowParser:
 
     def parse(self, line_number: int, line: str) -> MicrosoftMailImportRecord:
         parts = [part.strip() for part in str(line or "").split("----")]
+        if len(parts) == 1 and _is_valid_mailapi_url(parts[0]):
+            return self._mailapi_parser.parse(line_number, line)
         if len(parts) == 2 and _is_valid_mailapi_url(parts[1]):
             return self._mailapi_parser.parse(line_number, line)
         if len(parts) == 2 and parts[0].lower().endswith("@gmail.com"):
@@ -206,7 +272,7 @@ class AutoDetectRowParser:
         if len(parts) >= 4:
             return self._oauth_parser.parse(line_number, line)
         raise ValueError(
-            f"行 {line_number}: 格式错误，支持 邮箱----mailapi_url / 邮箱----AppPassword(Gmail) / 邮箱----ClientToken(TinkMail) / 邮箱----密码----授权码(163) / 邮箱----密码----client_id----refresh_token"
+            f"行 {line_number}: 格式错误，支持 单独 mailapi_url(URL 内含 email) / 邮箱----mailapi_url / 邮箱----AppPassword(Gmail) / 邮箱----ClientToken(TinkMail) / 邮箱----密码----授权码(163) / 邮箱----密码----client_id----refresh_token"
         )
 
 
@@ -250,6 +316,12 @@ class MailApiUrlFormatRule:
             return {
                 "ok": False,
                 "message": f"行 {record.line_number}: 无效的 mailapi_url（需为 http/https）：{record.mailapi_url}",
+            }
+        icloud_error = _icloud_public_link_error(record.mailapi_url)
+        if icloud_error:
+            return {
+                "ok": False,
+                "message": f"行 {record.line_number}: {icloud_error}",
             }
         return {"ok": True, "message": "ok"}
 

@@ -49,6 +49,22 @@ def run(ctx) -> None:
     api_base_url = str(payload.get("api_base_url") or config.get("api_base_url") or "https://chatgpt.com").strip()
     auth_base_url = str(payload.get("auth_base_url") or config.get("auth_base_url") or "https://auth.openai.com").strip()
     mfa_timeout_seconds = max(1, _to_int(config.get("twofauth_timeout_seconds") or 30) or 30)
+    login_otp_wait_timeout = _coerce_int(
+        payload.get("login_otp_wait_timeout")
+        or config.get("login_otp_wait_timeout_seconds")
+        or config.get("otp_wait_timeout_seconds"),
+        default=30,
+        minimum=5,
+        maximum=300,
+    )
+    login_otp_resend_wait_timeout = _coerce_int(
+        payload.get("login_otp_resend_wait_timeout")
+        or config.get("login_otp_resend_wait_timeout_seconds")
+        or config.get("otp_resend_wait_timeout_seconds"),
+        default=30,
+        minimum=5,
+        maximum=300,
+    )
 
     with session_scope() as s:
         account = s.get(ChatGPTAccount, account_id)
@@ -100,6 +116,8 @@ def run(ctx) -> None:
             "factor_type": factor_type,
             "mfa_code_provider": str(config.get("mfa_code_provider") or "local").strip().lower(),
             "twofauth_timeout_seconds": max(1, _to_int(config.get("twofauth_timeout_seconds") or 30) or 30),
+            "login_otp_wait_timeout": login_otp_wait_timeout,
+            "login_otp_resend_wait_timeout": login_otp_resend_wait_timeout,
             "proxy_provided": bool(proxy_url),
             "force_reenroll": force_reenroll,
             "verify_login_challenge": verify_login_challenge,
@@ -115,6 +133,8 @@ def run(ctx) -> None:
         mfa_provider=mfa_provider,
         proxy_url_override=proxy_url,
         max_attempts=5,
+        otp_wait_timeout=login_otp_wait_timeout,
+        otp_resend_wait_timeout=login_otp_resend_wait_timeout,
     )
 
     def _load_client() -> tuple[ChatGPTMfaClient, dict[str, Any]]:
@@ -198,6 +218,8 @@ def run(ctx) -> None:
                     proxy_url_override=proxy_url,
                     max_attempts=5,
                     force_relogin=True,
+                    otp_wait_timeout=login_otp_wait_timeout,
+                    otp_resend_wait_timeout=login_otp_resend_wait_timeout,
                 )
                 client, metadata = _load_client()
                 continue
@@ -423,6 +445,14 @@ def _to_int(value: Any) -> int:
         return int(str(value).strip())
     except Exception:
         return 0
+
+
+def _coerce_int(value: Any, *, default: int, minimum: int = 1, maximum: int = 3600) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    return max(int(minimum), min(int(maximum), parsed))
 
 
 def _as_bool(value: Any, *, default: bool = False) -> bool:

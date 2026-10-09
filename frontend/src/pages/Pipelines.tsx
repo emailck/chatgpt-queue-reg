@@ -1130,6 +1130,18 @@ function CreateForm({ form }: { form: FormInstance }) {
               </Form.Item>
             </Col>
           </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item label="登录邮箱验证码首次等待秒数" name="login_otp_wait_timeout">
+                <InputNumber min={5} max={300} placeholder="30" style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item label="登录邮箱验证码重发后等待秒数" name="login_otp_resend_wait_timeout">
+                <InputNumber min={5} max={300} placeholder="30" style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
         </>
       )}
 

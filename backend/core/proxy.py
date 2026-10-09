@@ -208,6 +208,7 @@ def render_proxy_provider(
     provider: str,
     *,
     region: str = "",
+    state: str = "",
     ttl: Any = None,
     sid: str = "",
     extra: Optional[dict[str, Any]] = None,
@@ -225,17 +226,21 @@ def render_proxy_provider(
     username_template = str(_cfg(source, prefix + "username_template", "") or "").strip()
     password = str(_cfg(source, prefix + "password", "") or "").strip()
     default_region = str(_cfg(source, prefix + "default_region", "") or "").strip()
+    default_state = str(_cfg(source, prefix + "default_state", "") or "").strip()
     default_ttl = _read_int(_cfg(source, prefix + "default_ttl", 5), 5, minimum=0, maximum=100000)
     sid_length = _read_int(_cfg(source, prefix + "sid_length", 8), 8, minimum=4, maximum=64)
     sid_chars = str(_cfg(source, prefix + "sid_charset", "") or "").strip()
 
     chosen_region = str(region or default_region or "").strip()
+    chosen_state = str(state or default_state or "").strip()
     chosen_ttl = _read_int(ttl if ttl not in (None, "") else default_ttl, default_ttl, minimum=0, maximum=100000)
     chosen_sid = str(sid or "").strip() or _sid(sid_length, sid_chars)
     values = {
         "provider": provider,
         "region": chosen_region,
         "country": chosen_region,
+        "state": chosen_state,
+        "st": chosen_state,
         "ttl": chosen_ttl,
         "duration": chosen_ttl,
         "sid": chosen_sid,
@@ -289,6 +294,15 @@ def resolve_workpool_proxy_template(
         or _cfg(source, f"proxy_provider.{provider}.default_region", "")
         or ""
     ).strip()
+    state = str(
+        payload.get("proxy_state")
+        or payload.get("state")
+        or payload.get("st")
+        or _cfg(source, wp + "proxy_state", "")
+        or _cfg(source, wp + "proxy_st", "")
+        or _cfg(source, f"proxy_provider.{provider}.default_state", "")
+        or ""
+    ).strip()
     ttl = (
         payload.get("proxy_ttl")
         or payload.get("proxy_duration")
@@ -298,7 +312,7 @@ def resolve_workpool_proxy_template(
         or _cfg(source, f"proxy_provider.{provider}.default_ttl", "")
         or ""
     )
-    return render_proxy_provider(provider, region=region, ttl=ttl, sid=sid, extra=source, source_label=f"workpool.{workpool}")
+    return render_proxy_provider(provider, region=region, state=state, ttl=ttl, sid=sid, extra=source, source_label=f"workpool.{workpool}")
 
 
 def render_default_proxy(*, extra: Optional[dict[str, Any]] = None, sid: str = "") -> RenderedProxy | None:
@@ -307,5 +321,6 @@ def render_default_proxy(*, extra: Optional[dict[str, Any]] = None, sid: str = "
     if not provider:
         return None
     region = str(source.get("default_proxy_region") or source.get(f"proxy_provider.{provider}.default_region") or "").strip()
+    state = str(source.get("default_proxy_state") or source.get(f"proxy_provider.{provider}.default_state") or "").strip()
     ttl = source.get("default_proxy_ttl") or source.get(f"proxy_provider.{provider}.default_ttl") or ""
-    return render_proxy_provider(provider, region=region, ttl=ttl, sid=sid, extra=source, source_label="default_proxy")
+    return render_proxy_provider(provider, region=region, state=state, ttl=ttl, sid=sid, extra=source, source_label="default_proxy")

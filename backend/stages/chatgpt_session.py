@@ -273,6 +273,10 @@ def _build_client_from_account(
             client.session.proxies = proxies
         client.session.headers.update(fp.base_headers())
         seed_oai_device_cookie(client.session, client.device_id)
+        try:
+            ctx.log(f"使用账号绑定指纹: impersonate={client.impersonate} ua={client.ua}")
+        except Exception:
+            pass
 
     if load_cookies:
         cookies = json_loads(account.cookies_json, fallback=[]) or []
@@ -495,6 +499,8 @@ def refresh_or_relogin_account_session(
     proxy_url_override: str = "",
     max_attempts: int = 3,
     force_relogin: bool = False,
+    otp_wait_timeout: int | None = None,
+    otp_resend_wait_timeout: int | None = None,
 ) -> dict[str, Any]:
     """Best-effort session repair after token revocation.
 
@@ -552,6 +558,8 @@ def refresh_or_relogin_account_session(
         otp_provider=otp_provider,
         mfa_provider=mfa_provider,
         max_steps=20,
+        otp_wait_timeout=otp_wait_timeout,
+        otp_resend_wait_timeout=otp_resend_wait_timeout,
     )
     if not ok:
         raise RuntimeError(f"session relogin failed: {session_or_error}")

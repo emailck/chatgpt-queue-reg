@@ -161,29 +161,22 @@ _CHROME_PROFILES = (
 # ---------------------------------------------------------------------------
 
 _FIREFOX_OS_VARIANTS = {
+    # Camoufox 当前 bundled browser 实测 UA 为 Firefox/135.0；注册链路
+    # 需要 curl_cffi TLS impersonate、HTTP UA、Camoufox navigator UA 三者一致。
+    # 之前随机到 Firefox/144/147 或 macOS 会导致 CF managed challenge
+    # 看到“声明 UA”和实际浏览器环境不一致，停在 /api/accounts/authorize。
     "windows": {
         "ua_template": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{ver}) "
             "Gecko/20100101 Firefox/{ver}"
         ),
         "viewport_choices": [(1920, 1080), (1366, 768), (1536, 864), (2560, 1440)],
-        "weight": 7,
-    },
-    "macos": {
-        "ua_template": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:{ver}) "
-            "Gecko/20100101 Firefox/{ver}"
-        ),
-        "viewport_choices": [(1440, 900), (1680, 1050), (1920, 1080)],
-        "weight": 3,
+        "weight": 1,
     },
 }
 
 _FIREFOX_PROFILES = (
-    {"major": 133, "impersonate": "firefox133", "weight": 6},
-    {"major": 135, "impersonate": "firefox135", "weight": 8},
-    {"major": 144, "impersonate": "firefox144", "weight": 8},
-    {"major": 147, "impersonate": "firefox147", "weight": 10},
+    {"major": 135, "impersonate": "firefox135", "weight": 1},
 )
 
 # 默认 auto 全走 Firefox；Chrome 只在显式 browser_mode="chrome" 时使用。
@@ -288,6 +281,68 @@ def _random_firefox_fingerprint() -> BrowserFingerprint:
         viewport_width=viewport[0],
         viewport_height=viewport[1],
     )
+
+
+def random_browserforge_fingerprint(browser_mode: str = "chrome") -> BrowserFingerprint:
+    """Generate a fingerprint using browserforge, constrained to curl_cffi targets.
+
+    browserforge provides realistic UA + client-hint combinations.  We still
+    constrain versions to curl_cffi impersonation targets so TLS fingerprint and
+    HTTP headers remain aligned.  Unsupported/alternate Chromium brands are
+    filtered out for the ChatGPT preauth probe.
+    """
+    mode = str(browser_mode or "chrome").strip().lower()
+    if mode == "firefox":
+        # Keep Firefox aligned with installed Camoufox runtime.
+        return _random_firefox_fingerprint()
+    try:
+        from browserforge.headers import HeaderGenerator  # type: ignore
+        from browserforge.headers.generator import Browser  # type: ignore
+
+        # Use versions currently supported by curl_cffi impersonation.
+        supported = [131, 133, 136, 142, 145, 146]
+        major = random.choice(supported)
+        hg = HeaderGenerator(
+            browser=[Browser("chrome", min_version=major, max_version=major)],
+            os="windows",
+            device="desktop",
+            locale="en-US",
+            http_version=2,
+            strict=True,
+        )
+        headers = {}
+        for _ in range(20):
+            headers = hg.generate()
+            ua = str(headers.get("User-Agent") or "")
+            sec = str(headers.get("sec-ch-ua") or "")
+            # Reject Brave/CCleaner/etc.  Keep plain Google Chrome only.
+            if "Chrome/" in ua and "Safari/537.36" in ua and ua.rstrip().endswith("Safari/537.36") and "Google Chrome" in sec:
+                break
+        ua = str(headers.get("User-Agent") or "")
+        sec = str(headers.get("sec-ch-ua") or "")
+        if not ua or "Chrome/" not in ua:
+            return _random_chrome_fingerprint()
+        detected = chrome_major_from_user_agent(ua) or major
+        if detected not in supported:
+            detected = major
+            ua = re.sub(r"Chrome/\d+\.0\.0\.0", f"Chrome/{major}.0.0.0", ua)
+            sec = re.sub(r'v="\d+"', f'v="{major}"', sec)
+        imp = "chrome133a" if detected == 133 else f"chrome{detected}"
+        viewport = random.choice(_CHROME_OS_VARIANTS["windows"]["viewport_choices"])
+        return BrowserFingerprint(
+            browser_type="chrome",
+            impersonate=imp,
+            user_agent=ua,
+            sec_ch_ua=sec,
+            accept_language=str(headers.get("Accept-Language") or "en-US,en;q=0.9"),
+            platform="Windows",
+            platform_version='"15.0.0"',
+            chrome_full=f"{detected}.0.0.0",
+            viewport_width=viewport[0],
+            viewport_height=viewport[1],
+        )
+    except Exception:
+        return _random_chrome_fingerprint()
 
 
 # ---------------------------------------------------------------------------

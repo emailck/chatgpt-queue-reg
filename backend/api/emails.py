@@ -20,6 +20,7 @@ from backend.integrations.mail.imports import (
     MicrosoftMailImportStrategy,
 )
 from backend.integrations.mail import pool as email_pool
+from backend.integrations.mail.email_service import _fetch_mailapi_payload, _mail_dt, wait_for_mailapi_otp
 from backend.integrations.mail.microsoft import MicrosoftMailbox, wait_for_otp
 from backend.models.email import EmailAccount, EmailMessage
 
@@ -144,6 +145,18 @@ def read_email(body: ReadRequest):
             poll_interval=5,
             since_dt=since_dt,
         )
+    elif str(meta.get("account_type") or "").strip().lower() == "mailapi_url" or str(meta.get("mailapi_url") or "").strip():
+        mailapi_url = str(meta.get("mailapi_url") or row.api_base or "").strip()
+        if not mailapi_url:
+            raise HTTPException(status_code=409, detail=f"邮箱缺少 mailapi_url: {email}")
+        data = wait_for_mailapi_otp(
+            mailapi_url=mailapi_url,
+            keyword=body.keyword,
+            code_pattern=body.code_regex,
+            timeout=int(body.timeout_seconds or 120),
+            poll_interval=5,
+            since_dt=since_dt,
+        )
     else:
         client_id = str(meta.get("client_id") or "")
         refresh_token = row.refresh_token
@@ -243,6 +256,32 @@ def _fetch_live_email_history(row: EmailAccount, *, limit: int) -> list[dict[str
         except Exception:
             return None
     meta = json_loads(row.metadata_json, fallback={}) or {}
+    if str(meta.get("account_type") or "").strip().lower() == "mailapi_url" or str(meta.get("mailapi_url") or "").strip():
+        try:
+            mailapi_url = str(meta.get("mailapi_url") or row.api_base or "").strip()
+            payload = _fetch_mailapi_payload(mailapi_url)
+            messages = [item for item in list((payload or {}).get("emails") or []) if isinstance(item, dict)]
+            messages.sort(key=lambda item: _mail_dt(item).timestamp() if _mail_dt(item) else 0, reverse=True)
+            return [
+                {
+                    "id": str(message.get("id") or message.get("date") or idx),
+                    "account_id": row.id,
+                    "job_id": None,
+                    "email": row.email,
+                    "provider": row.provider,
+                    "subject": str(message.get("subject") or ""),
+                    "sender": str(message.get("from") or message.get("sender") or ""),
+                    "recipients": [str(message.get("to") or "")] if message.get("to") else [],
+                    "body_text": str(message.get("body") or message.get("body_text") or message.get("body_preview") or message.get("preview") or ""),
+                    "code": "",
+                    "received_at": (_mail_dt(message).isoformat() if _mail_dt(message) else None),
+                    "created_at": None,
+                    "folder": str(message.get("folder") or ""),
+                }
+                for idx, message in enumerate(messages[:limit], start=1)
+            ]
+        except Exception:
+            return None
     client_id = str(meta.get("client_id") or "")
     refresh_token = row.refresh_token
     if not client_id or not refresh_token:

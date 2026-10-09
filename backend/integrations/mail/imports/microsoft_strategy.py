@@ -61,11 +61,14 @@ class MicrosoftMailImportStrategy:
         helper_text=(
             "支持两种格式并自动识别："
             "1) 邮箱----密码----client_id----refresh_token；"
-            "2) 邮箱----mailapi_url。"
+            "2) 邮箱----mailapi_url（支持 QQ / iCloud public inbox 等 HTTP 收件链接）；"
+            "3) 单独 mailapi_url，若 URL 内含 email/alias/mail 参数会自动提取邮箱。"
         ),
         content_placeholder=(
             "example@outlook.com----password----client_id----refresh_token\n"
-            "example@hotmail.com----https://mailapi.icu/key?type=html&orderNo=xxx"
+            "example@hotmail.com----https://mailapi.icu/key?type=html&orderNo=xxx\n"
+            "example@icloud.com----https://ic.oai-gpt.com/public/inbox?account_id=...&email=...&mac=...\n"
+            "https://ic.oai-gpt.com/public/inbox?account_id=...&email=example%40icloud.com&mac=..."
         ),
         preview_empty_text="当前还没有已导入的微软邮箱账号。",
     )

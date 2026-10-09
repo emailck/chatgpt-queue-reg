@@ -125,6 +125,36 @@ class AccessTokenOnlyRegistrationEngine:
             self._log(f"手机接码已开启: provider={provider.provider_name}")
         return provider
 
+    def _rotate_dynamic_proxy_for_retry(self, attempt: int) -> None:
+        """Render a fresh provider proxy for a full-flow retry.
+
+        The register stage binds one concrete URL before the engine starts.  If
+        preauth is blocked, retrying the same URL just repeats the same bad
+        exit.  For dynamic provider templates we regenerate the SID once per
+        full-flow retry while still keeping all steps of a single attempt on one
+        stable proxy.
+        """
+        raw_enabled = self.extra_config.get("chatgpt_register_rotate_proxy_on_retry")
+        if raw_enabled is not None and str(raw_enabled).strip().lower() in {"0", "false", "no", "off"}:
+            return
+        try:
+            from backend.core.proxy import resolve_workpool_proxy_template
+
+            rendered = resolve_workpool_proxy_template("register", extra=self.extra_config)
+        except Exception as exc:
+            self._log(f"动态代理重渲染失败，继续使用原代理: {exc}")
+            return
+        if not rendered or not rendered.url:
+            return
+        old = str(self.proxy_url or "")
+        self.proxy_url = rendered.url
+        if old != self.proxy_url:
+            self._log(
+                "整流程重试动态代理已切换: "
+                f"provider={rendered.provider or '-'} region={rendered.region or '-'} "
+                f"ttl={rendered.ttl or '-'} sid={rendered.sid or '-'}"
+            )
+
     @staticmethod
     def _is_email_consumed_error(message: str) -> bool:
         text = str(message or "").lower()
@@ -202,6 +232,7 @@ class AccessTokenOnlyRegistrationEngine:
                         self._log("=" * 60)
                     else:
                         self._log(f"整流程重试 {attempt + 1}/{self.max_retries} ...")
+                        self._rotate_dynamic_proxy_for_retry(attempt)
                         time.sleep(1)
 
                     # 1. 创建邮箱
@@ -279,6 +310,7 @@ class AccessTokenOnlyRegistrationEngine:
                         result.metadata = {
                             **(result.metadata or {}),
                             **identity_state,
+                            "proxy_url": self.proxy_url or "",
                             "auth_provider": session_result.get("auth_provider", ""),
                             "expires": session_result.get("expires", ""),
                             "user_id": session_result.get("user_id", ""),

@@ -54,13 +54,13 @@ def run(ctx) -> None:
 
     otp_wait_timeout = _coerce_int(
         payload.get("otp_wait_timeout") or config.get("otp_wait_timeout_seconds"),
-        default=300,
+        default=30,
         minimum=30,
         maximum=3600,
     )
     otp_resend_wait_timeout = _coerce_int(
         payload.get("otp_resend_wait_timeout") or config.get("otp_resend_wait_timeout_seconds"),
-        default=300,
+        default=30,
         minimum=30,
         maximum=3600,
     )
@@ -107,29 +107,58 @@ def run(ctx) -> None:
     from backend.integrations.mail.email_service import MicrosoftEmailService
     from backend.stages.chatgpt_session import _build_client_from_account, refresh_or_relogin_account_session
 
-    with session_scope() as s:
-        account = s.get(ChatGPTAccount, account_id)
-        if account is None:
-            raise RuntimeError(f"account {account_id} not found")
-        client = _build_client_from_account(account, ctx, proxy_url_override=proxy_url)
     email_service = MicrosoftEmailService(extra_config={"fixed_email": email})
-    mfa_provider = build_totp_adapter_from_metadata(
-        account_metadata,
-        config=config,
-        log_fn=lambda msg: ctx.log(str(msg or "")),
-        timeout_seconds=otp_wait_timeout,
-    )
 
-    ok, result = client.setup_password_existing_user(
-        email=email,
-        password=password,
-        otp_provider=email_service,
-        mfa_provider=mfa_provider,
-        access_token=access_token,
-        max_steps=max_steps,
-        otp_wait_timeout=otp_wait_timeout,
-        otp_resend_wait_timeout=otp_resend_wait_timeout,
+    proxy_retry_attempts = _coerce_int(
+        payload.get("proxy_retry_attempts") or config.get("proxy_retry_attempts"),
+        default=3,
+        minimum=1,
+        maximum=8,
     )
+    client = None
+    ok = False
+    result: Any = ""
+    for proxy_attempt in range(proxy_retry_attempts):
+        if proxy_attempt > 0:
+            rendered = resolve_workpool_proxy_template("chatgpt_password_setup", payload=payload, extra=config)
+            if rendered is not None and rendered.url:
+                proxy_url = rendered.url
+                ctx.attach_proxy(proxy_id=None, proxy_url=proxy_url)
+                ctx.log(
+                    "chatgpt_password_setup proxy retry rendered",
+                    payload={"provider": rendered.provider, "region": rendered.region, "ttl": rendered.ttl, "sid": rendered.sid},
+                )
+            else:
+                ctx.log("chatgpt_password_setup proxy retry requested but no dynamic proxy rendered", level="warning")
+
+        with session_scope() as s:
+            account = s.get(ChatGPTAccount, account_id)
+            if account is None:
+                raise RuntimeError(f"account {account_id} not found")
+            client = _build_client_from_account(account, ctx, proxy_url_override=proxy_url)
+        mfa_provider = build_totp_adapter_from_metadata(
+            account_metadata,
+            config=config,
+            log_fn=lambda msg: ctx.log(str(msg or "")),
+            timeout_seconds=otp_wait_timeout,
+        )
+
+        ok, result = client.setup_password_existing_user(
+            email=email,
+            password=password,
+            otp_provider=email_service,
+            mfa_provider=mfa_provider,
+            access_token=access_token,
+            max_steps=max_steps,
+            otp_wait_timeout=otp_wait_timeout,
+            otp_resend_wait_timeout=otp_resend_wait_timeout,
+        )
+        if ok:
+            break
+        if proxy_attempt < proxy_retry_attempts - 1 and _should_retry_with_new_proxy(result):
+            ctx.log(f"chatgpt_password_setup preauth blocked; retrying with new proxy: {result}", level="warning")
+            continue
+        break
     if not ok:
         raise RuntimeError(f"chatgpt_password_setup failed: {result}")
 
@@ -177,6 +206,17 @@ def _persist_password_setup_metadata(account_id: int, password: str) -> None:
         row.updated_at = now
         s.add(row)
         s.commit()
+
+
+def _should_retry_with_new_proxy(result: Any) -> bool:
+    text = str(result or "").lower()
+    markers = (
+        "预授权被拦截",
+        "api/accounts/authorize",
+        "cloudflare",
+        "just a moment",
+    )
+    return any(marker.lower() in text for marker in markers)
 
 
 def _workpool_config(prefix: str) -> dict[str, Any]:

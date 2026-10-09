@@ -41,3 +41,5 @@ proxies.txt
 usable_mothers_*.txt
 backups/
 runs/
+# Browser captures may contain cookies/tokens
+*.har
