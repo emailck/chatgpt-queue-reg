@@ -1189,10 +1189,17 @@ class ChatGPTClient:
                 if otp_provider is None:
                     return False, "登录需要邮箱验证码，但未提供邮箱取码服务"
                 if not otp_sent_at:
-                    # authorize -> /email-verification usually triggers the first
-                    # email.  Use a real timestamp and exclude the mailbox baseline
-                    # so we do not submit a code that was already consumed by the
-                    # previous register/password step.
+                    # Current auth flow often only displays /email-verification
+                    # after authorize; the actual email is not sent until the
+                    # explicit email-otp/send endpoint is called.  Trigger it
+                    # immediately instead of burning the first polling window.
+                    send_ok, send_state = self.request_login_email_otp(state, return_state=True)
+                    if send_ok:
+                        self._log("登录进入邮箱验证码页，已主动触发 email-otp/send")
+                        if self._state_is_email_otp(send_state):
+                            state = send_state
+                    else:
+                        self._log(f"登录主动触发 email-otp/send 失败，继续等待可能的隐式邮件: {send_state}")
                     otp_sent_at = time.time()
                 try:
                     from backend.core.settings import settings as _settings
@@ -1471,10 +1478,16 @@ class ChatGPTClient:
                 if otp_provider is None:
                     return False, "设置密码需要邮箱验证码，但未提供 otp_provider"
                 if not otp_sent_at:
-                    # HAR shows password setup sends the first email OTP as a
-                    # side effect of the authorize -> /email-verification
-                    # redirect.  Do not proactively call email-otp/send here:
-                    # it can hit Cloudflare and also delays the normal mail.
+                    # Current password setup flow may land on /email-verification
+                    # without sending any email.  Trigger email-otp/send now so
+                    # the first wait window observes a real message.
+                    send_ok, send_state = self.request_login_email_otp(state, return_state=True)
+                    if send_ok:
+                        self._log("设置密码进入邮箱验证码页，已主动触发 email-otp/send")
+                        if self._state_is_email_otp(send_state):
+                            state = send_state
+                    else:
+                        self._log(f"设置密码主动触发 email-otp/send 失败，继续等待可能的隐式邮件: {send_state}")
                     otp_sent_at = time.time()
                 code = self._get_login_otp_code(
                     otp_provider,
@@ -2806,6 +2819,16 @@ class ChatGPTClient:
 
             if self._state_is_email_otp(state):
                 self._enter_stage("otp", describe_flow_state(state))
+                if otp_send_attempts <= 0:
+                    self._log("进入邮箱验证码页，主动触发 email-otp/send")
+                    otp_send_attempts += 1
+                    send_ok = self.send_email_otp(
+                        referer=state.current_url or state.continue_url or f"{self.AUTH}/email-verification"
+                    )
+                    if send_ok:
+                        self._log(f"主动发送验证码成功: attempt={otp_send_attempts}")
+                    else:
+                        self._log(f"主动发送验证码失败: attempt={otp_send_attempts}，继续等待可能的隐式邮件")
                 self._log("等待邮箱验证码...")
                 otp_code = skymail_client.wait_for_verification_code(
                     email, timeout=otp_wait_timeout
